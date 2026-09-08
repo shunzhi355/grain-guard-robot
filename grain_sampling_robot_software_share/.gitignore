@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.python-version
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+*.cover
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Mock server test data
+mock_server_data/
+
+# ROS2
+log/
+install/
+build/
+
+# Sensitive local notes (passwords/host keys) - never publish
+.sisyphus/notepads/bin3-hardware-issue.md

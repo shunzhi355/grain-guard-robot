@@ -1,0 +1,48 @@
+#!/bin/bash
+# 板端部署脚本（在 3588 上执行）— X2P 伺服升降 + 机制服务重启验证
+# 用法（已同步源码后，板端执行）：
+#   bash scripts/deploy_x2p_board.sh
+set -e
+
+REMOTE="/home/orangepi/grain_sampling_robot_software"
+cd "$REMOTE"
+
+echo "=== 1. 安装 pyserial ==="
+pip3 install pyserial --user 2>&1 | tail -2
+
+echo "=== 2. py_compile 验证 ==="
+python3 -m py_compile \
+  src/grain_sampling_devices/mechanism_driver.py \
+  src/grain_sampling_devices/x2p_lift.py \
+  src/grain_sampling_workflow/mechanism_node.py \
+  src/grain_sampling_workflow/rc_control.py \
+  src/grain_sampling_ui/main.py \
+  src/grain_sampling_workflow/slam_bridge.py
+echo "COMPILE_OK"
+
+echo "=== 3. 验证 x2p 可导入 ==="
+PYTHONPATH="$REMOTE/src:$PYTHONPATH" python3 -c "from x2p import X2PDrive, MotionController, ControllerConfig; print('x2p import OK')"
+
+echo "=== 4. 重启 mechanism_node（X2P 自动启用，默认 /dev/ttyUSB0）==="
+source /opt/ros/noetic/setup.bash
+export ROS_MASTER_URI=http://localhost:11311
+export PYTHONPATH="$REMOTE/src:$PYTHONPATH"
+# 可选覆盖：export X2P_PORT=/dev/ttyUSB1 X2P_RPM=30 X2P_DURATION=2.0
+pkill -f grain_sampling_workflow.mechanism_node 2>/dev/null || true
+sleep 2
+nohup python3 -m grain_sampling_workflow.mechanism_node > /tmp/mechanism_node.log 2>&1 &
+sleep 6
+
+echo "=== 5. mechanism_node 日志 ==="
+tail -15 /tmp/mechanism_node.log
+
+echo "=== 6. 服务计数（期望 13）==="
+rosservice list 2>/dev/null | grep -cE '^/mechanism/'
+
+echo ""
+echo "=== 部署完成 ==="
+echo "实机验证："
+echo "  rosservice call /mechanism/press '{}'   # 下压"
+echo "  rosservice call /mechanism/lift '{}'    # 提升"
+echo "  若方向反：改板端 x2p 配置 forward_sign=-1"
+echo "  [WARN] 垂直轴需硬件急停+上下限位+防坠装置"

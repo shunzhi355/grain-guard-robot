@@ -1,0 +1,5 @@
+string direction    # "up"=向上(提升) / "down"=向下(下压)
+float32 distance_cm # 移动距离（厘米），必须 > 0
+---
+bool success
+string message

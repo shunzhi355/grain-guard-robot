@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format2.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="2">
+  <name>mechanism_node</name>
+  <version>0.1.0</version>
+  <description>ROS service definitions for the grain sampling mechanism node (set_grain).</description>
+  <maintainer email="orangepi@localhost.localdomain">orangepi</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+</package>

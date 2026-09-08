@@ -1,0 +1,28 @@
+[Unit]
+Description=Grain Sampling Robot — Full Stack
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/grain_sampling_project/grain_sampling_software
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/orangepi/.Xauthority"
+Environment="ROS_MASTER_URI=http://localhost:11311"
+Environment="ROS_HOSTNAME=localhost"
+Environment="PYTHONUNBUFFERED=1"
+ExecStartPre=/bin/sleep 5
+ExecStart=/bin/bash /home/orangepi/grain_sampling_project/grain_sampling_software/scripts/start.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grain-sampling
+
+NoNewPrivileges=no
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

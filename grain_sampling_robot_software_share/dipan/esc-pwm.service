@@ -1,0 +1,11 @@
+[Unit]
+Description=ESC PWM 1.5ms on boot
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/orangepi/esc_pin7_pwm.sh pulse 1500
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
