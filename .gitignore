@@ -1,0 +1,48 @@
+# Build outputs
+/build/
+/**/build/
+/dist/
+/install/
+/log/
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+.env
+.env.*
+
+# IDE and editor files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime and local data
+mock_server_data/
+*.log
+*.tmp
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated archive
+/grain_sampling_robot_software_share.zip
