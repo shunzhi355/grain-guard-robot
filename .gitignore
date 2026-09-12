@@ -46,3 +46,9 @@ mock_server_data/
 
 # Generated archive
 /grain_sampling_robot_software_share.zip
+
+# Codex local analysis artifacts
+/.codex-tmp/
+/tmp_edge_profile/
+/tmp_manual.txt
+/manual-page*.png
