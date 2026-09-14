@@ -74,3 +74,26 @@ python -m pytest -o addopts='-q --tb=short' test/test_industrial_hardware.py tes
 ```
 
 本地测试不能替代 ARM 工控机、ROS1 和实体设备的联调。
+
+## UI 启动与无硬件下潜预览
+
+UI 是工控机桌面上的 Qt 原生窗口，不是网页。通过 HDMI/DP 显示器、已配置的触摸屏或远程桌面查看；普通 SSH 终端不能直接显示窗口。
+新增入口会先加载系统安装的 Qt，避开 src/PySide2 与 src/PySide6 兼容文件的循环导入。Ubuntu 22.04 可安装系统 PySide2 的 qtcore、qtgui、qtwidgets、qtnetwork 包。
+
+```bash
+# 在工控机桌面终端运行，ROBOT_PROJECT 使用实际项目目录
+python3 "$ROBOT_PROJECT/scripts/start_ui.py" --check-qt
+
+# 正常主界面：保持独立 rc_node 唯一读取接收机
+export GRAIN_SAMPLING_UI_RC_PUBLISH=0
+unset QT_QPA_PLATFORM
+python3 "$ROBOT_PROJECT/scripts/start_ui.py"
+
+# 单独的无硬件界面预览，不与真实任务混用
+python3 "$ROBOT_PROJECT/scripts/start_ui.py" --preview-descent
+```
+
+预览窗口明确标为模拟，点击“已就绪”后显示下压状态，停留在该页面；不启动 ROS 节点、导航、PCA9685、伺服或机构编排器。它只验证界面状态转换，不能证明真实下潜链路正常。
+真实流程仍需导航完成反馈以及启用真实机构控制；现有编排器默认机构占位，主界面的任务创建入口尚未接通 enable_mechanism，不能仅凭“正在下压”文字认定伺服已执行。
+
+示波器台架测试保持电机主电源断开，仅启动 roscore、rc_node、cmd_vel_to_motor 和 motor_driver。底盘驱动可使用 --max-offset-us 100 --no-start-boost 限制 CH8/CH9 为约1400–1600us，目标频率50Hz，回中约1500us。不启动机构节点、目标导航或旧独立 PWM 工具。示波器探头测 CH8/CH9 Signal，参考地接 PCA9685 GND。
