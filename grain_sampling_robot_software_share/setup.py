@@ -15,10 +15,11 @@ setup(
     install_requires=[
         "PySide6",
         "paho-mqtt",
-        "rospy",
+        # ROS1 rospy is provided by the system ROS installation, not PyPI.
         "numpy",
         "opencv-python",
         "pyyaml",
+        "pyserial",
     ],
     entry_points={
         "console_scripts": [

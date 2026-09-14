@@ -38,6 +38,13 @@ CHANNELS: dict[str, int] = {
     "fan": 7,           # 负压风机（未接线，占位）
 }
 
+# 工控机 LVDS I2C 接 PCA9685；总线号可在现场通过环境变量覆盖。
+PCA9685_I2C_BUS: int = 2
+PCA9685_I2C_ADDRESS: int = 0x40
+PCA9685_I2C_DEVICE: str = ""
+PCA9685_CHASSIS_LEFT: int = 8
+PCA9685_CHASSIS_RIGHT: int = 9
+
 #: PCA9685 内部振荡器实际频率（Hz）。标称 25MHz，但实机示波器校准
 #: 2026-08-23：PRESCALE=121 时实测 55.25Hz → 振荡器 = 55.25×4096×122
 #: = 27,609,088 Hz（偏差 +10.4%）。用实测值计算 PRESCALE 才能得到
@@ -118,6 +125,11 @@ GRAIN_MECHANISM_CONFIG: dict[str, dict[str, float]] = {
 #: 2026-09-03 最终改接 Pin40 gpio-111（GPIO3_B7，纯 GPIO）。
 RC_PINS: dict[str, int] = {"CH1": 34, "CH3": 40, "CH5": 111}
 
+# 工控机 USB1 -> USB-TTL -> FS-iA10B i-BUS；串口失败报错，不回退 GPIO。
+RC_RECEIVER_BACKEND: str = "ibus"
+RC_SERIAL_PORT: str = "/dev/ttyUSB0"
+RC_SERIAL_BAUDRATE: int = 115200
+
 #: 摇杆中心脉宽（us）。
 RC_STICK_CENTER: float = 1450.0
 
@@ -146,9 +158,8 @@ RC_MAX_ANGULAR_RPS: float = 0.8  # 全速转向 rad/s
 # 3. X2P 伺服升降 —— 串口 + Modbus + 转速 + 时长 + 方向
 # ===========================================================================
 
-#: USB-RS485 串口设备路径（FTDI FT231X，udev 稳定符号链接 /dev/x2p_lift；
-#: 实际设备 ttyUSB0/1 可能随枚举变化，用序列号 D30GLD5V 绑定的符号链接保证稳定）。
-X2P_PORT: str = "/dev/x2p_lift"
+#: USB3 -> USB-RS485；暂定 ttyUSB1，现场可用 X2P_PORT 覆盖为稳定链接。
+X2P_PORT: str = "/dev/ttyUSB1"
 
 #: Modbus 从站地址（与 x2p_config.json 一致）。
 X2P_SLAVE: int = 2

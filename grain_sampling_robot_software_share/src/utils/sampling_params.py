@@ -10,6 +10,11 @@ from __future__ import annotations
 from sampling_params import *  # noqa: F401,F403
 from sampling_params import (  # noqa: F401
     CHANNELS,
+    PCA9685_I2C_BUS,
+    PCA9685_I2C_ADDRESS,
+    PCA9685_I2C_DEVICE,
+    PCA9685_CHASSIS_LEFT,
+    PCA9685_CHASSIS_RIGHT,
     CLOUD_BASE_URL,
     DEFAULT_GRAIN_PARAMS,
     DEVICE_MAC,
@@ -27,6 +32,9 @@ from sampling_params import (  # noqa: F401
     RC_MAX_LINEAR_MPS,
     RC_MODE_RANGES,
     RC_PINS,
+    RC_RECEIVER_BACKEND,
+    RC_SERIAL_PORT,
+    RC_SERIAL_BAUDRATE,
     RC_STICK_CENTER,
     SUPPORTED_GRAINS,
     X2P_DURATION_S,

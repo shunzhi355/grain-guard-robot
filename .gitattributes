@@ -1,0 +1,2 @@
+grain_sampling_robot_software_share/scripts/start_industrial_pc.sh text eol=lf
+grain_sampling_robot_software_share/config/industrial_pc.env text eol=lf

@@ -1,6 +1,14 @@
-"""RC receiver GPIO pulse-width measurement.
+"""RC receiver input adapters.
 
-Reads the three PWM channels of an hobby-grade RC receiver
+Industrial-PC default wiring uses the receiver's digital i-BUS output:
+
+    FS-iA10B i-BUS -> USB-TTL adapter -> ``/dev/ttyUSB0`` (115200 8N1)
+    -> :class:`grain_sampling_devices.ibus_receiver.IBusRCReceiver`
+
+The GPIO pulse-width backend described below remains available for legacy
+Orange Pi/board deployments and is selected explicitly with ``RC_RECEIVER_BACKEND``.
+
+The legacy backend reads the three PWM channels of an hobby-grade RC receiver
 (CH1 = forward/reverse, CH3 = steering, CH5 = two-position mode switch)
 by measuring the high-level pulse width on each GPIO input.
 
@@ -54,7 +62,12 @@ from collections import deque
 from typing import Callable, Deque, Dict, List, Mapping, Optional, Tuple, Union
 
 from grain_sampling_devices.base_adapter import DeviceError
-from utils.sampling_params import RC_PINS
+from utils.sampling_params import (
+    RC_PINS,
+    RC_RECEIVER_BACKEND,
+    RC_SERIAL_BAUDRATE,
+    RC_SERIAL_PORT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -939,25 +952,67 @@ def create_rc_receiver(
     auto_start: bool = True,
     **kwargs: object,
 ) -> _BaseRCReceiver:
-    """Return the best available RC receiver for the current host.
+    """Return the configured/best available RC receiver for the current host.
 
-    Backend selection order:
+    ``RC_RECEIVER_BACKEND`` (or the ``backend`` keyword) may be one of
+    ``ibus``/``serial``, ``gpio``/``sysfs``, ``gpiod``, ``mock`` or ``auto``.
+    The industrial-PC default is i-BUS over USB-TTL; ``auto`` tries that
+    first and then preserves the historical GPIO fallbacks.
 
-    1. :class:`RCReceiver` when sysfs GPIOs are present (RK3588 and other
+    Backend selection order for ``auto``:
+
+    1. :class:`IBusRCReceiver` when the configured serial port opens;
+    2. :class:`RCReceiver` when sysfs GPIOs are present (RK3588 and other
        classic Linux boards with ``/sys/class/gpio``);
-    2. :class:`LibgpiodRCReceiver` when libgpiod character devices and the
+    3. :class:`LibgpiodRCReceiver` when libgpiod character devices and the
        ``gpiod`` Python binding are available (Jetson Orin NX, where sysfs
        GPIO has been removed);
-    3. :class:`MockRCReceiver` otherwise, so the application keeps running
+    4. :class:`MockRCReceiver` otherwise, so the application keeps running
        (mirrors the placeholder-URL defensive pattern in ``http_client``).
     """
+    default_backend = RC_RECEIVER_BACKEND if os.name == "posix" else "mock"
+    backend = str(kwargs.pop("backend", os.environ.get("RC_RECEIVER_BACKEND", default_backend))).strip().lower()
+    if backend == "serial":
+        backend = "ibus"
+    if backend not in {"auto", "ibus", "gpio", "sysfs", "gpiod", "mock"}:
+        raise ValueError(
+            f"unknown RC_RECEIVER_BACKEND={backend!r}; expected auto, ibus, gpio, gpiod or mock"
+        )
     sysfs_pins = dict(DEFAULT_RC_PINS)
     if rc_pins:
         sysfs_pins.update(rc_pins)
     common_kwargs = {k: v for k, v in kwargs.items() if k not in _RECEIVER_ONLY_KWARGS}
 
+    # Industrial PC: FS-iA10B i-BUS through USB-TTL.  Import lazily so hosts
+    # without pyserial can still use the GPIO/mock backends.
+    if backend in ("auto", "ibus"):
+        from .ibus_receiver import IBusRCReceiver
+
+        serial_port = str(os.environ.get("RC_SERIAL_PORT", RC_SERIAL_PORT))
+        baudrate = int(os.environ.get("RC_SERIAL_BAUDRATE", str(RC_SERIAL_BAUDRATE)))
+        ibus_kwargs = dict(common_kwargs)
+        ibus_kwargs.pop("rc_pins", None)
+        try:
+            receiver = IBusRCReceiver(
+                port=serial_port,
+                baudrate=baudrate,
+                auto_start=False,
+                **ibus_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 - auto mode keeps legacy fallbacks
+            if backend == "ibus":
+                raise
+            logger.warning("i-BUS receiver init failed (%s) - trying GPIO backends", exc)
+        else:
+            if auto_start:
+                receiver.start()
+            return receiver
+
+    if backend == "mock":
+        return MockRCReceiver(rc_pins=sysfs_pins, **common_kwargs)
+
     # 1) sysfs GPIO (RK3588 / classic Linux).
-    if os.path.isdir(SYSFS_GPIO_DIR):
+    if backend in ("auto", "gpio", "sysfs") and os.path.isdir(SYSFS_GPIO_DIR):
         try:
             receiver = RCReceiver(rc_pins=sysfs_pins, auto_start=False, **kwargs)
         except Exception as exc:  # noqa: BLE001 - fall back on any init failure
@@ -970,7 +1025,7 @@ def create_rc_receiver(
             receiver.stop(unexport=False)
 
     # 2) libgpiod (Jetson Orin NX / modern kernels without sysfs GPIO).
-    if _libgpiod_available():
+    if backend in ("auto", "gpiod") and _libgpiod_available():
         jetson_pins = dict(JETSON_RC_PINS)
         if rc_pins:
             jetson_pins.update(rc_pins)
@@ -989,7 +1044,10 @@ def create_rc_receiver(
             receiver.stop(unexport=False)
 
     # 3) No real GPIO at all (Windows dev box / CI).
-    logger.warning("no GPIO backend available - using MockRCReceiver (no real GPIO)")
+    if backend in ("gpio", "sysfs", "gpiod"):
+        logger.warning("requested RC backend %s unavailable - using MockRCReceiver", backend)
+    else:
+        logger.warning("no RC backend available - using MockRCReceiver (no hardware)")
     return MockRCReceiver(rc_pins=sysfs_pins, **common_kwargs)
 
 

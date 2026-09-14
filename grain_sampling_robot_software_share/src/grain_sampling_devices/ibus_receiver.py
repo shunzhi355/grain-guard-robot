@@ -1,9 +1,8 @@
 """FlySky i-BUS receiver input over a USB TTL serial adapter.
 
-This module is intentionally separate from :mod:`rc_receiver`.  Importing or
-using it does not change the existing GPIO receiver selection.  It exposes the
-same ``read()``/``start()``/``stop()`` style API so it can be wired into the
-existing RC control node later.
+The Linux receiver factory selects this USB serial backend by default.
+It implements the existing read/start/stop API and preserves channel mapping,
+debouncing and the stale-signal timeout used by RCControl.
 
 The receiver channels used by this project are mapped as follows::
 
@@ -89,8 +88,8 @@ class IBusRCReceiver(_BaseRCReceiver):
     already opened the device.  When it is omitted, ``pyserial`` is imported
     lazily and opens ``port``.
 
-    The class is not selected by ``create_rc_receiver()`` yet; instantiate it
-    explicitly until the serial wiring and i-BUS output have been verified.
+    Set ``RC_RECEIVER_BACKEND=ibus`` to require this backend, or leave the
+    backend as ``auto`` to try i-BUS first and retain the legacy GPIO fallbacks.
     """
 
     DEFAULT_CHANNEL_MAP: Mapping[str, int] = {"CH1": 1, "CH3": 3, "CH5": 8}
@@ -181,6 +180,9 @@ class IBusRCReceiver(_BaseRCReceiver):
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 logger.debug("failed to close i-BUS serial port", exc_info=True)
         self._available = False
+        self._serial = None
+        self._buffer.clear()
+        self.reset()
 
     close = stop
 
@@ -192,6 +194,12 @@ class IBusRCReceiver(_BaseRCReceiver):
             except (OSError, IOError) as exc:
                 logger.error("i-BUS serial read failed: %s", exc)
                 self._available = False
+                self._buffer.clear()
+                self.reset()
+                try:
+                    self._serial.close()
+                finally:
+                    self._serial = None
                 return
             if chunk:
                 self._buffer.extend(chunk)
@@ -220,6 +228,9 @@ class IBusRCReceiver(_BaseRCReceiver):
                 del self._buffer[:1]
                 continue
             del self._buffer[:IBUS_FRAME_LENGTH]
+            if any(not self._valid_min <= values[channel] <= self._valid_max
+                   for channel in self.channel_map.values()):
+                continue  # Drop the complete control sample, not just one axis.
             for name, channel in self.channel_map.items():
                 self._push_sample(name, float(values[channel]))
 

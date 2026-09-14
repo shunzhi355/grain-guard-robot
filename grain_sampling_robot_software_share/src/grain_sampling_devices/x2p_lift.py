@@ -16,13 +16,14 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Optional
 
 from grain_sampling_devices.base_adapter import DeviceError
 from utils.sampling_params import (
     X2P_DURATION_S,
     X2P_FORWARD_SIGN,
-    X2P_PACKAGE_PATH,
+    X2P_PACKAGE_PATH as DEFAULT_X2P_PACKAGE_PATH,
     X2P_PORT,
     X2P_RPM,
     X2P_SLAVE,
@@ -31,7 +32,7 @@ from utils.sampling_params import (
 logger = logging.getLogger(__name__)
 
 #: x2p 包所在目录（dais516 仓库根）。默认空=依赖 sys.path；可填绝对路径。
-X2P_PACKAGE_PATH: str = X2P_PACKAGE_PATH
+X2P_PACKAGE_PATH: str = DEFAULT_X2P_PACKAGE_PATH
 
 
 def _map_lift_direction(direction: str) -> str:
@@ -82,6 +83,11 @@ def build_x2p_lift_drive(
     DeviceError
         串口不可用 / x2p 无法导入 / 配置非法。
     """
+    # x2p is deployed separately on some industrial PCs.  Add its configured
+    # parent directory immediately before the lazy import so normal imports
+    # remain safe on development machines without that package.
+    if X2P_PACKAGE_PATH and X2P_PACKAGE_PATH not in sys.path:
+        sys.path.insert(0, X2P_PACKAGE_PATH)
     try:
         from x2p import ControllerConfig, MotionController, X2PDrive
     except ImportError as exc:  # pragma: no cover - 依赖缺失

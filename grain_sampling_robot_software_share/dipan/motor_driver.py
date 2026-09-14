@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Differential tracked-base motor driver (RK3588 / Jetson Orin NX).
+Differential tracked-base motor driver.
 
 RK3588 (Orange Pi 5 Max) on-chip PWM:
   left  motor ESC signal: physical pin 7  -> pwm3-m3 -> fd8b0030.pwm
@@ -10,7 +10,9 @@ Jetson Orin NX 40-pin PWM (verified on board):
   left  motor ESC signal: physical pin 15 -> PWM1 -> pwmchip0 -> 3280000.pwm
   right motor ESC signal: physical pin 33 -> PWM5 -> pwmchip2 -> 32c0000.pwm
 
-The driver writes Linux sysfs PWM directly. Run commands with sudo.
+On the industrial PC the default backend is PCA9685 over Linux i2c-dev
+(chassis outputs are CH8/CH9).  The historical sysfs PWM backend remains
+available for Orange Pi/Jetson deployments.
 """
 
 from __future__ import annotations
@@ -25,6 +27,27 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+
+# Allow ``python dipan/motor_driver.py`` from the project root without an
+# installed package; ROS launchers may still provide PYTHONPATH themselves.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC_DIR = _PROJECT_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+try:
+    from utils.sampling_params import (
+        PCA9685_CHASSIS_LEFT,
+        PCA9685_CHASSIS_RIGHT,
+        PCA9685_I2C_ADDRESS,
+        PCA9685_I2C_BUS,
+        PCA9685_I2C_DEVICE,
+    )
+except ImportError:  # direct script execution before PYTHONPATH is set
+    PCA9685_CHASSIS_LEFT, PCA9685_CHASSIS_RIGHT = 8, 9
+    PCA9685_I2C_ADDRESS, PCA9685_I2C_BUS, PCA9685_I2C_DEVICE = 0x40, 2, ""
 
 
 PERIOD_NS = 20_000_000  # 50 Hz
@@ -108,9 +131,16 @@ def write_text(path: Path, value: str) -> None:
 
 
 class PwmOutput:
-    def __init__(self, config: MotorConfig) -> None:
+    def __init__(self, config: MotorConfig, *, backend: str = "sysfs",
+                 pca9685: object = None, channel: Optional[int] = None) -> None:
         self.config = config
-        self.base = self._find_pwm_base(config.node)
+        self.backend = backend
+        self._pca9685 = pca9685
+        self.channel = channel
+        self._mock_pulse: Optional[int] = None
+        self.base: Optional[Path] = None
+        if backend == "sysfs":
+            self.base = self._find_pwm_base(config.node)
 
     @staticmethod
     def _find_pwm_base(node: str) -> Path:
@@ -160,6 +190,9 @@ class PwmOutput:
         raise RuntimeError(f"{channel} was not created after export")
 
     def setup(self) -> None:
+        if self.backend == "pca9685":
+            return
+        assert self.base is not None
         enable = self.base / "enable"
         if enable.exists():
             try:
@@ -172,16 +205,38 @@ class PwmOutput:
 
     def set_pulse_us(self, pulse_us: int) -> None:
         pulse_us = int(clamp(pulse_us, MIN_US, MAX_US))
+        if self.backend == "pca9685":
+            if self._pca9685 is None or self.channel is None:
+                raise RuntimeError("PCA9685 output is not initialized")
+            self._pca9685.set_pwm(self.channel, pulse_us)
+            return
+        if self.backend == "mock":
+            self._mock_pulse = pulse_us
+            return
+        assert self.base is not None
         self.setup()
         write_text(self.base / "duty_cycle", str(pulse_us * 1000))
         write_text(self.base / "enable", "1")
 
     def disable(self) -> None:
+        if self.backend == "pca9685":
+            if self._pca9685 is not None and self.channel is not None:
+                self._pca9685.channel_off(self.channel)
+            return
+        if self.backend == "mock":
+            self._mock_pulse = None
+            return
+        assert self.base is not None
         enable = self.base / "enable"
         if enable.exists():
             write_text(enable, "0")
 
     def status(self) -> str:
+        if self.backend == "pca9685":
+            return f"{self.config.name}: PCA9685 CH{self.channel}"
+        if self.backend == "mock":
+            return f"{self.config.name}: mock pulse={self._mock_pulse}"
+        assert self.base is not None
         fields = []
         for name in ("period", "duty_cycle", "polarity", "enable"):
             path = self.base / name
@@ -203,15 +258,37 @@ class DifferentialMotorDriver:
         forward_only: bool = False,
         invert_left: bool = False,
         invert_right: bool = False,
+        backend: Optional[str] = None,
+        pca9685: object = None,
     ) -> None:
+        default_backend = "pca9685" if os.name == "posix" else "mock"
+        selected = (backend or os.environ.get("MOTOR_DRIVER_BACKEND", default_backend)).strip().lower()
+        if selected not in {"auto", "pca9685", "sysfs", "mock"}:
+            raise ValueError("MOTOR_DRIVER_BACKEND must be auto, pca9685, sysfs or mock")
+        if selected == "auto":
+            # Missing I2C must not silently redirect this wiring to sysfs PWM.
+            selected = default_backend
+        self.backend = selected
+        self._pca9685 = pca9685
+        if selected == "pca9685" and self._pca9685 is None:
+            from grain_sampling_devices.mechanism_driver import PCA9685
+            self._pca9685 = PCA9685(
+                bus=PCA9685_I2C_BUS,
+                address=PCA9685_I2C_ADDRESS,
+                device=PCA9685_I2C_DEVICE,
+            ).open()
         left_cfg = MotorConfig(
-            LEFT_MOTOR.name, LEFT_MOTOR.node, LEFT_MOTOR.invert_direction ^ invert_left
+            f"left CH{PCA9685_CHASSIS_LEFT}" if selected == "pca9685" else LEFT_MOTOR.name,
+            LEFT_MOTOR.node, LEFT_MOTOR.invert_direction ^ invert_left
         )
         right_cfg = MotorConfig(
-            RIGHT_MOTOR.name, RIGHT_MOTOR.node, RIGHT_MOTOR.invert_direction ^ invert_right
+            f"right CH{PCA9685_CHASSIS_RIGHT}" if selected == "pca9685" else RIGHT_MOTOR.name,
+            RIGHT_MOTOR.node, RIGHT_MOTOR.invert_direction ^ invert_right
         )
-        self.left = PwmOutput(left_cfg)
-        self.right = PwmOutput(right_cfg)
+        self.left = PwmOutput(left_cfg, backend=selected, pca9685=self._pca9685,
+                              channel=PCA9685_CHASSIS_LEFT)
+        self.right = PwmOutput(right_cfg, backend=selected, pca9685=self._pca9685,
+                               channel=PCA9685_CHASSIS_RIGHT)
         self.max_offset_us = int(clamp(max_offset_us, 1, 500))
         self.deadband = float(clamp(deadband, 0.0, 0.5))
         self.left_forward_min = float(clamp(left_forward_min, 0.0, 1.0))
@@ -286,11 +363,19 @@ class DifferentialMotorDriver:
         self.left.disable()
         self.right.disable()
 
+    def close(self) -> None:
+        """Release the PCA9685 descriptor (sysfs/mock are no-ops)."""
+        if self._pca9685 is not None:
+            closer = getattr(self._pca9685, "close", None)
+            if closer is not None:
+                closer()
+
     def status(self) -> str:
         return self.left.status() + "\n" + self.right.status()
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--backend", choices=("pca9685", "sysfs", "mock", "auto"), default=None)
     parser.add_argument("--max-offset-us", type=int, default=DEFAULT_MAX_OFFSET_US)
     parser.add_argument("--deadband", type=float, default=DEFAULT_DEADBAND)
     parser.add_argument("--left-forward-min", type=float, default=DEFAULT_LEFT_FORWARD_MIN)
@@ -305,6 +390,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 def build_driver(args: argparse.Namespace) -> DifferentialMotorDriver:
     return DifferentialMotorDriver(
+        backend=args.backend,
         max_offset_us=args.max_offset_us,
         deadband=args.deadband,
         left_forward_min=args.left_forward_min,
@@ -345,11 +431,26 @@ def parse_udp_payload(payload: str) -> Tuple[str, Optional[Tuple[float, float]]]
 
 def run_daemon(args: argparse.Namespace) -> int:
     driver = build_driver(args)
-    driver.stop()
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((args.host, args.port))
-    sock.settimeout(0.05)
+    try:
+        # Reserve the port before touching outputs; a duplicate daemon must not
+        # change the neutral state of an already running chassis.
+        sock.bind((args.host, args.port))
+        driver.stop()
+        time.sleep(args.arm_seconds)
+        sock.settimeout(0.05)
+        # Drop commands queued during arming; require a fresh command afterward.
+        sock.setblocking(False)
+        try:
+            while True:
+                sock.recvfrom(2048)
+        except BlockingIOError:
+            pass
+        sock.settimeout(0.05)
+    except BaseException:
+        driver.close()
+        sock.close()
+        raise
 
     last_command = time.monotonic()
     stopped_by_timeout = False
@@ -405,8 +506,11 @@ def run_daemon(args: argparse.Namespace) -> int:
 
             sock.sendto((json.dumps(reply, ensure_ascii=False) + "\n").encode("utf-8"), addr)
     finally:
-        driver.stop()
-        sock.close()
+        try:
+            driver.stop()
+        finally:
+            driver.close()
+            sock.close()
     return 0
 
 
@@ -444,11 +548,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_daemon.add_argument("--host", default="127.0.0.1")
     p_daemon.add_argument("--port", type=int, default=8765)
     p_daemon.add_argument("--timeout", type=float, default=0.3)
+    p_daemon.add_argument("--arm-seconds", type=float, default=3.0)
     add_common_args(p_daemon)
 
     args = parser.parse_args(argv)
 
-    if os.geteuid() != 0:
+    # PCA9685 uses /dev/i2c-* and works for users in the ``i2c`` group.  Only
+    # the legacy sysfs backend requires root; keep that check for Orange Pi
+    # while allowing an industrial-PC deployment to run unprivileged.
+    if args.command == "daemon" and (args.arm_seconds < 0 or args.timeout <= 0):
+        parser.error("--arm-seconds must be >= 0 and --timeout must be > 0")
+    requested_backend = (args.backend or os.environ.get(
+        "MOTOR_DRIVER_BACKEND", "pca9685" if os.name == "posix" else "mock")).strip().lower()
+    sysfs_backend = requested_backend == "sysfs"
+    geteuid = getattr(os, "geteuid", None)
+    if sysfs_backend and geteuid is not None and geteuid() != 0:
         print("error: run with sudo, sysfs PWM writes need root", file=sys.stderr)
         return 1
 
@@ -456,34 +570,37 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_daemon(args)
 
     driver = build_driver(args)
-    if args.command == "stop":
-        pulses = driver.stop()
-        print(f"stop: left={pulses[0]}us right={pulses[1]}us")
-    elif args.command == "off":
-        driver.off()
-        print("PWM disabled")
-    elif args.command == "status":
-        print(driver.status())
-    elif args.command == "lr":
-        pulses = driver.set_left_right(args.left, args.right)
-        print(f"lr: left={args.left:.3f}->{pulses[0]}us right={args.right:.3f}->{pulses[1]}us")
-    elif args.command == "cmd":
-        left, right, lp, rp = driver.set_cmd_normalized(args.linear, args.angular)
-        print(
-            f"cmd: linear={args.linear:.3f} angular={args.angular:.3f} "
-            f"tracks=({left:.3f},{right:.3f}) pulses=({lp},{rp})us"
-        )
-    elif args.command == "twist":
-        left, right, lp, rp = driver.set_twist(
-            args.linear_mps, args.angular_rps, args.max_track_mps, args.track_width_m
-        )
-        print(
-            f"twist: v={args.linear_mps:.3f} w={args.angular_rps:.3f} "
-            f"tracks=({left:.3f},{right:.3f}) pulses=({lp},{rp})us"
-        )
-    else:
-        parser.error(f"unknown command {args.command}")
-    return 0
+    try:
+        if args.command == "stop":
+            pulses = driver.stop()
+            print(f"stop: left={pulses[0]}us right={pulses[1]}us")
+        elif args.command == "off":
+            driver.off()
+            print("PWM disabled")
+        elif args.command == "status":
+            print(driver.status())
+        elif args.command == "lr":
+            pulses = driver.set_left_right(args.left, args.right)
+            print(f"lr: left={args.left:.3f}->{pulses[0]}us right={args.right:.3f}->{pulses[1]}us")
+        elif args.command == "cmd":
+            left, right, lp, rp = driver.set_cmd_normalized(args.linear, args.angular)
+            print(
+                f"cmd: linear={args.linear:.3f} angular={args.angular:.3f} "
+                f"tracks=({left:.3f},{right:.3f}) pulses=({lp},{rp})us"
+            )
+        elif args.command == "twist":
+            left, right, lp, rp = driver.set_twist(
+                args.linear_mps, args.angular_rps, args.max_track_mps, args.track_width_m
+            )
+            print(
+                f"twist: v={args.linear_mps:.3f} w={args.angular_rps:.3f} "
+                f"tracks=({left:.3f},{right:.3f}) pulses=({lp},{rp})us"
+            )
+        else:
+            parser.error(f"unknown command {args.command}")
+        return 0
+    finally:
+        driver.close()
 
 
 if __name__ == "__main__":
