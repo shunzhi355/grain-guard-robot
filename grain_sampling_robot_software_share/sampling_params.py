@@ -38,8 +38,8 @@ CHANNELS: dict[str, int] = {
     "fan": 7,           # 负压风机（未接线，占位）
 }
 
-# 工控机 LVDS I2C 接 PCA9685；总线号可在现场通过环境变量覆盖。
-PCA9685_I2C_BUS: int = 2
+# 工控机 TP I2C4 接 PCA9685；暂定 Linux 总线 4，需现场核实映射，可用环境变量覆盖。
+PCA9685_I2C_BUS: int = 4
 PCA9685_I2C_ADDRESS: int = 0x40
 PCA9685_I2C_DEVICE: str = ""
 PCA9685_CHASSIS_LEFT: int = 8

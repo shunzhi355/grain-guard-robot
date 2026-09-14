@@ -4,7 +4,7 @@
 # 接线约定：
 #   USB-TTL  -> FS-iA10B i-BUS（通常 /dev/ttyUSB0）
 #   USB-RS485 -> X2P 伺服（通常 /dev/ttyUSB1，建议改成 udev 稳定链接）
-#   LVDS I2C -> PCA9685（机构 CH0~CH6，底盘 CH8/CH9）
+#   TP I2C4 -> PCA9685（机构 CH0~CH6，底盘 CH8/CH9）
 #
 # 使用：
 #   bash scripts/start_industrial_pc.sh
@@ -56,6 +56,8 @@ python3 -c "import rospy, serial; from mechanism_node.srv import MoveLift, SetGr
 [[ -r "$RC_SERIAL_PORT" && -w "$RC_SERIAL_PORT" ]] ||
     fail "遥控器串口不可读写：$RC_SERIAL_PORT（检查设备名与串口组权限）"
 I2C_DEVICE="${PCA9685_I2C_DEVICE:-/dev/i2c-$PCA9685_I2C_BUS}"
+[[ -e "$I2C_DEVICE" ]] ||
+    fail "I2C 设备不存在：$I2C_DEVICE；TP 使用 I2C4，请核实设备树启用状态和 Linux 总线映射，export 不会创建设备节点"
 [[ -r "$I2C_DEVICE" && -w "$I2C_DEVICE" ]] ||
     fail "I2C 设备不可读写：$I2C_DEVICE；请核实总线号和 i2c 组权限"
 
