@@ -101,18 +101,29 @@ Debian/Ubuntu 可用 `sudo apt-get update && sudo apt-get install i2c-tools` 安
 ```bash
 python3 scripts/prepare_tp_i2c4.py \
   /home/neardi/tp-i2c4.GEcNa9/boot.original.img \
-  /home/neardi/tp-i2c4.GEcNa9/boot.tp-i2c4.img
+  /home/neardi/tp-i2c4.GEcNa9/boot.tp-i2c4-v2.img
 ```
 
 脚本只依赖 Python 标准库，只接受普通备份文件，并独占创建新文件；不会刷写分区或覆盖已有文件。
 它先校验三个数据段的 SHA-256、配置引用、板型、I2C4 别名和引脚组。
 存在实际 FIT 签名 value 时拒绝修改，需要对应签名流程；不会删除签名。
 修改以 FDT_NOP 填补缩短的 status 属性占用空间，保持镜像大小和所有数据偏移，
-仅将 I2C4 status 改为 okay 并更新 fdt 的 SHA-256。
-生成后重新解析设备树并核对其他属性、内核、resource 和所有允许范围外的字节未改变。
+第二版同时将 FIT fdt 和 resource 中 `rk-kernel.dtb` 的 I2C4 status 改为 okay。
+同时更新资源条目已有的 SHA-1/SHA-256，以及 FIT 的 fdt/resource SHA-256。
+仅接受 RSCE v0、单个默认 rk-kernel.dtb；存在多份 DTB 或格式不匹配时停止。
+生成后重新解析设备树并核对其他属性、内核、非 DTB 资源和所有允许范围外的字节未改变。
 
-本地合成 FIT 测试不能证明实体机器能启动；真实备份处理、启动恢复方式确认、
-新镜像部署、重启后设备节点及 PCA9685 通信验证仍待完成。
+第一版仅修改 FIT fdt；现场确认已写入并重启（分区和镜像 SHA-256 均为
+`331756fc8af097b80e76386fa44ba8fe26dd337b78fe7eb7017fd2d64fcdeb20`），
+运行设备树仍为 disabled。Rockchip U-Boot 在启用 RESOURCE_IMAGE 时可优先读取
+resource 内 DTB，第一版没有覆盖这一路径。
+源码依据：https://github.com/rockchip-linux/u-boot/blob/next-dev/arch/arm/mach-rockchip/boot_rkimg.c
+资源格式依据：https://github.com/rockchip-linux/u-boot/blob/next-dev/arch/arm/mach-rockchip/resource_img.c
+
+第二版仍应以 `boot.original.img` 为输入，不覆盖第一版或原始备份。
+输出应包含 `script_version: 2` 和 `resource_dtb_status: okay`。
+本地 13 项合成 FIT 测试通过，不能证明实际固件采用的引导路径或实体机器能启动；
+第二版真实备份处理、部署、重启后设备节点及 PCA9685 通信验证仍待完成。
 
 ## 本地验证
 
