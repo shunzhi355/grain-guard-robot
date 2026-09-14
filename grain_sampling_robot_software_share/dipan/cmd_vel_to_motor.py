@@ -5,8 +5,9 @@ ROS1 /cmd_vel bridge for the tracked chassis motor driver.
 Subscribes:
   /cmd_vel  geometry_msgs/Twist
 
-Sends UDP commands to:
-  /home/orangepi/底盘/motor_driver.py daemon
+Sends UDP commands to the local ``dipan/motor_driver.py`` daemon.  The
+daemon can drive the legacy Orange Pi sysfs PWM or the industrial-PC
+PCA9685 backend (CH8/CH9), selected with ``MOTOR_DRIVER_BACKEND``.
 
 The motor daemon expects normalized commands:
   cmd LINEAR ANGULAR

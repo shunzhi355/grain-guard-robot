@@ -12,7 +12,7 @@
   记录到 ``register_history``），全部动作同时记录到 ``action_history``。
 
 设计约定（mechanism-driver 计划）：
-- PCA9685：16 通道，/dev/i2c-2, 0x40, 50Hz，4096 计数/周期，25MHz 振荡器
+- PCA9685：工控机 LVDS I²C（默认 /dev/i2c-2），地址 0x40，50Hz，4096 计数/周期
 - 执行器映射：CH0/1=螺旋输送、CH2/3/4=开仓(浅/中/深)、CH5=夹紧、CH6=拧紧、
   CH7=负压风机(未接)；伺服升降(未接)
 - 脉宽标定：开/松开/拧松=1000us、关=1900us、夹紧=1900us、拧紧=1300us、停=断电释放（full-off）。
@@ -25,6 +25,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from functools import wraps
 import threading
 import time
 
@@ -42,6 +44,9 @@ from utils.sampling_params import (
     CLAMP_PULSE_OPEN,
     ENABLE_UNWIRED_CHANNELS,
     PCA9685_FREQUENCY_HZ,
+    PCA9685_I2C_ADDRESS,
+    PCA9685_I2C_BUS,
+    PCA9685_I2C_DEVICE,
     PCA9685_OSCILLATOR_HZ,
     PULSE_CLOSE,
     PULSE_MAX_US,
@@ -127,10 +132,19 @@ def clamp_pulse_us(pulse_us: float) -> float:
 
 
 
+def _serialized_i2c(method):
+    """Serialize complete I2C operations across threads and cooperating processes."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._transaction():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class PCA9685:
     """PCA9685 16 通道 PWM 驱动（Linux i2c-dev 直连，无 adafruit）。
 
-    默认硬件：Orange Pi 5 Max (RK3588)，/dev/i2c-2, 0x40, 50Hz。
+    默认硬件：工控机 LVDS I²C，/dev/i2c-2, 0x40, 50Hz。
     注意：模块顶层不打开设备；``open()`` 是显式的（Windows 上会抛 RuntimeError）。
 
     高层接口 ``set_pwm(channel, pulse_us)`` 直接写脉宽(us)——
@@ -138,14 +152,20 @@ class PCA9685:
     签名不同，二者分属真实/模拟两条链路，互不影响。
     """
 
-    def __init__(self, bus: int = 2, address: int = 0x40) -> None:
-        if not 0x03 <= address <= 0x77:
-            raise ValueError(f"I2C address must be 0x03..0x77, got 0x{address:02x}")
-        self.bus = bus
-        self.address = address
-        self.device = f"/dev/i2c-{bus}"
+    def __init__(self, bus: int = PCA9685_I2C_BUS, address: int = PCA9685_I2C_ADDRESS,
+                 device: str = PCA9685_I2C_DEVICE) -> None:
+        self.bus = int(os.environ.get("PCA9685_I2C_BUS", str(bus)))
+        self.address = int(os.environ.get("PCA9685_I2C_ADDRESS", str(address)), 0)
+        if not 0x03 <= self.address <= 0x77:
+            raise ValueError(
+                f"I2C address must be 0x03..0x77, got 0x{self.address:02x}"
+            )
+        self.device = (device or os.environ.get("PCA9685_I2C_DEVICE", "").strip()
+                       or f"/dev/i2c-{self.bus}")
         self.fd = None  # type: int | None
         self.frequency_hz = DEFAULT_FREQUENCY_HZ
+        self._io_lock = threading.RLock()
+        self._io_depth = 0
 
     # -- 打开 / 关闭 ------------------------------------------------------
     def open(self) -> "PCA9685":
@@ -161,8 +181,8 @@ class PCA9685:
             self.fd = os.open(self.device, os.O_RDWR)
         except FileNotFoundError as exc:
             raise RuntimeError(
-                f"{self.device} does not exist. Check the I2C bus number "
-                f"(PCA9685 is on /dev/i2c-2, 0x40)."
+                f"{self.device} does not exist. Check `i2cdetect -l` and set "
+                f"PCA9685_I2C_DEVICE=/dev/i2c-X (address 0x{self.address:02x})."
             ) from exc
         except PermissionError as exc:
             raise RuntimeError(
@@ -171,14 +191,11 @@ class PCA9685:
             ) from exc
         try:
             fcntl.ioctl(self.fd, I2C_SLAVE, self.address)
-        except OSError:
+            # Opening another user of the shared chip must not reset outputs.
+            self.set_frequency(DEFAULT_FREQUENCY_HZ)
+        except Exception:
             self.close()
             raise
-        # 上电/复位后 PCA9685 处于 SLEEP 模式（MODE1 bit4=1），振荡器关闭，
-        # 所有通道不输出 PWM。必须唤醒芯片并设置 50Hz 频率，否则 set_pwm
-        # 写入寄存器但执行器无反应。初始化后默认全部通道断电释放。
-        self.set_frequency(DEFAULT_FREQUENCY_HZ)
-        self.all_off()
         return self
 
     def close(self) -> None:
@@ -199,6 +216,24 @@ class PCA9685:
             raise RuntimeError("I2C device is not open")
         return self.fd
 
+    @contextmanager
+    def _transaction(self):
+        # Device symlinks resolve to the same inode, hence share this flock.
+        # The legacy standalone diagnostic CLI must not run alongside nodes.
+        with self._io_lock:
+            fd = self._require_open()
+            outer = self._io_depth == 0
+            if outer:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            self._io_depth += 1
+            try:
+                yield
+            finally:
+                self._io_depth -= 1
+                if outer:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+
+    @_serialized_i2c
     def write_register(self, register: int, value: int) -> None:
         """写单个寄存器（2 字节：寄存器地址 + 值）。"""
         if not 0x00 <= register <= 0xFF:
@@ -209,6 +244,7 @@ class PCA9685:
         if written != 2:
             raise RuntimeError(f"short I2C write: expected 2 bytes, wrote {written}")
 
+    @_serialized_i2c
     def read_register(self, register: int) -> int:
         """读单个寄存器。"""
         if not 0x00 <= register <= 0xFF:
@@ -222,10 +258,28 @@ class PCA9685:
         return data[0]
 
     # -- 频率 -------------------------------------------------------------
+    @_serialized_i2c
     def set_frequency(self, frequency_hz: float) -> float:
         """写入 PRESCALE 设置 PWM 频率（默认 50Hz），返回实际频率。"""
         prescale = frequency_to_prescale(frequency_hz)
         old_mode = self.read_register(MODE1)
+        current_prescale = self.read_register(PRESCALE)
+        mode2 = self.read_register(MODE2)
+        if (not old_mode & MODE1_SLEEP and current_prescale == prescale
+                and old_mode & MODE1_AUTO_INCREMENT
+                and mode2 & MODE2_OUTDRV and not mode2 & 0x08):
+            self.frequency_hz = prescale_to_frequency(prescale)
+            return self.frequency_hz
+
+        # Reject retiming active channels; all 16 outputs share one oscillator.
+        if not old_mode & MODE1_SLEEP:
+            for channel in range(CHANNEL_COUNT):
+                base = self._channel_base(channel)
+                on = self.read_register(base) | (self.read_register(base + 1) << 8)
+                off = self.read_register(base + 2) | (self.read_register(base + 3) << 8)
+                if not off & 0x1000 and (on & 0x1000 or (on & 0xFFF) != (off & 0xFFF)):
+                    raise RuntimeError("PCA9685 configuration differs while outputs are active; "
+                                       "stop all PWM users before changing frequency")
         sleep_mode = (old_mode & ~MODE1_RESTART) | MODE1_SLEEP
         awake_mode = (
             (old_mode & ~MODE1_SLEEP) | MODE1_AUTO_INCREMENT | MODE1_ALLCALL
@@ -236,9 +290,10 @@ class PCA9685:
         self.write_register(MODE1, awake_mode)
         time.sleep(0.005)
         self.write_register(MODE1, awake_mode | MODE1_RESTART)
-        self.write_register(MODE2, self.read_register(MODE2) | MODE2_OUTDRV)
-        self.frequency_hz = frequency_hz
-        return prescale_to_frequency(prescale)
+        # OCH=0 updates channel registers together on the transaction STOP.
+        self.write_register(MODE2, (mode2 | MODE2_OUTDRV) & ~0x08)
+        self.frequency_hz = prescale_to_frequency(prescale)
+        return self.frequency_hz
 
     # -- 通道 PWM ---------------------------------------------------------
     @staticmethod
@@ -249,6 +304,7 @@ class PCA9685:
             )
         return LED0_ON_L + 4 * channel
 
+    @_serialized_i2c
     def set_pwm(self, channel: int, pulse_us: float) -> int:
         """向指定通道写脉宽(us)：on=0、off=counts（50Hz 周期 4096 计数）。
 
@@ -258,20 +314,22 @@ class PCA9685:
         """
         counts = pulse_us_to_counts(clamp_pulse_us(pulse_us), self.frequency_hz)
         base = self._channel_base(channel)
-        self.write_register(base, 0)
-        self.write_register(base + 1, 0)
-        self.write_register(base + 2, counts & 0xFF)
-        self.write_register(base + 3, (counts >> 8) & 0x0F)
+        self._write_channel(base, 0, 0, counts & 0xFF, (counts >> 8) & 0x0F)
         return counts
 
+    @_serialized_i2c
     def channel_off(self, channel: int) -> None:
         """单通道输出关闭（LED full-off 位，断电释放，不发 PWM 波形）。"""
         base = self._channel_base(channel)
-        self.write_register(base, 0)                      # LEDn_ON_L
-        self.write_register(base + 1, 0)                  # LEDn_ON_H
-        self.write_register(base + 2, 0)                  # LEDn_OFF_L
-        self.write_register(base + 3, FULL_ON_OFF_BIT)    # LEDn_OFF_H bit4=1
+        self._write_channel(base, 0, 0, 0, FULL_ON_OFF_BIT)
 
+    def _write_channel(self, base: int, *values: int) -> None:
+        payload = bytes((base, *values))
+        written = os.write(self._require_open(), payload)
+        if written != len(payload):
+            raise RuntimeError(f"short I2C channel write: expected {len(payload)}, wrote {written}")
+
+    @_serialized_i2c
     def all_off(self) -> None:
         """全部通道输出关闭（LED full-off 位）。"""
         for channel in range(CHANNEL_COUNT):
@@ -697,18 +755,14 @@ class MechanismController(_BaseMechanismController):
             open_()
 
     def init_escs(self, hold_s: float = 3.0) -> None:
-        """全通道电调 1500us 中位初始化（武装）。
-
-        实机确认：电调需先收到中位信号（1500us）才能响应后续控制；
-        否则 full-off/无信号上电后，直接给动作脉宽电调不响应。
-        对所有 16 个通道写 ``PULSE_STOP``（1500us）并保持 ``hold_s`` 秒。
-        """
-        for ch in range(CHANNEL_COUNT):
+        """仅初始化机构 CH0–6；底盘 CH8/CH9 由 motor_driver 独立初始化。"""
+        channels = tuple(sorted(set(CHANNELS.values()) - {CHANNELS.get("fan", 7)}))
+        for ch in channels:
             self.set_pulse(ch, PULSE_STOP)
         if hold_s > 0:
             time.sleep(float(hold_s))
         self.action_history.append(
-            ("init_escs", {"channels": list(range(CHANNEL_COUNT)),
+            ("init_escs", {"channels": list(channels),
                            "hold_s": hold_s})
         )
 

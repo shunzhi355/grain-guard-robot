@@ -63,9 +63,25 @@ from grain_sampling_devices.mechanism_driver import (
     MockMechanismController,
 )
 from grain_sampling_workflow.mechanism_config import get_grain_params
-from utils.sampling_params import X2P_PORT, X2P_RPM
+from utils.sampling_params import X2P_DURATION_S, X2P_PORT, X2P_RPM
 
 logger = logging.getLogger(__name__)
+
+
+def _device_identity(path: str) -> Optional[str]:
+    """Return a stable identity for a serial device path.
+
+    ``os.readlink`` only works for udev symlinks such as ``/dev/x2p_lift``;
+    the industrial PC may be configured with a plain ``/dev/ttyUSB1`` path.
+    Combining the resolved path with ``st_rdev`` handles both forms and also
+    detects USB re-enumeration when the tty number changes.
+    """
+    try:
+        realpath = os.path.realpath(path)
+        stat_result = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return f"{realpath}:{stat_result.st_rdev}"
 
 # ---------------------------------------------------------------------------
 # 回退消息类型（无 rospy 环境，Windows 开发机 / 测试）
@@ -325,8 +341,12 @@ class MechanismNode:
         self._started = False
         #: X2P 串口重连回调（USB 断开重连时重建 lift_drive）；None 表示未启用
         self._x2p_reconnect: Optional[Callable[[], None]] = None
-        #: 上次检测到的 X2P 串口底层设备（/dev/x2p_lift 的 readlink 目标）
+        #: 当前运行时选择的 X2P 设备路径（支持 /dev/ttyUSB* 或 udev 链接）
+        self._x2p_port: str = X2P_PORT
+        #: 上次检测到的 X2P 串口设备身份（解析路径 + st_rdev）
         self._last_lift_device: Optional[str] = None
+        self._x2p_rpm: float = max(1.0, float(X2P_RPM))
+        self._x2p_duration: float = max(0.0, float(X2P_DURATION_S))
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -452,6 +472,11 @@ class MechanismNode:
         if "duration" not in kwargs and action != "stop_suction":
             kwargs["duration"] = self._duration_for(action)
 
+        # X2P may be plugged in after the ROS node starts. Try to discover and
+        # reconnect it before deciding whether press/lift is still a placeholder.
+        if action in ("press", "lift"):
+            self._ensure_lift_connected()
+
         placeholder = action in PLACEHOLDER_ACTIONS and not ENABLE_UNWIRED_CHANNELS
         # press/lift 走 X2P 伺服时不是占位（lift_drive 已注入）——否则消息会误导
         if placeholder and action in ("press", "lift") and (
@@ -565,35 +590,35 @@ class MechanismNode:
             message=f"unknown grain {req.grain!r}; using default params{reset_msg}",
         )
 
-    def set_x2p_reconnect(self, fn: Callable[[], None]) -> None:
+    def set_x2p_reconnect(self, fn: Callable[[], None], port: Optional[str] = None) -> None:
         """注入 X2P 串口重连回调（USB 断开重连时自动重建 lift_drive）。
 
-        同时记录当前底层设备号（``/dev/x2p_lift`` 的 readlink 目标），
-        供 :meth:`_ensure_lift_connected` 检测设备号变化。
+        同时记录当前设备身份，供 :meth:`_ensure_lift_connected` 检测
+        ``/dev/ttyUSB*`` 重枚举或 udev 链接目标变化。
         """
         self._x2p_reconnect = fn
-        try:
-            self._last_lift_device = os.readlink(X2P_PORT)
-        except OSError:
-            self._last_lift_device = None
+        # Keep the runtime-selected port (for example /dev/ttyUSB1 on the
+        # industrial PC) instead of consulting the historical global default.
+        self._x2p_port = port or X2P_PORT
+        self._last_lift_device = _device_identity(self._x2p_port)
 
     def _lift_device_changed(self) -> bool:
-        """检测 /dev/x2p_lift 底层设备号是否变化（USB 重枚举）。"""
+        """检测 X2P 设备身份是否变化（USB 重枚举或设备暂时消失）。"""
         if self._x2p_reconnect is None:
             return False
-        try:
-            target = os.readlink(X2P_PORT)
-        except OSError:
+        target = _device_identity(self._x2p_port)
+        # 初始状态和当前都不存在时不触发重连；其余变化（消失、出现、
+        # tty 编号变化或 udev 链接目标变化）都需要重建串口句柄。
+        if getattr(self._controller, "lift_drive", None) is None and target is not None:
+            return True
+        if target is None and self._last_lift_device is None:
             return False
         return target != self._last_lift_device
 
     def _reconnect_lift_and_track(self) -> None:
         """重建 lift_drive 并更新记录的设备号；重建后立即安全停机。"""
         self._x2p_reconnect()
-        try:
-            self._last_lift_device = os.readlink(X2P_PORT)
-        except OSError:
-            self._last_lift_device = None
+        self._last_lift_device = _device_identity(self._x2p_port)
         # 断连瞬间伺服可能仍在运行（保持最后速度命令），重建后立即停机，
         # 避免重试 move 时伺服跑飞。
         try:
@@ -645,7 +670,7 @@ class MechanismNode:
                 success=False, message="distance_cm 必须大于 0"
             )
         # 时长按 X2P_RPM 与 5mm 导程自动计算，留 20% 余量避免接近段超 max_rpm
-        rpm = max(1.0, float(X2P_RPM))
+        rpm = max(1.0, float(self._x2p_rpm))
         duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0) * 1.2
         self._ensure_lift_connected()
         try:
@@ -692,7 +717,8 @@ def main() -> None:
     """启动入口（板端运行：真实控制器；开发机：mock 模式）。
 
     可选参数（环境变量，便于 start.sh 注入；默认值取自 utils.sampling_params）：
-    - ``X2P_PORT``：X2P 伺服串口（默认 /dev/ttyUSB0）；设空串禁用 X2P
+    - ``X2P_PORT``：X2P 伺服串口（工控机启动脚本默认 /dev/ttyUSB1，
+      也可使用 /dev/x2p_lift 稳定链接）；设空串禁用 X2P
     - ``X2P_SLAVE``：Modbus 从站地址（默认 2）
     - ``X2P_RPM``：升降转速 r/min（默认 30）
     - ``X2P_DURATION``：升降时长秒（默认 2.0）
@@ -710,45 +736,67 @@ def main() -> None:
 
     controller = MechanismController(mock_mode=not HAS_ROS)
     reconnect_lift = None  # X2P 串口重连回调（USB 断开重连后重建 lift_drive）
+    x2p_port = os.environ.get("X2P_PORT", X2P_PORT)
+    runtime_x2p_slave = int(os.environ.get("X2P_SLAVE", str(X2P_SLAVE)))
+    runtime_x2p_rpm = max(1, int(os.environ.get("X2P_RPM", str(X2P_RPM))))
+    runtime_x2p_duration = max(
+        0.0, float(os.environ.get("X2P_DURATION", str(X2P_DURATION_S)))
+    )
+    runtime_x2p_forward_sign = int(
+        os.environ.get("X2P_FORWARD_SIGN", str(X2P_FORWARD_SIGN))
+    )
     if HAS_ROS:
         controller.open()
         # 电调 1500us 中位初始化（实机确认：电调需先收到中位信号才能
         # 响应控制；full-off/无信号上电后直接给动作脉宽不响应）。
         try:
             controller.init_escs(hold_s=3.0)
-            logger.info("电调 1500us 中位初始化完成（全通道）")
+            logger.info("机构 CH0–6 电调 1500us 中位初始化完成")
         except Exception as exc:  # noqa: BLE001 - 初始化失败不阻塞服务
             logger.warning("电调初始化失败: %s", exc)
         # 尝试接入 X2P 伺服升降（失败仅告警，退回占位）
-        x2p_port = os.environ.get("X2P_PORT", X2P_PORT)
-
         def _build_lift() -> object:
             from grain_sampling_devices.x2p_lift import build_x2p_lift_drive
 
             return build_x2p_lift_drive(
                 port=x2p_port,
-                slave=int(os.environ.get("X2P_SLAVE", str(X2P_SLAVE))),
-                rpm=int(os.environ.get("X2P_RPM", str(X2P_RPM))),
-                duration_s=float(os.environ.get("X2P_DURATION", str(X2P_DURATION_S))),
-                forward_sign=int(
-                    os.environ.get("X2P_FORWARD_SIGN", str(X2P_FORWARD_SIGN))
-                ),
+                slave=runtime_x2p_slave,
+                rpm=runtime_x2p_rpm,
+                duration_s=runtime_x2p_duration,
+                forward_sign=runtime_x2p_forward_sign,
             )
 
         def _reconnect_lift() -> None:
-            controller.lift_drive = _build_lift()
+            old_drive = getattr(controller, "lift_drive", None)
+            new_drive = _build_lift()
+            controller.lift_drive = new_drive
+            if old_drive is not None and old_drive is not new_drive:
+                try:
+                    old_drive.stop()
+                except Exception:  # noqa: BLE001 - replacement is best effort
+                    pass
+                try:
+                    old_drive.close()
+                except Exception:  # noqa: BLE001 - replacement is best effort
+                    pass
             logger.info("X2P 伺服升降已重连: port=%s", x2p_port)
 
         if x2p_port:
             try:
                 controller.lift_drive = _build_lift()
                 logger.info("X2P 伺服升降已启用: port=%s", x2p_port)
-                reconnect_lift = _reconnect_lift
             except Exception as exc:  # noqa: BLE001 - 升降缺失不阻塞机构服务
                 logger.warning("X2P 伺服升降未启用: %s", exc)
+            # Keep the callback even when the first open fails. If the USB-RS485
+            # adapter is inserted later, press/lift/move_lift can reconnect it.
+            reconnect_lift = _reconnect_lift
+    controller.lift_rpm = runtime_x2p_rpm
+    controller.lift_duration = runtime_x2p_duration
     node = MechanismNode(controller=controller)
-    if reconnect_lift is not None:
-        node.set_x2p_reconnect(reconnect_lift)
+    node._x2p_rpm = float(runtime_x2p_rpm)
+    node._x2p_duration = runtime_x2p_duration
+    if reconnect_lift is not None and x2p_port:
+        node.set_x2p_reconnect(reconnect_lift, port=x2p_port)
     try:
         node.run()
     finally:
