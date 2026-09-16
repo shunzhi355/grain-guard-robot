@@ -839,6 +839,10 @@ def main() -> int:
     )
 
     app = QApplication(sys.argv)
+    # Some lightweight X11 window managers briefly unmap a window created by
+    # a process launched outside the desktop session.  Keep the event loop
+    # alive and present the window again once X11 event handling has started.
+    app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("粮食扦样机器人")
     app.setApplicationVersion("0.1.0")
     app.setStyleSheet(THEME_QSS)
@@ -846,6 +850,9 @@ def main() -> int:
 
     window = MainWindow()
     window.show()
+    QTimer.singleShot(250, window.show)
+    QTimer.singleShot(300, window.raise_)
+    QTimer.singleShot(350, window.activateWindow)
 
     # Start ROS in background FIRST so the connection indicator lights up
     # immediately (graceful degradation if unavailable).  Deferred work such
