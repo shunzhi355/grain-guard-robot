@@ -755,7 +755,7 @@ class MechanismController(_BaseMechanismController):
             open_()
 
     def init_escs(self, hold_s: float = 3.0) -> None:
-        """仅初始化机构 CH0–6；底盘 CH8/CH9 由 motor_driver 独立初始化。"""
+        """仅初始化机构 CH0–6；底盘 CH10/CH9 由 motor_driver 独立初始化。"""
         channels = tuple(sorted(set(CHANNELS.values()) - {CHANNELS.get("fan", 7)}))
         for ch in channels:
             self.set_pulse(ch, PULSE_STOP)

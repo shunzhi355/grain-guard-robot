@@ -1,28 +1,26 @@
 [Unit]
-Description=Grain Sampling Robot — Full Stack
+Description=Grain Sampling Robot ROS1 Hardware Stack
 After=network.target
 Wants=network.target
+Conflicts=grain-rc-pwm-test.service
 
 [Service]
-Type=simple
-User=orangepi
-Group=orangepi
-WorkingDirectory=/home/orangepi/grain_sampling_project/grain_sampling_software
-Environment="DISPLAY=:0"
-Environment="XAUTHORITY=/home/orangepi/.Xauthority"
-Environment="ROS_MASTER_URI=http://localhost:11311"
-Environment="ROS_HOSTNAME=localhost"
+Type=oneshot
+User=neardi
+Group=neardi
+SupplementaryGroups=dialout i2c
+Environment="HOME=/home/neardi"
 Environment="PYTHONUNBUFFERED=1"
-ExecStartPre=/bin/sleep 5
-ExecStart=/bin/bash /home/orangepi/grain_sampling_project/grain_sampling_software/scripts/start.sh
+Environment="MECHANISM_WS_SETUP=/home/neardi/mechanism_ws/devel/setup.bash"
+RemainAfterExit=yes
+ExecStart=/bin/bash "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share/scripts/start_industrial_pc.sh"
+ExecStop=/bin/bash "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share/scripts/stop_industrial_pc.sh"
+TimeoutStartSec=30
+TimeoutStopSec=15
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=grain-sampling
-
-NoNewPrivileges=no
-PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

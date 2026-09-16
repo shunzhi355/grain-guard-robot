@@ -67,11 +67,16 @@ def test_second_open_preserves_every_output_and_frequency(chip):
 def test_chassis_and_mechanism_initialization_are_isolated(chip):
     chassis = motor.DifferentialMotorDriver(backend="pca9685", pca9685=md.PCA9685().open())
     chassis.set_left_right(0.5, -0.5)
-    base = md.LED0_ON_L + 4 * 8
-    chassis_before = bytes(chip.registers[base:base + 8])
+    chassis_before = {
+        channel: bytes(chip.registers[md.LED0_ON_L + 4 * channel:md.LED0_ON_L + 4 * channel + 4])
+        for channel in (9, 10)
+    }
     mechanism = md.MechanismController(pca9685=md.PCA9685().open())
     mechanism.init_escs(hold_s=0)
-    assert bytes(chip.registers[base:base + 8]) == chassis_before
+    assert {
+        channel: bytes(chip.registers[md.LED0_ON_L + 4 * channel:md.LED0_ON_L + 4 * channel + 4])
+        for channel in (9, 10)
+    } == chassis_before
     assert mechanism.action_history[-1][1]["channels"] == list(range(7))
     mechanism_before = bytes(chip.registers[md.LED0_ON_L:md.LED0_ON_L + 4 * 7])
     chassis.stop()
@@ -138,13 +143,13 @@ def test_linux_motor_default_requires_pca9685(monkeypatch):
     factory.assert_called_once()
 
 
-def test_motor_neutral_and_off_use_only_ch8_ch9():
+def test_motor_neutral_and_off_use_only_ch10_ch9():
     pca = MagicMock()
     driver = motor.DifferentialMotorDriver(backend="pca9685", pca9685=pca)
     assert driver.stop() == (1500, 1500)
-    assert pca.set_pwm.call_args_list == [call(8, 1500), call(9, 1500)]
+    assert pca.set_pwm.call_args_list == [call(10, 1500), call(9, 1500)]
     driver.off()
-    assert pca.channel_off.call_args_list == [call(8), call(9)]
+    assert pca.channel_off.call_args_list == [call(10), call(9)]
     pca.all_off.assert_not_called()
 
 
@@ -179,7 +184,7 @@ def feed(rx, data):
 
 def test_ibus_fragmented_noisy_stream_maps_receiver_ch8_to_mode():
     rx = receiver()
-    frame = build_ibus_frame({1: 1900, 3: 1200, 8: 1000})
+    frame = build_ibus_frame({3: 1900, 1: 1200, 8: 1000})
     feed(rx, b"noise" + frame[:1])
     feed(rx, frame[1:17])
     assert rx.read("CH1") is None
@@ -190,12 +195,12 @@ def test_ibus_fragmented_noisy_stream_maps_receiver_ch8_to_mode():
 
 def test_ibus_bad_checksum_and_invalid_controls_do_not_refresh_signal():
     rx = receiver()
-    frame = bytearray(build_ibus_frame({1: 1800}))
+    frame = bytearray(build_ibus_frame({3: 1800}))
     frame[-1] ^= 1
     assert parse_ibus_frame(bytes(frame)) is None
-    feed(rx, frame + build_ibus_frame({1: 65535, 3: 1800, 8: 1000}))
+    feed(rx, frame + build_ibus_frame({3: 65535, 1: 1800, 8: 1000}))
     assert rx.read() == {"CH1": None, "CH3": None, "CH5": None}
-    feed(rx, build_ibus_frame({1: 1900, 3: 1500, 8: 1000}))
+    feed(rx, build_ibus_frame({3: 1900, 1: 1500, 8: 1000}))
     assert rx.read("CH1") == 1900
     rx.stop()
 
@@ -205,7 +210,7 @@ def test_ibus_stale_signal_stops_manual_chassis():
     rx = receiver(clock=lambda: now[0])
     bridge = MagicMock()
     control = RCControl(rx, bridge, debounce_samples=1)
-    feed(rx, build_ibus_frame({1: 2000, 3: 1500, 8: 1000}))
+    feed(rx, build_ibus_frame({3: 2000, 1: 1500, 8: 1000}))
     control.tick()
     assert control.last_cmd_vel[0] > 0
     now[0] += 0.6
@@ -218,7 +223,7 @@ def test_usb_disconnect_immediately_discards_old_throttle():
     serial_port = MagicMock()
     serial_port.read.side_effect = OSError("USB unplugged")
     rx = receiver(serial_port)
-    feed(rx, build_ibus_frame({1: 2000, 8: 1000}))
+    feed(rx, build_ibus_frame({3: 2000, 8: 1000}))
     assert rx.read("CH1") == 2000
     rx._read_loop()
     assert not rx.is_available

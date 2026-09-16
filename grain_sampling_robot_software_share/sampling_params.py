@@ -38,11 +38,11 @@ CHANNELS: dict[str, int] = {
     "fan": 7,           # 负压风机（未接线，占位）
 }
 
-# 工控机 TP I2C4 接 PCA9685；暂定 Linux 总线 4，需现场核实映射，可用环境变量覆盖。
-PCA9685_I2C_BUS: int = 4
+# LPB3588 实机确认 PCA9685 映射到 Linux I2C2，可用环境变量覆盖。
+PCA9685_I2C_BUS: int = 2
 PCA9685_I2C_ADDRESS: int = 0x40
-PCA9685_I2C_DEVICE: str = ""
-PCA9685_CHASSIS_LEFT: int = 8
+PCA9685_I2C_DEVICE: str = ""  # 由 config/industrial_pc.env 设置为 /dev/i2c-2
+PCA9685_CHASSIS_LEFT: int = 10  # CH8 实机异常，左侧信号改接 CH10（2026-09-16）
 PCA9685_CHASSIS_RIGHT: int = 9
 
 #: PCA9685 内部振荡器实际频率（Hz）。标称 25MHz，但实机示波器校准
@@ -119,13 +119,14 @@ GRAIN_MECHANISM_CONFIG: dict[str, dict[str, float]] = {
 # 2. 遥控 —— RC 通道 GPIO + 死区 + 档位带 + 速度标定
 # ===========================================================================
 
-#: RC 接收机通道 → sysfs GPIO 号（板端实测）。
+#: 旧 GPIO 接收方式的逻辑通道 → sysfs GPIO 号（板端实测）。
 #: CH1 → Pin15 gpio-34、CH3 → Pin22 gpio-40、CH5(接收机CH8模式开关) → Pin40 gpio-111。
 #: 注：CH5 原接 Pin24 gpio-44（SPI0_CS0）抖动、Pin16 gpio-35 读到摇杆信号，
 #: 2026-09-03 最终改接 Pin40 gpio-111（GPIO3_B7，纯 GPIO）。
 RC_PINS: dict[str, int] = {"CH1": 34, "CH3": 40, "CH5": 111}
 
 # 工控机 USB1 -> USB-TTL -> FS-iA10B i-BUS；串口失败报错，不回退 GPIO。
+# i-BUS 实机扫描确认：物理 CH3=油门，CH1=转向，CH8=手动/自动模式。
 RC_RECEIVER_BACKEND: str = "ibus"
 RC_SERIAL_PORT: str = "/dev/ttyUSB0"
 RC_SERIAL_BAUDRATE: int = 115200

@@ -7,7 +7,7 @@ Subscribes:
 
 Sends UDP commands to the local ``dipan/motor_driver.py`` daemon.  The
 daemon can drive the legacy Orange Pi sysfs PWM or the industrial-PC
-PCA9685 backend (CH8/CH9), selected with ``MOTOR_DRIVER_BACKEND``.
+PCA9685 backend (left CH10 / right CH9), selected with ``MOTOR_DRIVER_BACKEND``.
 
 The motor daemon expects normalized commands:
   cmd LINEAR ANGULAR

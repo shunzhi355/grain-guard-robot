@@ -28,10 +28,6 @@ from utils.sampling_params import RC_MAX_ANGULAR_RPS, RC_MAX_LINEAR_MPS  # noqa:
 LOG = logging.getLogger("rc_pwm_test")
 
 
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
 class DirectMotorBridge:
     """Small RCControl bridge that writes directly to the motor driver."""
 
@@ -44,9 +40,10 @@ class DirectMotorBridge:
         self.last_result = (0.0, 0.0, left_us, right_us)
 
     def publish_cmd_vel(self, linear_mps: float, angular_rps: float) -> None:
-        linear = clamp(linear_mps / RC_MAX_LINEAR_MPS, -1.0, 1.0)
-        angular = clamp(angular_rps / RC_MAX_ANGULAR_RPS, -1.0, 1.0)
-        self.last_result = self.driver.set_cmd_normalized(linear, angular)
+        linear = max(-1.0, min(1.0, linear_mps / RC_MAX_LINEAR_MPS))
+        angular = max(-1.0, min(1.0, angular_rps / RC_MAX_ANGULAR_RPS))
+        left, right, left_us, right_us = self.driver.set_cmd_normalized(linear, angular)
+        self.last_result = (left, right, left_us, right_us)
 
     def stop(self) -> None:
         left_us, right_us = self.driver.stop()
@@ -55,7 +52,7 @@ class DirectMotorBridge:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Test i-BUS remote control to PCA9685 CH8/CH9 PWM output"
+        description="Test i-BUS remote control to PCA9685 CH10/CH9 PWM output"
     )
     parser.add_argument("--port", default=os.environ.get("RC_SERIAL_PORT", "/dev/ttyUSB0"))
     parser.add_argument(
@@ -87,7 +84,7 @@ def run(args: argparse.Namespace) -> int:
         driver = DifferentialMotorDriver(backend="pca9685", max_offset_us=args.max_offset_us)
         bridge = DirectMotorBridge(driver)
         bridge.stop()
-        LOG.info("PCA9685 initialized; CH8/CH9 neutral at 1500 us for %.1f s", args.arm_seconds)
+        LOG.info("PCA9685 initialized; CH10/CH9 neutral at 1500 us for %.1f s", args.arm_seconds)
         deadline = time.monotonic() + args.arm_seconds
         while running and time.monotonic() < deadline:
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
@@ -97,7 +94,7 @@ def run(args: argparse.Namespace) -> int:
         receiver = IBusRCReceiver(port=args.port, baudrate=args.baudrate)
         control = RCControl(receiver, bridge)
         LOG.info(
-            "RC PWM test ready: %s at %d baud; physical i-BUS CH8 selects manual/auto",
+            "RC PWM test ready: %s at %d baud; i-BUS CH3=throttle CH1=steering CH8=mode",
             args.port,
             args.baudrate,
         )
@@ -143,7 +140,7 @@ def run(args: argparse.Namespace) -> int:
         if driver is not None:
             try:
                 driver.stop()
-                LOG.info("service stopped; CH8/CH9 returned to 1500 us")
+                LOG.info("service stopped; CH10/CH9 returned to 1500 us")
             finally:
                 driver.close()
 
