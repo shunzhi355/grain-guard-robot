@@ -669,10 +669,11 @@ class MechanismNode:
         """move_lift：按距离移动伺服升降（编码器闭环，精确停在目标距离）。"""
         direction = str(req.direction).strip().lower()
         distance_cm = float(req.distance_cm)
-        if direction not in ("up", "down"):
+        if direction not in ("up", "down", "down_cycle", "return"):
             return MoveLift._response_class(
                 success=False,
-                message=f"方向必须是 up/down，得到 {req.direction!r}",
+                message=("方向必须是 up/down/down_cycle/return，"
+                         f"得到 {req.direction!r}"),
             )
         if not distance_cm > 0:
             return MoveLift._response_class(
@@ -708,7 +709,7 @@ def main() -> None:
     - ``X2P_PORT``：X2P 伺服串口（工控机启动脚本默认 /dev/ttyUSB1，
       也可使用 /dev/x2p_lift 稳定链接）；设空串禁用 X2P
     - ``X2P_SLAVE``：Modbus 从站地址（默认 2）
-    - ``X2P_RPM``：升降转速 r/min（默认 30）
+    - ``X2P_RPM``：升降转速 r/min（默认值见 sampling_params.py）
     - ``X2P_DURATION``：升降时长秒（默认 2.0）
     - ``X2P_FORWARD_SIGN``：升降方向 1/-1（默认 1）
     """

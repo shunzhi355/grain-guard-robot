@@ -12,6 +12,7 @@ import pytest
 
 from grain_sampling_devices.base_adapter import DeviceError
 from grain_sampling_devices.mechanism_driver import MechanismController
+from grain_sampling_devices.mechanism_driver import _RecordingPCA9685
 from grain_sampling_devices.x2p_lift import _LiftDrive, build_x2p_lift_drive
 
 
@@ -185,3 +186,95 @@ def test_close_closes_lift_drive(monkeypatch):
                                lift_drive=_LiftDrive(fake, rpm=30, duration_s=2.0))
     ctrl.close()
     assert fake.drive.closed is True
+
+
+# ── 自动下压的绝对原点回程 ────────────────────────────────
+
+
+class _FakeCycleLift:
+    """仅记录调用的升降轴；不连接串口，也不产生任何动作。"""
+
+    counts_per_mm = 26_214.4
+    config = type("Config", (), {"encoder_forward_sign": 1})()
+
+    def __init__(self, position=20):
+        self.position = position
+        self.distance_calls = []
+        self.absolute_calls = []
+        self.fail_absolute = False
+
+    def read_position(self):
+        return self.position
+
+    def move_distance(self, direction, distance_mm, duration_s, tolerance_mm):
+        self.distance_calls.append(
+            (direction, distance_mm, duration_s, tolerance_mm)
+        )
+        return {"direction": direction}
+
+    def move_to_position(self, target, duration_s, tolerance_mm):
+        self.absolute_calls.append((target, duration_s, tolerance_mm))
+        if self.fail_absolute:
+            raise RuntimeError("simulated absolute move failure")
+        self.position = target
+        return {"target_position": target}
+
+
+def _cycle_controller(lift):
+    return MechanismController(
+        pca9685=_RecordingPCA9685(), mock_mode=True, lift_drive=lift
+    )
+
+
+def test_press_cycle_returns_to_saved_origin_with_clearance():
+    lift = _FakeCycleLift(position=20)
+    ctrl = _cycle_controller(lift)
+
+    ctrl.move_lift("down_cycle", 20.0, duration_s=3.0)
+    # 模拟下压后存在误差；回程仍必须以最初的 20 pulse 为基准。
+    lift.position = -5_212_400
+    ctrl.move_lift("return", 20.0, duration_s=3.0)
+
+    # 20 - round(5 mm * 26214.4 pulse/mm) = -131052，即原点下方 5 mm。
+    assert lift.absolute_calls == [(-131_052, 3.0, 2.0)]
+    assert ctrl._lift_cycle_origin is None
+
+
+def test_return_without_saved_origin_is_rejected():
+    ctrl = _cycle_controller(_FakeCycleLift())
+    with pytest.raises(RuntimeError, match="没有已保存"):
+        ctrl.move_lift("return", 20.0, duration_s=3.0)
+
+
+def test_second_down_cycle_cannot_overwrite_saved_origin():
+    lift = _FakeCycleLift(position=20)
+    ctrl = _cycle_controller(lift)
+    ctrl.move_lift("down_cycle", 20.0, duration_s=3.0)
+    lift.position = -123_456
+
+    with pytest.raises(RuntimeError, match="拒绝覆盖原点"):
+        ctrl.move_lift("down_cycle", 20.0, duration_s=3.0)
+    assert ctrl._lift_cycle_origin == 20
+
+
+def test_failed_return_keeps_origin_for_diagnostics_and_safe_retry():
+    lift = _FakeCycleLift(position=20)
+    ctrl = _cycle_controller(lift)
+    ctrl.move_lift("down_cycle", 20.0, duration_s=3.0)
+    lift.position = -5_212_400
+    lift.fail_absolute = True
+
+    with pytest.raises(RuntimeError, match="simulated absolute move failure"):
+        ctrl.move_lift("return", 20.0, duration_s=3.0)
+    assert ctrl._lift_cycle_origin == 20
+
+
+def test_manual_up_down_do_not_enter_paired_cycle_state():
+    lift = _FakeCycleLift(position=20)
+    ctrl = _cycle_controller(lift)
+
+    ctrl.move_lift("down", 1.0, duration_s=1.0)
+    ctrl.move_lift("up", 1.0, duration_s=1.0)
+
+    assert [call[0] for call in lift.distance_calls] == ["down", "up"]
+    assert ctrl._lift_cycle_origin is None

@@ -429,9 +429,9 @@ class WorkflowOrchestrator:
             # 状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度）。
             press_cycle = (
                 ("clamp", self._bridge.call_clamp, d["clamp"]),
-                ("press", lambda: self._bridge.call_move_lift("down", step_cm), d["servo"]),
+                ("press", lambda: self._bridge.call_move_lift("down_cycle", step_cm), d["servo"]),
                 ("unclamp", self._bridge.call_unclamp, d["unclamp"]),
-                ("lift", lambda: self._bridge.call_move_lift("up", step_cm), d["servo"]),
+                ("lift", lambda: self._bridge.call_move_lift("return", step_cm), d["servo"]),
                 ("clamp", self._bridge.call_clamp, d["clamp"]),  # 再夹紧，准备下一次下压
             )
             if not self._run_mechanism_sequence(press_cycle):

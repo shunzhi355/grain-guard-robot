@@ -12,6 +12,7 @@ In stub mode (no ``rospy``), all calls return ``True`` immediately.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -339,7 +340,10 @@ class SamplingBridge:
         """Move the X2P servo lift by an exact distance (encoder closed-loop).
 
         Calls ``/mechanism/move_lift`` (``mechanism_node/MoveLift``, request
-        carries ``direction`` ``up``/``down`` and ``distance_cm``).  This is
+        carries ``direction`` ``up``/``down``/``down_cycle``/``return`` and
+        ``distance_cm``). ``down_cycle`` captures the absolute encoder origin;
+        its paired ``return`` stops below that origin by a safety clearance.
+        This is
         the precise-distance control (encoding feedback, tolerance ~5mm),
         unlike :meth:`call_press`/``call_lift`` which are short speed-mode
         jogs.  Stub mode (no ROS) returns True.
@@ -349,21 +353,37 @@ class SamplingBridge:
             return True
 
         service_name = "/mechanism/move_lift"
+        started = time.monotonic()
+        logger.info(
+            "SERVICE_CALL_BEGIN service=%s direction=%s distance_cm=%.3f node=%s "
+            "master=%s thread=%s",
+            service_name, direction, distance_cm, self._ros_node_name(),
+            os.environ.get("ROS_MASTER_URI", "<unset>"), threading.current_thread().name,
+        )
         try:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
-        except rospy.ROSException:
-            logger.warning(
-                "Service %s not available (timeout %.0f s)",
-                service_name, self.SERVICE_TIMEOUT_SEC,
+            logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
+        except Exception:
+            logger.exception(
+                "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
+                service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
             )
             return False
 
         try:
             proxy = rospy.ServiceProxy(service_name, MoveLift)
             response = proxy(direction=direction, distance_cm=float(distance_cm))
-        except rospy.ServiceException as exc:
-            logger.warning("Call to %s failed: %s", service_name, exc)
+        except Exception:
+            logger.exception(
+                "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
+                service_name, time.monotonic() - started,
+            )
             return False
+
+        logger.info(
+            "SERVICE_CALL_RESPONSE service=%s success=%s message=%r elapsed=%.3fs",
+            service_name, response.success, response.message, time.monotonic() - started,
+        )
 
         if not response.success:
             logger.warning(
@@ -399,21 +419,36 @@ class SamplingBridge:
             return True
 
         service_name = "/mechanism/set_grain"
+        started = time.monotonic()
+        logger.info(
+            "SERVICE_CALL_BEGIN service=%s grain=%r node=%s master=%s thread=%s",
+            service_name, grain, self._ros_node_name(),
+            os.environ.get("ROS_MASTER_URI", "<unset>"), threading.current_thread().name,
+        )
         try:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
-        except rospy.ROSException:
-            logger.warning(
-                "Service %s not available (timeout %.0f s)",
-                service_name, self.SERVICE_TIMEOUT_SEC,
+            logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
+        except Exception:
+            logger.exception(
+                "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
+                service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
             )
             return False
 
         try:
             proxy = rospy.ServiceProxy(service_name, SetGrain)
             response = proxy(grain=grain)
-        except rospy.ServiceException as exc:
-            logger.warning("Call to %s failed: %s", service_name, exc)
+        except Exception:
+            logger.exception(
+                "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
+                service_name, time.monotonic() - started,
+            )
             return False
+
+        logger.info(
+            "SERVICE_CALL_RESPONSE service=%s success=%s message=%r elapsed=%.3fs",
+            service_name, response.success, response.message, time.monotonic() - started,
+        )
 
         if not response.success:
             logger.warning(
@@ -524,21 +559,36 @@ class SamplingBridge:
             logger.debug("[Stub] Trigger %s -> True", service_name)
             return True
 
+        started = time.monotonic()
+        logger.info(
+            "SERVICE_CALL_BEGIN service=%s node=%s master=%s thread=%s",
+            service_name, self._ros_node_name(),
+            os.environ.get("ROS_MASTER_URI", "<unset>"), threading.current_thread().name,
+        )
         try:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
-        except rospy.ROSException:
-            logger.warning(
-                "Service %s not available (timeout %.0f s)",
-                service_name, self.SERVICE_TIMEOUT_SEC,
+            logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
+        except Exception:
+            logger.exception(
+                "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
+                service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
             )
             return False
 
         try:
             proxy = rospy.ServiceProxy(service_name, Trigger)
             response = proxy()
-        except rospy.ServiceException as exc:
-            logger.warning("Call to %s failed: %s", service_name, exc)
+        except Exception:
+            logger.exception(
+                "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
+                service_name, time.monotonic() - started,
+            )
             return False
+
+        logger.info(
+            "SERVICE_CALL_RESPONSE service=%s success=%s message=%r elapsed=%.3fs",
+            service_name, response.success, response.message, time.monotonic() - started,
+        )
 
         if not response.success:
             logger.warning(
@@ -549,6 +599,14 @@ class SamplingBridge:
 
         logger.info("Service %s succeeded", service_name)
         return True
+
+    @staticmethod
+    def _ros_node_name() -> str:
+        """Return the current rospy node name without masking call errors."""
+        try:
+            return str(rospy.get_name())
+        except Exception:
+            return "<unavailable>"
 
     # ----------------------------------------------------------------
     # Lifecycle

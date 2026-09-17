@@ -51,7 +51,6 @@ class _ROSWorker(QObject):
     laser_map_updated = Signal(int)  # point count
     cloud_registered_updated = Signal(QImage)  # 2D top-down projection
     rc_mode_updated = Signal(str)  # manual/auto mirror
-    connection_changed = Signal(bool)
     ROS_error = Signal(str)
 
     def __init__(self) -> None:
@@ -59,19 +58,36 @@ class _ROSWorker(QObject):
         self._running = False
         self._latest_laser_map: PointCloud2 | None = None
 
-    def init_node(self) -> None:
-        """Initialise rospy node and subscribe to ROS topics."""
+    def init_node(self) -> bool:
+        """Initialise rospy node and subscribe to ROS topics.
+
+        The result is returned to :class:`ROSNodeThread`, which owns the
+        public connection signal.  Emitting that signal from this worker
+        during ``QThread.run()`` was racy under PySide2: the UI could miss
+        the one successful connection notification entirely.
+        """
         if not HAS_ROS:
             self.ROS_error.emit("rospy not installed — cannot create node")
-            return
+            return False
 
         try:
+            root_logger = logging.getLogger()
+            saved_handlers = list(root_logger.handlers)
+            saved_level = root_logger.level
             # rospy.init_node handles both init and node creation
             # This worker is initialised inside QThread.run(), not Python's
             # main thread.  rospy signal handlers may only be installed from
             # the main thread and could make the UI node disappear or leave
             # the connection indicator stale.
             rospy.init_node("grain_sampling_ui", disable_signals=True)
+
+            # rospy may reconfigure the root logger.  Restore the UI session
+            # handler(s), otherwise all diagnostics after init_node disappear
+            # from the per-run UI log.
+            for handler in saved_handlers:
+                if handler not in root_logger.handlers:
+                    root_logger.addHandler(handler)
+            root_logger.setLevel(saved_level)
 
             # ── Subscriptions ──────────────────────────────────
             # FastLIO odometry (primary — frame_id=camera_init)
@@ -115,12 +131,13 @@ class _ROSWorker(QObject):
                 self._on_rc_mode,
             )
 
-            self.connection_changed.emit(True)
             logger.info("ROS node 'grain_sampling_ui' created and subscribed")
+            return True
 
         except Exception as exc:
             logger.exception("Failed to create ROS node")
             self.ROS_error.emit(f"Failed to create ROS node: {exc}")
+            return False
 
     def spin_once(self) -> None:
         """Called periodically from the QThread run — rospy callbacks are
@@ -276,7 +293,6 @@ class ROSNodeThread(QThread):
         self._worker.odometry_updated.connect(self.odometry_updated)
         self._worker.mechanism_status_updated.connect(self.mechanism_status_updated)
         self._worker.map_updated.connect(self.map_updated)
-        self._worker.connection_changed.connect(self.connection_changed)
         self._worker.ROS_error.connect(self.ROS_error)
         self._worker.cloud_registered_updated.connect(self.cloud_registered_updated)
         self._worker.rc_mode_updated.connect(self.rc_mode_updated)
@@ -288,7 +304,11 @@ class ROSNodeThread(QThread):
             # Initialise the one worker created by __init__.  Recreating it
             # here used to overwrite the signal-connected instance and made
             # connection_changed(True) race with UI startup.
-            self._worker.init_node()
+            connected = self._worker.init_node()
+            self.connection_changed.emit(connected)
+            if not connected:
+                logger.error("ROS thread initialization failed")
+                return
             self._worker._running = True  # noqa: SLF001
             while self._spinning and self._worker._running:
                 self._worker.spin_once()

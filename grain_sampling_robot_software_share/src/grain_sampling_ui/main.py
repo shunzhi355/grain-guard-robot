@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         # Status bar labels (updated by ROS thread / clock)
         self._net_dot: Optional[QLabel] = None
         self._net_value: Optional[QLabel] = None
+        self._ros_dot: Optional[QLabel] = None
         self._ros_value: Optional[QLabel] = None
         self._speed_value: Optional[QLabel] = None
         self._clock_label: Optional[QLabel] = None
@@ -205,8 +206,8 @@ class MainWindow(QMainWindow):
         layout.addSpacing(16)
 
         # ── ROS stat ──
-        ros_dot = self._make_dot(QColor("#DA3633"))
-        layout.addWidget(ros_dot)
+        self._ros_dot = self._make_dot(QColor("#DA3633"))
+        layout.addWidget(self._ros_dot)
         ros_label = QLabel("ROS")
         ros_label.setObjectName("stat_label")
         layout.addWidget(ros_label)
@@ -761,15 +762,25 @@ class MainWindow(QMainWindow):
         dot.setPixmap(pixmap)
 
     def set_connected(self, connected: bool) -> None:
-        """Update network indicator in the status bar (connected by ROS thread)."""
-        if self._net_dot is None or self._net_value is None:
-            return
+        """Update network and ROS indicators from the ROS thread state."""
         if connected:
-            self._update_dot(self._net_dot, QColor("#2EA043"))
-            self._net_value.setText("已连接")
+            if self._net_dot is not None:
+                self._update_dot(self._net_dot, QColor("#2EA043"))
+            if self._net_value is not None:
+                self._net_value.setText("已连接")
+            if self._ros_dot is not None:
+                self._update_dot(self._ros_dot, QColor("#2EA043"))
+            if self._ros_value is not None:
+                self._ros_value.setText("\u8fd0\u884c\u4e2d")
         else:
-            self._update_dot(self._net_dot, QColor("#DA3633"))
-            self._net_value.setText("离线")
+            if self._net_dot is not None:
+                self._update_dot(self._net_dot, QColor("#DA3633"))
+            if self._net_value is not None:
+                self._net_value.setText("离线")
+            if self._ros_dot is not None:
+                self._update_dot(self._ros_dot, QColor("#DA3633"))
+            if self._ros_value is not None:
+                self._ros_value.setText("\u672a\u8fd0\u884c")
 
     def set_speed(self, speed_ms: float) -> None:
         """Update robot speed display in the status bar."""
@@ -801,6 +812,10 @@ class MainWindow(QMainWindow):
         self._ros_thread = ROSNodeThread()
         self._ros_thread.connection_changed.connect(self.set_connected)
         self._ros_thread.ROS_error.connect(self._alarm_bar.set_alarm)
+        if HAS_ROS:
+            # Connect before start(): ROS initialization can complete before
+            # the main thread reaches the next statement on fast systems.
+            self._ros_thread.connection_changed.connect(self._on_ros_connected)
         self._ros_thread.cloud_registered_updated.connect(
             self._main_page._map_widget.set_pointcloud_image
         )
@@ -823,9 +838,7 @@ class MainWindow(QMainWindow):
         # mirrors it).  SamplingBridge() calls rospy.init_node(), which is
         # single-call per process, so defer RC setup until the ROS node
         # exists (or skip the bridge entirely when rospy is unavailable).
-        if HAS_ROS:
-            self._ros_thread.connection_changed.connect(self._on_ros_connected)
-        else:
+        if not HAS_ROS:
             # No ROS (dev box): SamplingBridge() is a harmless no-op.
             self._setup_rc_control()
 

@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from functools import wraps
@@ -56,7 +57,11 @@ from utils.sampling_params import (
     SUPPORTED_GRAINS,
     TIGHTEN_PULSE_CLOSE,
     TIGHTEN_PULSE_OPEN,
+    X2P_POSITION_TOLERANCE_MM,
+    X2P_RETURN_CLEARANCE_MM,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # PCA9685 寄存器 / I2C 常量（复用 dipan/pca9685/pca9685_driver.py 的取值与公式）
@@ -401,6 +406,11 @@ class _BaseMechanismController:
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30
         self.lift_duration = 2.0
+        # A paired automatic press cycle remembers its absolute encoder origin.
+        # Keeping these fields in the shared base also makes mock controllers
+        # exercise exactly the same safety state machine as real hardware.
+        self._lift_motion_lock = threading.Lock()
+        self._lift_cycle_origin: int | None = None
 
     # -- 低层：脉宽写入（子类实现） ---------------------------------------
     def _write_hw(self, channel: int, pulse_us: float) -> None:
@@ -675,7 +685,7 @@ class _BaseMechanismController:
 
     def move_lift(self, direction: str, distance_cm: float,
                   duration_s: float | None = None,
-                  tolerance_mm: float = 15.0) -> object:
+                  tolerance_mm: float = X2P_POSITION_TOLERANCE_MM) -> object:
         """伺服升降按距离移动（编码器闭环，精确停在目标距离）。
 
         Parameters
@@ -694,18 +704,68 @@ class _BaseMechanismController:
             raise RuntimeError("X2P 伺服未注入，无法按距离移动")
         if not distance_cm > 0:
             raise ValueError("distance_cm 必须大于 0")
+        normalized_direction = str(direction).strip().lower()
+        if normalized_direction not in {"up", "down", "down_cycle", "return"}:
+            raise ValueError("direction 必须是 up/down/down_cycle/return")
         distance_mm = float(distance_cm) * 10.0
         if duration_s is None:
             rpm = max(1, int(self.lift_rpm))
             duration_s = distance_mm / (5.0 * rpm / 60.0)
         secs = float(duration_s)
-        self.action_history.append(
-            ("move_lift", {"direction": direction, "distance_mm": distance_mm,
-                           "duration_s": secs, "x2p": True})
-        )
-        return self.lift_drive.move_distance(
-            direction, distance_mm, secs, tolerance_mm=tolerance_mm
-        )
+        with self._lift_motion_lock:
+            if normalized_direction == "down_cycle":
+                if self._lift_cycle_origin is not None:
+                    raise RuntimeError(
+                        "上一次自动下压尚未完成绝对回程，拒绝覆盖原点"
+                    )
+                origin = int(self.lift_drive.read_position())
+                self._lift_cycle_origin = origin
+                logger.info(
+                    "LIFT_CYCLE_ORIGIN_SAVED position=%d distance_mm=%.3f",
+                    origin, distance_mm,
+                )
+                command_direction = "down"
+            elif normalized_direction == "return":
+                if self._lift_cycle_origin is None:
+                    raise RuntimeError("没有已保存的下压起点，拒绝自动回程")
+                counts_per_mm = float(self.lift_drive.counts_per_mm)
+                encoder_up_sign = int(
+                    getattr(self.lift_drive.config, "encoder_forward_sign", 1)
+                )
+                clearance_pulses = round(
+                    float(X2P_RETURN_CLEARANCE_MM) * counts_per_mm
+                )
+                target = (
+                    int(self._lift_cycle_origin)
+                    - encoder_up_sign * clearance_pulses
+                )
+                logger.info(
+                    "LIFT_CYCLE_RETURN origin=%d target=%d clearance_mm=%.3f "
+                    "tolerance_mm=%.3f",
+                    self._lift_cycle_origin, target, X2P_RETURN_CLEARANCE_MM,
+                    tolerance_mm,
+                )
+                result = self.lift_drive.move_to_position(
+                    target, secs, tolerance_mm=tolerance_mm
+                )
+                self._lift_cycle_origin = None
+                self.action_history.append(
+                    ("move_lift", {"direction": "return", "target_position": target,
+                                   "clearance_mm": X2P_RETURN_CLEARANCE_MM,
+                                   "duration_s": secs, "x2p": True})
+                )
+                return result
+            else:
+                command_direction = normalized_direction
+
+            self.action_history.append(
+                ("move_lift", {"direction": normalized_direction,
+                               "distance_mm": distance_mm,
+                               "duration_s": secs, "x2p": True})
+            )
+            return self.lift_drive.move_distance(
+                command_direction, distance_mm, secs, tolerance_mm=tolerance_mm
+            )
 
     def fan(self, duration=None) -> None:
         """负压风机（未接线占位；真实控制器中为占位 no-op）。"""

@@ -64,13 +64,22 @@ def _approach_profile(
     monitor_interval_s: float,
 ) -> tuple[int, float, float]:
     """Return approach RPM, approach window, and conservative duration."""
-    effective_cycle_s = max(monitor_interval_s, 0.05)
+    # A loop iteration is not just ``monitor_interval_s``: while the axis is
+    # moving it also performs Modbus reads.  The production RTU transport has
+    # a 1 s read timeout and an occasional slow reply was observed to stretch
+    # one loop to about 1.3 s.  Using the nominal 50 ms sleep here previously
+    # classified 167 r/min as an acceptable approach speed; the low-speed
+    # phase was therefore disabled and the lift overshot by 13.4 mm.
+    #
+    # Budget one complete RTU timeout.  At the resulting approach speed the
+    # axis travels at most half the allowed tolerance during that interval.
+    control_latency_s = max(monitor_interval_s, 1.0)
     cruise_mm_s = (
         command_rpm
         * screw_lead_mm
         / (60 * motor_revs_per_screw_rev)
     )
-    max_approach_mm_s = tolerance_mm / (2 * effective_cycle_s)
+    max_approach_mm_s = tolerance_mm / (2 * control_latency_s)
     calculated_rpm = math.floor(
         max_approach_mm_s
         * 60
@@ -86,7 +95,9 @@ def _approach_profile(
         max(
             1.0,
             tolerance_mm * 10,
-            cruise_mm_s * effective_cycle_s * 10,
+            # Enter the low-speed phase early enough even if one complete
+            # control iteration is delayed by an RTU timeout.
+            cruise_mm_s * control_latency_s * 2,
         ),
     )
     approach_mm_s = (
@@ -504,8 +515,12 @@ class MotionController:
             )
             signed_target_pulses = plan.target_pulses * encoder_sign
             target_position = start_position + signed_target_pulses
-            self._emit(f"MOVE_BEGIN start={start_position} target={target_position} "
-                       f"distance_mm={distance_mm} tolerance_mm={tolerance}")
+            self._emit(
+                f"MOVE_BEGIN start={start_position} target={target_position} "
+                f"distance_mm={distance_mm} tolerance_mm={tolerance} "
+                f"cruise_rpm={plan.command_rpm} approach_rpm={approach_rpm} "
+                f"approach_window_mm={approach_window_mm:.3f}"
+            )
             start = time.monotonic()
             previous_time = start
             self._enable_and_verify(forced_inputs)
@@ -521,8 +536,7 @@ class MotionController:
                 position = self.drive.read_signed32(
                     Register.SERVO_POSITION_ENCODER
                 )
-                actual = self._actual_speed()
-                peak = max(peak, abs(actual))
+                now = time.monotonic()
                 progress = (position - start_position) * encoder_sign
                 remaining = plan.target_pulses - progress
                 if progress < -tolerance_pulses:
@@ -530,6 +544,25 @@ class MotionController:
                         "编码器位置向目标反方向变化；"
                         "检查forward_sign和机械方向"
                     )
+                # Position is the safety-critical feedback.  Decide whether to
+                # stop immediately after reading it; querying actual speed can
+                # block for a full Modbus timeout and used to let the axis keep
+                # travelling after it had already reached the target.
+                if remaining <= tolerance_pulses:
+                    if (
+                        progress >= plan.target_pulses
+                        and progress > previous_progress
+                    ):
+                        target_fraction = (
+                            plan.target_pulses - previous_progress
+                        ) / (progress - previous_progress)
+                        arrival_time = previous_time + target_fraction * (
+                            now - previous_time
+                        )
+                        arrival_elapsed = arrival_time - start
+                    else:
+                        arrival_elapsed = now - start
+                    break
                 if (
                     not approach_active
                     and approach_rpm < plan.command_rpm
@@ -549,28 +582,16 @@ class MotionController:
                         f"进入低速接近段: {signed_approach_rpm} r/min, "
                         f"剩余约{remaining / counts_per_mm:.3f} mm"
                     )
-                now = time.monotonic()
+                # Speed is telemetry, so read it only after all position-based
+                # safety decisions for this iteration have been made.
+                actual = self._actual_speed()
+                peak = max(peak, abs(actual))
                 if now - last_output >= 0.25:
                     self._emit(
                         f"位置: {position} pulse, 剩余: {remaining} pulse, "
                         f"速度: {actual} r/min"
                     )
                     last_output = now
-                if remaining <= tolerance_pulses:
-                    if (
-                        progress >= plan.target_pulses
-                        and progress > previous_progress
-                    ):
-                        target_fraction = (
-                            plan.target_pulses - previous_progress
-                        ) / (progress - previous_progress)
-                        arrival_time = previous_time + target_fraction * (
-                            now - previous_time
-                        )
-                        arrival_elapsed = arrival_time - start
-                    else:
-                        arrival_elapsed = now - start
-                    break
                 previous_progress = progress
                 previous_time = now
                 time.sleep(self.monitor_interval_s)
@@ -610,6 +631,15 @@ class MotionController:
         )
         self._record(result)
         return result
+
+    def read_encoder_position(self) -> int:
+        """Return the current signed servo encoder position.
+
+        This deliberately exposes a read-only position primitive to the lift
+        adapter.  Paired mechanism strokes can therefore remember an absolute
+        origin instead of assuming that two opposite relative moves cancel.
+        """
+        return self.drive.read_signed32(Register.SERVO_POSITION_ENCODER)
 
     def experimental_move_pulses(
         self,
