@@ -422,7 +422,7 @@ class SamplingBridge:
             )
             return False
 
-        logger.info("Service %s succeeded", service_name)
+        logger.info("Service %s succeeded: %s", service_name, response.message)
         return True
 
     # ----------------------------------------------------------------

@@ -692,6 +692,7 @@ class WorkflowOrchestrator:
     def _stop_fsm(self, reason: str) -> None:
         """Transition the FSM to STOPPED after a mechanism failure."""
         logger.error("Stopping FSM: %s", reason)
+        self._fsm.set_stop_reason(reason)
         # Best-effort hardware halt so nothing keeps running after a failure
         try:
             self._bridge.call_emergency_stop()

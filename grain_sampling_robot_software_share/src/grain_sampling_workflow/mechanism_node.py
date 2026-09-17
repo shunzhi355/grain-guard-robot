@@ -532,6 +532,7 @@ class MechanismNode:
 
         ``kwargs``（如 ``open_bin`` 的 ``depth``）透传给底层动作。
         """
+        logger.info("ACTION_REQUEST action=%s kwargs=%s", action, kwargs)
         resp = Trigger._response_class(success=False, message="starting")
         thread = threading.Thread(
             target=self._execute, args=(action, resp), kwargs=kwargs, daemon=True
@@ -548,9 +549,16 @@ class MechanismNode:
 
     def _execute(self, action: str, resp, **kwargs) -> None:
         """动作工作线程体：执行动作并回填响应 / 记录结果。"""
-        success, message = self.run_action(action, **kwargs)
+        logger.info("ACTION_BEGIN action=%s kwargs=%s", action, kwargs)
+        try:
+            success, message = self.run_action(action, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - service must return a result
+            logger.exception("ACTION_EXCEPTION action=%s", action)
+            success, message = False, f"{action} unhandled exception: {exc}"
         resp.success = success
         resp.message = message
+        log = logger.info if success else logger.error
+        log("ACTION_RESULT action=%s success=%s message=%s", action, success, message)
         with self._lock:
             self.last_results[action] = (success, message)
             self._action_threads.pop(action, None)

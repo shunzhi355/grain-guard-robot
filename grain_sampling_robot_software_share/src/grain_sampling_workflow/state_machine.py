@@ -208,6 +208,15 @@ class SamplingStateMachine:
         )
 
     @property
+    def stop_reason(self) -> str:
+        """Human-readable reason for the most recent forced stop."""
+        return getattr(self, "_stop_reason", "")
+
+    def set_stop_reason(self, reason: str) -> None:
+        """Record a failure reason before transitioning to ``STOPPED``."""
+        self._stop_reason = str(reason)
+
+    @property
     def progress_str(self) -> str:
         """Human-readable progress summary.
 

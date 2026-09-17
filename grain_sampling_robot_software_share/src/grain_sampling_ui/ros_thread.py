@@ -67,7 +67,11 @@ class _ROSWorker(QObject):
 
         try:
             # rospy.init_node handles both init and node creation
-            rospy.init_node("grain_sampling_ui", disable_signals=False)
+            # This worker is initialised inside QThread.run(), not Python's
+            # main thread.  rospy signal handlers may only be installed from
+            # the main thread and could make the UI node disappear or leave
+            # the connection indicator stale.
+            rospy.init_node("grain_sampling_ui", disable_signals=True)
 
             # ── Subscriptions ──────────────────────────────────
             # FastLIO odometry (primary — frame_id=camera_init)
@@ -277,25 +281,20 @@ class ROSNodeThread(QThread):
         self._worker.cloud_registered_updated.connect(self.cloud_registered_updated)
         self._worker.rc_mode_updated.connect(self.rc_mode_updated)
 
-        self.started.connect(self._on_started)
-
     def run(self) -> None:
         """QThread run loop — keeps the thread alive for rospy callbacks."""
         self._spinning = True
-        self._init_worker()  # recreate in this thread
-
         if self._worker:
+            # Initialise the one worker created by __init__.  Recreating it
+            # here used to overwrite the signal-connected instance and made
+            # connection_changed(True) race with UI startup.
+            self._worker.init_node()
             self._worker._running = True  # noqa: SLF001
             while self._spinning and self._worker._running:
                 self._worker.spin_once()
                 self.msleep(10)  # ~100 Hz
 
         logger.info("ROS thread spin loop exited")
-
-    def _on_started(self) -> None:
-        """Called when QThread starts — initialise ROS node."""
-        if self._worker:
-            self._worker.init_node()
 
     def stop(self) -> None:
         """Gracefully stop the ROS spin loop and thread."""

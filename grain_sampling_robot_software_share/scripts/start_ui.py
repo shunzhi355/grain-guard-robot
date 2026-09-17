@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import logging
 import sys
 import os
 import faulthandler
@@ -47,6 +48,15 @@ def setup_session_log():
     sys.stderr = TeeStream(sys.stderr, logfile)
     # Keep the file alive for native crashes, including Qt aborts.
     faulthandler.enable(file=logfile, all_threads=True)
+    # rospy/Qt imports may install a root handler before ``main.py`` calls
+    # basicConfig().  In that case basicConfig() is a no-op and workflow
+    # INFO/ERROR records never reach this session file.  Replace any early
+    # handlers now that stderr is tee'd to the per-run log.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s",
+        force=True,
+    )
     print(f"UI session={path} started={datetime.now().astimezone().isoformat()}", flush=True)
     for name in ("GRAIN_SAMPLING_UI_ENABLE_MECHANISM", "GRAIN_SAMPLING_UI_SKIP_MAPPING",
                  "GRAIN_SAMPLING_UI_RC_PUBLISH"):
