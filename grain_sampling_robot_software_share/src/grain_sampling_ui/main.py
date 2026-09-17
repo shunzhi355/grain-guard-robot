@@ -682,7 +682,7 @@ class MainWindow(QMainWindow):
         # Non-blocking prompt: auto-dismiss after 8s so a stale task marker
         # never delays ROS startup / UI responsiveness on boot.
         box = QMessageBox(
-            QMessageBox.StandardButton.Question,
+            QMessageBox.Icon.Question,
             "检测到未完成任务",
             detail,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

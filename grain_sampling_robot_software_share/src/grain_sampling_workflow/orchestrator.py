@@ -655,11 +655,16 @@ class WorkflowOrchestrator:
 
         Returns ``True`` on success, ``False`` when the FSM was stopped.
         """
+        # Relative movement may already have completed before reporting failure.
+        # Replaying it would add a second full stroke.
+        if action in ("press", "lift", "move_lift"):
+            retries = 0
         for attempt in range(retries + 1):
             if not self._fsm.is_running:
                 logger.warning("Mechanism %s skipped — FSM not running", action)
                 return False
             try:
+                logger.info("Mechanism %s begin attempt=%d/%d", action, attempt + 1, retries + 1)
                 ok = call()
             except Exception:
                 logger.exception(
@@ -668,6 +673,7 @@ class WorkflowOrchestrator:
                 )
                 ok = False
             if ok:
+                logger.info("Mechanism %s success attempt=%d", action, attempt + 1)
                 return True
             logger.warning(
                 "Mechanism %s failed (attempt %d/%d)",

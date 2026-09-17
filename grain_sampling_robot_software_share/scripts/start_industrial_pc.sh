@@ -22,8 +22,14 @@ CONFIG_FILE="${GRAIN_HARDWARE_CONFIG:-$ROOT_DIR/config/industrial_pc.env}"
 [[ -f "$CONFIG_FILE" ]] || { echo "硬件配置文件不存在：$CONFIG_FILE" >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
-LOG_DIR="${GRAIN_ROBOT_LOG_DIR:-/tmp/grain_sampling_robot}"
-mkdir -p "$LOG_DIR"
+LOG_ROOT="${GRAIN_ROBOT_LOG_DIR:-$ROOT_DIR/log/hardware}"
+mkdir -p "$LOG_ROOT"
+LOG_DIR="$(mktemp -d "$LOG_ROOT/$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+ln -sfn "$LOG_DIR" "$LOG_ROOT/latest"
+export PYTHONUNBUFFERED=1
+export PYTHONFAULTHANDLER=1
+exec > >(tee -a "$LOG_DIR/startup.log") 2>&1
+printf 'session=%s started=%s\n' "$LOG_DIR" "$(date -Is)"
 
 export ROS_MASTER_URI="${ROS_MASTER_URI:-http://localhost:11311}"
 export ROS_HOSTNAME="${ROS_HOSTNAME:-localhost}"

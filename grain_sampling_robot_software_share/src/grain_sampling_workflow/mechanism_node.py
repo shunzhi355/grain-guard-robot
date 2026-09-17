@@ -51,6 +51,7 @@ Service                  Action
 from __future__ import annotations
 
 import logging
+import uuid
 import os
 import threading
 import time
@@ -672,41 +673,20 @@ class MechanismNode:
         # 时长按 X2P_RPM 与 5mm 导程自动计算，留 20% 余量避免接近段超 max_rpm
         rpm = max(1.0, float(self._x2p_rpm))
         duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0) * 1.2
-        self._ensure_lift_connected()
+        request_id = uuid.uuid4().hex[:12]
+        logger.info("MOVE_REQUEST id=%s direction=%s distance_cm=%s duration_s=%s",
+                    request_id, direction, distance_cm, duration_s)
         try:
+            self._ensure_lift_connected()
             result = self._controller.move_lift(direction, distance_cm, duration_s)
         except Exception as exc:  # noqa: BLE001 - 上报失败
-            # 串口/USB 断开重连恢复：等待设备号变化（重枚举）后重建 lift_drive
-            # 并重试一次，避免一次断连就中断整个扦样流程。
-            if self._wait_lift_device_change(timeout_s=3.0):
-                logger.warning(
-                    "move_lift 失败且检测到 X2P 串口重连，重建后重试一次: %r",
-                    exc,
-                )
-                try:
-                    self._reconnect_lift_and_track()
-                except Exception:  # noqa: BLE001 - 重连失败如实上报
-                    logger.exception("X2P 串口重连失败")
-                    return MoveLift._response_class(
-                        success=False,
-                        message=f"move_lift failed: {exc} (串口重连失败)",
-                    )
-                try:
-                    result = self._controller.move_lift(
-                        direction, distance_cm, duration_s
-                    )
-                except Exception as exc2:  # noqa: BLE001
-                    return MoveLift._response_class(
-                        success=False,
-                        message=f"move_lift 重连后重试失败: {exc2}",
-                    )
-                return MoveLift._response_class(
-                    success=True,
-                    message=f"move_lift {direction} {distance_cm}cm ok (重连后重试): {result}",
-                )
+            # Completion is uncertain: never replay a relative stroke after USB
+            # recovery or an encoder tolerance failure. Workflow will stop.
+            logger.exception("MOVE_FAILED id=%s; automatic replay disabled", request_id)
             return MoveLift._response_class(
-                success=False, message=f"move_lift failed: {exc}"
+                success=False, message=f"move_lift id={request_id} failed (no replay): {exc}"
             )
+        logger.info("MOVE_SUCCESS id=%s result=%s", request_id, result)
         return MoveLift._response_class(
             success=True,
             message=f"move_lift {direction} {distance_cm}cm ok: {result}",
@@ -725,6 +705,9 @@ def main() -> None:
     - ``X2P_FORWARD_SIGN``：升降方向 1/-1（默认 1）
     """
     import os
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s")
 
     from utils.sampling_params import (
         X2P_DURATION_S,

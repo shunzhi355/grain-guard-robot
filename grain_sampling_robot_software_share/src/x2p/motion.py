@@ -504,6 +504,8 @@ class MotionController:
             )
             signed_target_pulses = plan.target_pulses * encoder_sign
             target_position = start_position + signed_target_pulses
+            self._emit(f"MOVE_BEGIN start={start_position} target={target_position} "
+                       f"distance_mm={distance_mm} tolerance_mm={tolerance}")
             start = time.monotonic()
             previous_time = start
             self._enable_and_verify(forced_inputs)
@@ -584,6 +586,8 @@ class MotionController:
         )
         error_pulses = target_position - final_position
         error_mm = error_pulses / counts_per_mm
+        self._emit(f"MOVE_STOP start={start_position} target={target_position} "
+                   f"final={final_position} error_mm={error_mm:.4f} tolerance_mm={tolerance}")
         if abs(error_pulses) > tolerance_pulses:
             raise PositionNotReachedError(
                 f"停止后位置误差{error_pulses} pulse/"

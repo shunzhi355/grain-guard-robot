@@ -110,7 +110,8 @@ def build_x2p_lift_drive(
                 limits=SafetyLimits(max_rpm=max(30, int(rpm))),
             )
         drive = X2PDrive(config.port, config.slave)
-        controller = MotionController(drive, config)
+        controller = MotionController(drive, config, output=logger.info)
+        logger.info("X2P implementation=%s config=%r", sys.modules[MotionController.__module__].__file__, config)
     except Exception as exc:  # noqa: BLE001 - 统一包装为设备错误
         raise DeviceError(f"X2P 升降驱动器初始化失败: {exc}") from exc
 
