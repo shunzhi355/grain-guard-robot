@@ -69,11 +69,11 @@ def clamp() -> None:
 
 
 def unclamp() -> None:
-    """松开: CH5 1200us 保持 0.5s 后断电释放。"""
+    """松开: CH5 1200us 保持 2.0s 后断电释放。"""
     _ch5_pulse(1200.0)
-    time.sleep(0.5)
+    time.sleep(2.0)
     _ch5_off()
-    print("松开完成 (CH5 1200us 0.5s -> 断电释放)")
+    print("松开完成 (CH5 1200us 2.0s -> 断电释放)")
 
 
 def main() -> None:
