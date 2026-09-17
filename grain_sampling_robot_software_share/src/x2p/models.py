@@ -105,7 +105,7 @@ class SafetyLimits:
 
 @dataclass(frozen=True)
 class ControllerConfig:
-    port: str = "/dev/ttyUSB0"
+    port: str = "/dev/x2p_lift"
     slave: int = 2
     pulses_per_mm: float | None = None
     screw_lead_mm: float = 5.0

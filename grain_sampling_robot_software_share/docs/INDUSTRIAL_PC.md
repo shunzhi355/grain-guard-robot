@@ -154,6 +154,60 @@ python3 "$ROBOT_PROJECT/scripts/start_ui.py" --preview-descent
 ```
 
 预览窗口明确标为模拟，点击“已就绪”后显示下压状态，停留在该页面；不启动 ROS 节点、导航、PCA9685、伺服或机构编排器。它只验证界面状态转换，不能证明真实下潜链路正常。
-真实流程仍需导航完成反馈以及启用真实机构控制；现有编排器默认机构占位，主界面的任务创建入口尚未接通 enable_mechanism，不能仅凭“正在下压”文字认定伺服已执行。
+真实流程必须显式设置 `GRAIN_SAMPLING_UI_ENABLE_MECHANISM=1`；未设置时编排器保持机构占位模式，不能仅凭“正在下压”文字认定伺服已执行。
+
+## 三终端：假导航、真实上层机构联调
+
+这套流程不启动 SLAM 或真实导航。底盘保持安全断开或架空，操作员在第三终端逐次确认“假到达”，UI 状态机随后驱动真实夹管、X2P 升降、吸粮、输送和粮仓机构。开始前清空机构运动范围，确认急停可用，并安排一人观察机构、一人操作 UI。
+
+终端 1 启动正式硬件服务：
+
+```bash
+cd "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share"
+sudo systemctl restart grain-sampling
+systemctl status grain-sampling --no-pager -l
+source /home/neardi/mechanism_ws/devel/setup.bash
+for service in \
+    /mechanism/clamp /mechanism/unclamp /mechanism/tighten \
+    /mechanism/move_lift /mechanism/start_suction /mechanism/stop_suction \
+    /mechanism/convey /mechanism/set_grain /mechanism/emergency_stop \
+    /mechanism/open_bin/shallow /mechanism/close_bin/shallow; do
+    rosservice list | grep -qx "$service" || echo "缺少服务: $service"
+done
+```
+
+若上面打印任何“缺少服务”，不要进入 UI 的真实机构流程；先检查 `/tmp/grain_sampling_robot/mechanism_node.log`。粮仓服务按深度分为 `/mechanism/open_bin/shallow|mid|deep` 和对应的 `close_bin`。本次单深度联调使用 `shallow`。
+
+终端 2 必须在工控机桌面终端、触摸屏终端或带 X11 转发的图形会话中启动 UI。窗口显示在 `DISPLAY=:0` 对应的 HDMI/DP/触摸屏上，普通 SSH 文本窗口里不会出现 UI：
+
+```bash
+source /home/neardi/mechanism_ws/devel/setup.bash
+cd "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share"
+export DISPLAY=:0
+export GRAIN_SAMPLING_UI_RC_PUBLISH=0
+export GRAIN_SAMPLING_UI_ENABLE_MECHANISM=1
+export GRAIN_SAMPLING_UI_SKIP_MAPPING=1
+unset QT_QPA_PLATFORM
+python3 scripts/start_ui.py
+```
+
+终端 3 启动假导航应答器：
+
+```bash
+source /home/neardi/mechanism_ws/devel/setup.bash
+cd "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share"
+python3 scripts/fake_navigation_events.py
+```
+
+UI 中依次操作：进入“开始采样” → “本地调试” → “本地创建工单”，仓号选“联调模式（跳过地图）”，只创建一个点位，深度 1 选 `2.0 米`，深度 2/3 保持“无”。进入作业后第一次点击“已就绪”。记录起点在本机自动完成，没有“建图完成”ROS 话题。UI 显示正在导航后，终端 3 会打印目标，确认安全再按 Enter；UI 进入“连接并插入取样管”后第二次点击“已就绪”，真实机构才开始动作。随后严格按 UI 提示确认“已加管”“废粮已排完”、取粮和返航，不要提前点击。返航会产生第二个导航目标，终端 3 需要再次按 Enter。
+
+此模式只伪造到点结果，不发布 `/cmd_vel`。当前单次 X2P 循环为上下各 20 cm，但状态机的管数按约 1 m 深度计数；因此本流程只用于台架动作顺序联调，不代表实际下管深度已经标定。CH7 风机仍为未接线占位，实体风机不会因流程进入吸粮状态而自动工作；输送动作可能持续 90 至 180 秒。
+
+发生异常时先按实体急停或 UI 急停，然后停止服务：
+
+```bash
+rosservice call /mechanism/emergency_stop
+sudo systemctl stop grain-sampling
+```
 
 示波器台架测试保持电机主电源断开，仅启动 roscore、rc_node、cmd_vel_to_motor 和 motor_driver。底盘驱动可使用 --max-offset-us 100 --no-start-boost 限制 CH8/CH9 为约1400–1600us，目标频率50Hz，回中约1500us。不启动机构节点、目标导航或旧独立 PWM 工具。示波器探头测 CH8/CH9 Signal，参考地接 PCA9685 GND。

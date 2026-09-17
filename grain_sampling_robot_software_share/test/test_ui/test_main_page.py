@@ -487,3 +487,92 @@ class TestTaskSelection:
             # (the test above exercises the full dict processing path)
             assert win._guidance_page.attach_orchestrator.called
             assert win.page_manager.push.called
+
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [(None, False), ("0", False), ("false", False), ("1", True), ("YES", True)],
+    )
+    def test_real_mechanism_requires_explicit_env_flag(
+        self, qapp: QApplication, monkeypatch, env_value, expected
+    ) -> None:
+        from grain_sampling_ui.main import MainWindow
+
+        if env_value is None:
+            monkeypatch.delenv("GRAIN_SAMPLING_UI_ENABLE_MECHANISM", raising=False)
+        else:
+            monkeypatch.setenv("GRAIN_SAMPLING_UI_ENABLE_MECHANISM", env_value)
+
+        with patch("grain_sampling_ui.main.StatusBar"), \
+             patch("grain_sampling_ui.main.ControlPanel"), \
+             patch("grain_sampling_ui.main.MainPage"), \
+             patch("grain_sampling_ui.main.GuidancePage"), \
+             patch("grain_sampling_ui.main.MapPage"), \
+             patch("grain_sampling_ui.main.TaskListPage"), \
+             patch("grain_sampling_ui.main.MappingPage"), \
+             patch("grain_sampling_ui.main.SettingsPage"), \
+             patch("grain_sampling_ui.main.AlarmBar"), \
+             patch("grain_sampling_ui.main.PageManager"), \
+             patch("grain_sampling_ui.main.SamplingBridge"), \
+             patch("grain_sampling_ui.main.SamplingStateMachine"), \
+             patch("grain_sampling_ui.main.OrderInfo"), \
+             patch("grain_sampling_ui.main.WorkflowOrchestrator") as orchestrator_cls:
+            win = MainWindow()
+            win._guidance_page = MagicMock()
+            win.page_manager = MagicMock()
+            win._slam_bridge = None
+            win._on_task_selected({
+                "order_id": "local-test",
+                "waypoints": [{"x": 1, "y": 2}],
+                "depth_list": [1.0],
+                "grain_type": "稻谷",
+                "source": "local",
+            })
+
+            orchestrator = orchestrator_cls.return_value
+            assert orchestrator.enable_mechanism.called is expected
+            orchestrator.set_grain.assert_called_once_with("稻谷")
+
+    @pytest.mark.parametrize(
+        ("env_value", "task_skip", "expected_map_lookup"),
+        [(None, True, True), ("0", True, True), ("1", False, True), ("1", True, False)],
+    )
+    def test_mapping_skip_requires_env_and_task_marker(
+        self, qapp: QApplication, monkeypatch, env_value, task_skip, expected_map_lookup
+    ) -> None:
+        from grain_sampling_ui.main import MainWindow
+
+        if env_value is None:
+            monkeypatch.delenv("GRAIN_SAMPLING_UI_SKIP_MAPPING", raising=False)
+        else:
+            monkeypatch.setenv("GRAIN_SAMPLING_UI_SKIP_MAPPING", env_value)
+
+        with patch("grain_sampling_ui.main.StatusBar"), \
+             patch("grain_sampling_ui.main.ControlPanel"), \
+             patch("grain_sampling_ui.main.MainPage"), \
+             patch("grain_sampling_ui.main.GuidancePage"), \
+             patch("grain_sampling_ui.main.MapPage"), \
+             patch("grain_sampling_ui.main.TaskListPage"), \
+             patch("grain_sampling_ui.main.MappingPage"), \
+             patch("grain_sampling_ui.main.SettingsPage"), \
+             patch("grain_sampling_ui.main.AlarmBar"), \
+             patch("grain_sampling_ui.main.PageManager"), \
+             patch("grain_sampling_ui.main.SamplingBridge"), \
+             patch("grain_sampling_ui.main.SamplingStateMachine"), \
+             patch("grain_sampling_ui.main.OrderInfo"), \
+             patch("grain_sampling_ui.main.WorkflowOrchestrator"):
+            win = MainWindow()
+            win._guidance_page = MagicMock()
+            win.page_manager = MagicMock()
+            win._slam_bridge = MagicMock()
+            win._slam_bridge.find_map_by_warehouse.return_value = None
+            win._on_task_selected({
+                "order_id": "commissioning-test",
+                "warehouse": "联调模式（跳过地图）",
+                "skip_mapping": task_skip,
+                "waypoints": [{"x": 0, "y": 0}],
+                "depth_list": [2.0],
+                "grain_type": "稻谷",
+                "source": "local",
+            })
+
+            assert win._slam_bridge.find_map_by_warehouse.called is expected_map_lookup

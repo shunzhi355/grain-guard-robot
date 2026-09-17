@@ -1,11 +1,11 @@
 #!/bin/bash
-# 板端部署脚本（在 3588 上执行）— X2P 伺服升降 + 机制服务重启验证
+# RK3588 工控机部署脚本 — X2P 伺服升降 + 机制服务重启验证
 # 用法（已同步源码后，板端执行）：
 #   bash scripts/deploy_x2p_board.sh
 set -e
 
-REMOTE="/home/orangepi/grain_sampling_robot_software"
-cd "$REMOTE"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
 
 echo "=== 1. 安装 pyserial ==="
 pip3 install pyserial --user 2>&1 | tail -2
@@ -21,13 +21,14 @@ python3 -m py_compile \
 echo "COMPILE_OK"
 
 echo "=== 3. 验证 x2p 可导入 ==="
-PYTHONPATH="$REMOTE/src:$PYTHONPATH" python3 -c "from x2p import X2PDrive, MotionController, ControllerConfig; print('x2p import OK')"
+PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" python3 -c "from x2p import X2PDrive, MotionController, ControllerConfig; print('x2p import OK')"
 
-echo "=== 4. 重启 mechanism_node（X2P 自动启用，默认 /dev/ttyUSB0）==="
+echo "=== 4. 重启 mechanism_node（X2P 自动启用，默认 /dev/x2p_lift）==="
 source /opt/ros/noetic/setup.bash
 export ROS_MASTER_URI=http://localhost:11311
-export PYTHONPATH="$REMOTE/src:$PYTHONPATH"
-# 可选覆盖：export X2P_PORT=/dev/ttyUSB1 X2P_RPM=30 X2P_DURATION=2.0
+export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+export X2P_PORT="${X2P_PORT:-/dev/x2p_lift}"
+# 可选覆盖：export X2P_RPM=30 X2P_DURATION=2.0
 pkill -f grain_sampling_workflow.mechanism_node 2>/dev/null || true
 sleep 2
 nohup python3 -m grain_sampling_workflow.mechanism_node > /tmp/mechanism_node.log 2>&1 &

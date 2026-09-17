@@ -72,6 +72,11 @@ from utils.config import AppConfig
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str) -> bool:
+    """Return True only for an explicit, conventional truthy value."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ── Main Window ────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -554,7 +559,12 @@ class MainWindow(QMainWindow):
 
         # ── Warehouse-based map switching ──
         warehouse = task_data.get("warehouse", "")
-        if warehouse and self._slam_bridge is not None:
+        skip_mapping = bool(task_data.get("skip_mapping")) and _env_flag(
+            "GRAIN_SAMPLING_UI_SKIP_MAPPING"
+        )
+        if skip_mapping:
+            logger.warning("Skipping map relocalization for commissioning task %s", order_id)
+        elif warehouse and self._slam_bridge is not None:
             map_path = self._slam_bridge.find_map_by_warehouse(warehouse)
             if map_path:
                 logger.info("Switching to map %s for warehouse %s", map_path, warehouse)
@@ -598,6 +608,17 @@ class MainWindow(QMainWindow):
             fsm=fsm, bridge=bridge, waypoints=waypoints, cloud_client=cloud_client,
         )
 
+        # Real mechanism operation is opt-in so opening the UI cannot move
+        # hardware unexpectedly.  The deployment terminal must set this flag.
+        if _env_flag("GRAIN_SAMPLING_UI_ENABLE_MECHANISM"):
+            orchestrator.enable_mechanism()
+            logger.warning("REAL MECHANISM MODE enabled for task %s", order_id)
+        else:
+            logger.warning(
+                "Mechanism placeholder mode; set "
+                "GRAIN_SAMPLING_UI_ENABLE_MECHANISM=1 for real hardware"
+            )
+
         # Cloud tasks carry full order context; local tasks use the compat alias
         if task_data.get("source") == "cloud":
             order = OrderInfo(
@@ -613,6 +634,7 @@ class MainWindow(QMainWindow):
             orchestrator.set_task_order(order)
         else:
             orchestrator.set_task_id(order_id)
+            orchestrator.set_grain(grain_type)
 
         # Set grain-specific durations
         from grain_sampling_workflow.mechanism_config import GRAIN_MECHANISM_CONFIG
