@@ -1,0 +1,3 @@
+# Stable names for the two FTDI adapters verified on LPB3588.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="AB3N91KX", SYMLINK+="rc_receiver", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", ATTRS{serial}=="D30GLD5V", SYMLINK+="x2p_lift", GROUP="dialout", MODE="0660"

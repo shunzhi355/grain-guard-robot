@@ -2,8 +2,8 @@
 
 架构（三层）：
 - :class:`PCA9685`：真实硬件封装。直接通过 Linux i2c-dev（``fcntl.ioctl``
-   I2C_SLAVE=0x0703）访问 ``/dev/i2c-2``, 0x40，无 adafruit 等第三方依赖。
-   顶层不打开任何设备（Windows 开发机无 /dev/i2c-2，import 必须安全）。
+   I2C_SLAVE=0x0703）访问 ``/dev/i2c-4``, 0x40，无 adafruit 等第三方依赖。
+   顶层不打开任何设备（Windows 开发机无 /dev/i2c-4，import 必须安全）。
 - :class:`MechanismController`：真实控制器。I2C 写操作统一加线程锁、
   失败自动重试 2 次、duration 后台 daemon 线程自动回停、急停抢断
   （只停运行中通道）、品种参数来自 ``mechanism_config.get_grain_params``。
@@ -12,7 +12,7 @@
   记录到 ``register_history``），全部动作同时记录到 ``action_history``。
 
 设计约定（mechanism-driver 计划）：
-- PCA9685：工控机 LVDS I²C（默认 /dev/i2c-2），地址 0x40，50Hz，4096 计数/周期
+- PCA9685：工控机 TP I²C（Linux 总线映射待核实）（默认 /dev/i2c-4），地址 0x40，50Hz，4096 计数/周期
 - 执行器映射：CH0/1=螺旋输送、CH2/3/4=开仓(浅/中/深)、CH5=夹紧、CH6=拧紧、
   CH7=负压风机(未接)；伺服升降(未接)
 - 脉宽标定：开/松开/拧松=1000us、关=1900us、夹紧=1900us、拧紧=1300us、停=断电释放（full-off）。
@@ -144,7 +144,7 @@ def _serialized_i2c(method):
 class PCA9685:
     """PCA9685 16 通道 PWM 驱动（Linux i2c-dev 直连，无 adafruit）。
 
-    默认硬件：工控机 LVDS I²C，/dev/i2c-2, 0x40, 50Hz。
+    默认硬件：工控机 TP I²C（Linux 总线映射待核实），/dev/i2c-4, 0x40, 50Hz。
     注意：模块顶层不打开设备；``open()`` 是显式的（Windows 上会抛 RuntimeError）。
 
     高层接口 ``set_pwm(channel, pulse_us)`` 直接写脉宽(us)——
@@ -732,7 +732,7 @@ class MechanismController(_BaseMechanismController):
     """真实机构控制器：PCA9685 + I2C 锁 + 失败重试 + 急停 + 品种参数。
 
     ``pca9685`` 缺省时：mock_mode=True 用内部记录件，mock_mode=False 用真实
-    :class:`PCA9685`（此时需先调用 ``open()`` 打开 /dev/i2c-2）。
+    :class:`PCA9685`（此时需先调用 ``open()`` 打开 /dev/i2c-4）。
     """
 
     def __init__(self, pca9685=None, mock_mode: bool = False, lift_drive=None) -> None:
@@ -755,7 +755,7 @@ class MechanismController(_BaseMechanismController):
             open_()
 
     def init_escs(self, hold_s: float = 3.0) -> None:
-        """仅初始化机构 CH0–6；底盘 CH8/CH9 由 motor_driver 独立初始化。"""
+        """仅初始化机构 CH0–6；底盘 CH10/CH9 由 motor_driver 独立初始化。"""
         channels = tuple(sorted(set(CHANNELS.values()) - {CHANNELS.get("fan", 7)}))
         for ch in channels:
             self.set_pulse(ch, PULSE_STOP)

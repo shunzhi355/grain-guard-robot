@@ -8,17 +8,17 @@
 |---|---|
 | 遥控接收机 | USB1 → USB-TTL → i-BUS；`/dev/ttyUSB0`，115200，8N1 |
 | X2P 升降伺服 | USB3 → USB-RS485；`/dev/ttyUSB1`，原 Modbus 参数保持 |
-| PCA9685 | LVDS Pin36 SDA、Pin38 SCL；`/dev/i2c-2`，0x40，50Hz |
+| PCA9685 | TP Pin5 SDA、Pin4 SCL；暂定 `/dev/i2c-4`（I2C4，Linux 映射待核实），0x40，50Hz |
 | 螺旋输送1/2 | CH0/CH1 |
 | 浅仓/中仓/深仓 | CH2/CH3/CH4 |
 | 夹紧/拧紧 | CH5/CH6 |
-| 左/右底盘电调 | CH8/CH9 |
+| 左/右底盘电调 | CH10/CH9（CH8 实机异常后改线） |
 
 USB 物理位置不对应 ttyUSB 编号；I²C 总线和设备名均为待现场核实的默认值。CH7 仍为未接线占位，CH10–15 未使用。
 
 接收机沿用项目已有 FS-iA10B i-BUS 协议：CH1 前后、CH3 转向、CH8 模式开关（软件内部仍叫 CH5）。USB-TTL 只负责串口传输；若现场测试使用其他协议，需要相应更换解析器。
 
-PCA9685 振荡器校准、各机构动作脉宽、底盘方向、遥控死区与速度标定沿用原值，本次未重新标定。机构初始化只写 CH0–6，底盘由独立驱动写 CH8/CH9。
+PCA9685 振荡器校准、各机构动作脉宽、底盘方向、遥控死区与速度标定沿用原值。机构初始化只写 CH0–6，底盘由独立驱动写左 CH10、右 CH9。
 
 ## 启动与配置
 
@@ -34,7 +34,7 @@ bash scripts/start_industrial_pc.sh
 
 ```bash
 RC_SERIAL_PORT=/dev/rc_receiver X2P_PORT=/dev/x2p_lift \
-PCA9685_I2C_DEVICE=/dev/i2c-2 bash scripts/start_industrial_pc.sh
+PCA9685_I2C_DEVICE=/dev/i2c-4 bash scripts/start_industrial_pc.sh
 ```
 
 `ROS_SETUP_BASH` 可指定 ROS1 setup.bash；`MECHANISM_WS_SETUP` 可指定机制消息包工作空间 setup.bash；`GRAIN_HARDWARE_CONFIG` 可指定另一份硬件环境配置。直接运行 Python 节点时，默认参数来自 `sampling_params.py`，也可使用同名环境变量覆盖设备路径。
@@ -46,7 +46,7 @@ PCA9685_I2C_DEVICE=/dev/i2c-2 bash scripts/start_industrial_pc.sh
 ## 输出与失联行为
 
 - Linux 默认使用 PCA9685 和 USB i-BUS，设备缺失会报错；Windows 开发默认仍为模拟。历史 GPIO/sysfs 后端需显式选择。
-- 底盘 daemon 在 CH8/CH9 输出 1500us 中位并保持 3 秒，再接受新运动命令；命令超过 0.3 秒未更新时回中位。
+- 底盘 daemon 在 CH10/CH9 输出 1500us 中位并保持 3 秒，再接受新运动命令；命令超过 0.3 秒未更新时回中位。
 - 打开共用 PCA9685 不再全通道关闭；相同频率不会重新设置振荡器。有活动输出时，拒绝改变不一致的频率配置。
 - 驱动用线程锁和 Linux flock 协调项目运行进程；单通道四个寄存器以一次 I²C 写入更新。
 - USB 串口断开会立即清除旧指令；无有效帧超过原有 0.5 秒阈值后，手动控制输出零速度。串口重新接入后需重启遥控节点。接收机若在无线失联后继续发送保持值，仍需现场设置接收机自身的 failsafe。
@@ -55,15 +55,75 @@ PCA9685_I2C_DEVICE=/dev/i2c-2 bash scripts/start_industrial_pc.sh
 
 ## 手册核对与现场测试
 
-工控机手册 `fe1160432813cde211bdbb12b33af6d8.pdf` 的 PDF 第14–15页（印刷页13/17、14/17）确认：
+工控机手册 `fe1160432813cde211bdbb12b33af6d8.pdf` 的 TP 表（印刷页12/17）确认：
 
-- LVDS Pin36/38 为 I2C2_SDA_M4 / I2C2_SCL_M4，信号电平标为 **1.8V**。
-- LVDS Pin1/2/3 的 VCC_LVDS 通过 J27 选择 **3.3V/5V**；按用户要求使用3.3V。
-- LVDS Pin4/5/6 为 GND。
+- TP Pin5 为 I2C4 SDA、Pin4 为 I2C4 SCL，信号电平为 **3.0V**。
+- TP Pin1 为 VCC3V0_TOUCH（3.0V），接 PCA9685 VCC；Pin6 为 GND。
+- TP Pin2 INT、Pin3 RST 不接 PCA9685。模块上拉必须匹配 3.0V 信号。
 
-VCC 3.3V 与 I²C 信号电平是不同参数，上电前需核对 J27、电平及 PCA9685 模块上拉是否匹配，必要时使用双向电平转换。软件不能改变引脚电压或代替设备树启用 I²C。
+软件暂以 `/dev/i2c-4` 作为 TP 默认路径，环境变量仍可覆盖。硬件 I2C4 与 Linux 设备编号需核实，不能仅凭编号确认引脚。
 
-后续用 `i2cdetect -l`、`/dev/serial/by-id/` 和 `/dev/serial/by-path/` 核实映射，调整配置与 i2c/串口设备权限。实机仍需验证中位脉宽、左右方向、USB 失联停车和机构/底盘同时运行。
+现场反馈：内核 6.1.84，已有多个 `/dev/i2c-*`，但没有 `/dev/i2c-4`，现有节点权限为 root 专用；`i2cdetect` 未安装，`modprobe i2c-dev` 找不到模块。已有设备节点说明不能单凭 modprobe 报错判断 I²C 不可用，驱动可能内建于内核。
+
+先在工控机执行以下诊断（不启动电机、不写 PCA9685）：
+
+```bash
+uname -r
+for d in /sys/class/i2c-dev/i2c-*; do
+    [ -e "$d" ] || continue
+    echo "=== ${d##*/} ==="
+    cat "$d/name"
+    readlink -f "$d/device/of_node"
+done
+for a in /proc/device-tree/aliases/i2c*; do
+    [ -f "$a" ] || continue
+    printf '%s: ' "${a##*/}"
+    tr -d '\000' < "$a"
+    printf '\n'
+done
+```
+
+根据设备树路径核对 TP 所属控制器及 Linux 总线编号。若控制器未启用，需修改匹配本机镜像的设备树及引脚复用后重启；不要套用 Orange Pi overlay。若已映射为其他编号，用 `PCA9685_I2C_DEVICE=/dev/i2c-X` 覆盖。`export` 不会创建设备节点。
+
+Debian/Ubuntu 可用 `sudo apt-get update && sudo apt-get install i2c-tools` 安装诊断工具，再运行 `i2cdetect -l`。确认总线后单独处理设备权限（i2c 组和 udev 规则）；当前 root 专用权限会阻止普通用户运行。实机仍需验证 PCA9685 通信、中位脉宽、左右方向、USB 失联停车和机构/底盘同时运行。
+
+## TP I2C4 启用镜像准备
+
+现场进一步确认：板型 `neardi,lpb3588-linux-f0,`，I2C4 节点
+`/i2c@feac0000` 为 `disabled`，引脚组为 `i2c4m0-xfer`。
+启动分区为 `/dev/mmcblk0p3`（64 MiB），`/boot` 为空。
+已校验的备份位于工控机 `/home/neardi/tp-i2c4.GEcNa9/boot.original.img`。
+该 FIT 使用外部 fdt/kernel/resource 数据及 SHA-256；所贴出的 signature
+节点尚未显示签名 value，必须检查实际文件，不能据此认定签名已关闭。
+
+将 `scripts/prepare_tp_i2c4.py` 同步到工控机项目后，在项目目录运行：
+
+```bash
+python3 scripts/prepare_tp_i2c4.py \
+  /home/neardi/tp-i2c4.GEcNa9/boot.original.img \
+  /home/neardi/tp-i2c4.GEcNa9/boot.tp-i2c4-v2.img
+```
+
+脚本只依赖 Python 标准库，只接受普通备份文件，并独占创建新文件；不会刷写分区或覆盖已有文件。
+它先校验三个数据段的 SHA-256、配置引用、板型、I2C4 别名和引脚组。
+存在实际 FIT 签名 value 时拒绝修改，需要对应签名流程；不会删除签名。
+修改以 FDT_NOP 填补缩短的 status 属性占用空间，保持镜像大小和所有数据偏移，
+第二版同时将 FIT fdt 和 resource 中 `rk-kernel.dtb` 的 I2C4 status 改为 okay。
+同时更新资源条目已有的 SHA-1/SHA-256，以及 FIT 的 fdt/resource SHA-256。
+仅接受 RSCE v0、单个默认 rk-kernel.dtb；存在多份 DTB 或格式不匹配时停止。
+生成后重新解析设备树并核对其他属性、内核、非 DTB 资源和所有允许范围外的字节未改变。
+
+第一版仅修改 FIT fdt；现场确认已写入并重启（分区和镜像 SHA-256 均为
+`331756fc8af097b80e76386fa44ba8fe26dd337b78fe7eb7017fd2d64fcdeb20`），
+运行设备树仍为 disabled。Rockchip U-Boot 在启用 RESOURCE_IMAGE 时可优先读取
+resource 内 DTB，第一版没有覆盖这一路径。
+源码依据：https://github.com/rockchip-linux/u-boot/blob/next-dev/arch/arm/mach-rockchip/boot_rkimg.c
+资源格式依据：https://github.com/rockchip-linux/u-boot/blob/next-dev/arch/arm/mach-rockchip/resource_img.c
+
+第二版仍应以 `boot.original.img` 为输入，不覆盖第一版或原始备份。
+输出应包含 `script_version: 2` 和 `resource_dtb_status: okay`。
+本地 13 项合成 FIT 测试通过，不能证明实际固件采用的引导路径或实体机器能启动；
+第二版真实备份处理、部署、重启后设备节点及 PCA9685 通信验证仍待完成。
 
 ## 本地验证
 
