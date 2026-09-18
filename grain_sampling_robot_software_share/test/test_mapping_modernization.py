@@ -88,3 +88,13 @@ def test_board_builds_default_to_bounded_parallelism():
         script = (ROOT / "deploy" / "mapping" / script_name).read_text(encoding="utf-8")
         assert 'BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"' in script
         assert '-j"$BUILD_JOBS" -l"$BUILD_JOBS"' in script
+
+
+def test_sophus_is_frozen_and_patched_for_jammy_eigen():
+    setup = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
+    patch = (ROOT / "deploy" / "mapping" / "patches" / "sophus-a621ff-jammy-eigen34.patch").read_text(encoding="utf-8")
+
+    assert "a621ff2e56c56c839a6c40418d42c3c254424b5c" in setup
+    assert "sophus-a621ff-jammy-eigen34.patch" in setup
+    assert "-Wno-error=class-memaccess" in patch
+    assert "unit_complex_ = Complexd(1., 0.);" in patch
