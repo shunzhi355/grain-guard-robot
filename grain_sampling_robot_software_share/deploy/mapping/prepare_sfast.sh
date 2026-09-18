@@ -18,7 +18,7 @@ SOPHUS_PATCH_FILE="$DEPLOY_DIR/patches/sophus-a621ff-jammy-eigen34.patch"
 SOURCE_DIR="$SFAST_WS/src/S-FAST_LIO"
 SOPHUS_DIR="$SFAST_WS/deps/Sophus"
 SOPHUS_BUILD_DIR="$SFAST_WS/build_deps/Sophus"
-BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"
+BUILD_JOBS="${MAPPING_BUILD_JOBS:-1}"
 MODE="${1:---check}"
 
 for cmd in git python3 catkin_make rospack; do
@@ -74,14 +74,16 @@ if [ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" != "$UPSTREAM_REV" ]; then
     git -C "$SOURCE_DIR" cat-file -e "${UPSTREAM_REV}^{commit}" 2>/dev/null || git -C "$SOURCE_DIR" fetch --depth 1 origin "$UPSTREAM_REV"
     git -C "$SOURCE_DIR" checkout --detach "$UPSTREAM_REV"
 fi
-if ! git -C "$SOURCE_DIR" apply --reverse --check "$PATCH_FILE" 2>/dev/null; then
+if ! grep -q 'livox_ros_driver2/CustomMsg.h' "$SOURCE_DIR/src/preprocess.h" || \
+   [ ! -f "$SOURCE_DIR/launch/mapping_mid360.launch" ]; then
     [ -z "$(git -C "$SOURCE_DIR" status --porcelain=v1)" ] || {
         echo "[FAIL] S-FAST_LIO has changes beyond the approved patch: $SOURCE_DIR" >&2; exit 1;
     }
     git -C "$SOURCE_DIR" apply --check "$PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$PATCH_FILE"
 fi
-if ! git -C "$SOURCE_DIR" apply --reverse --check "$BUILD_PATCH_FILE" 2>/dev/null; then
+if ! grep -q 'add_dependencies(sfastlio_mapping' "$SOURCE_DIR/CMakeLists.txt" || \
+   ! grep -q 'add_dependencies(fastlio_mapping_re' "$SOURCE_DIR/CMakeLists.txt"; then
     git -C "$SOURCE_DIR" apply --check "$BUILD_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$BUILD_PATCH_FILE"
 fi

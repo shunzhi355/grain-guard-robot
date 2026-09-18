@@ -119,10 +119,13 @@ def test_driver2_jammy_patch_enforces_cxx17():
 
 
 def test_board_builds_default_to_bounded_parallelism():
-    for script_name in ("setup_livox.sh", "prepare_sfast.sh"):
-        script = (ROOT / "deploy" / "mapping" / script_name).read_text(encoding="utf-8")
-        assert 'BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"' in script
-        assert '-j"$BUILD_JOBS" -l"$BUILD_JOBS"' in script
+    livox = (ROOT / "deploy" / "mapping" / "setup_livox.sh").read_text(encoding="utf-8")
+    sfast = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
+
+    assert 'BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"' in livox
+    assert 'BUILD_JOBS="${MAPPING_BUILD_JOBS:-1}"' in sfast
+    assert '-j"$BUILD_JOBS" -l"$BUILD_JOBS"' in livox
+    assert '-j"$BUILD_JOBS" -l"$BUILD_JOBS"' in sfast
 
 
 def test_sophus_is_frozen_and_patched_for_jammy_eigen():
