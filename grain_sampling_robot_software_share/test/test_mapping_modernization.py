@@ -73,6 +73,16 @@ def test_sfast_patch_carries_driver2_and_mid360_contract():
     assert "pcd_save_en: true" in patch
 
 
+def test_sfast_build_waits_for_generated_messages():
+    patch_path = ROOT / "deploy" / "mapping" / "patches" / "sfast-lio-message-generation-order.patch"
+    patch = patch_path.read_text(encoding="utf-8")
+    setup = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
+
+    assert "add_dependencies(sfastlio_mapping" in patch
+    assert "add_dependencies(fastlio_mapping_re" in patch
+    assert patch_path.name in setup
+
+
 def test_driver2_jammy_patch_enforces_cxx17():
     patch_path = ROOT / "deploy" / "mapping" / "patches" / "livox-driver2-jammy-cxx17.patch"
     patch = patch_path.read_text(encoding="utf-8")
