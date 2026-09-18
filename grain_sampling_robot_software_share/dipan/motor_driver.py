@@ -11,7 +11,7 @@ Jetson Orin NX 40-pin PWM (verified on board):
   right motor ESC signal: physical pin 33 -> PWM5 -> pwmchip2 -> 32c0000.pwm
 
 On the industrial PC the default backend is PCA9685 over Linux i2c-dev
-(chassis outputs are CH8/CH9).  The historical sysfs PWM backend remains
+(chassis outputs are left CH10 / right CH9).  The historical sysfs PWM backend remains
 available for Orange Pi/Jetson deployments.
 """
 
@@ -46,8 +46,8 @@ try:
         PCA9685_I2C_DEVICE,
     )
 except ImportError:  # direct script execution before PYTHONPATH is set
-    PCA9685_CHASSIS_LEFT, PCA9685_CHASSIS_RIGHT = 8, 9
-    PCA9685_I2C_ADDRESS, PCA9685_I2C_BUS, PCA9685_I2C_DEVICE = 0x40, 2, ""
+    PCA9685_CHASSIS_LEFT, PCA9685_CHASSIS_RIGHT = 10, 9
+    PCA9685_I2C_ADDRESS, PCA9685_I2C_BUS, PCA9685_I2C_DEVICE = 0x40, 4, ""
 
 
 PERIOD_NS = 20_000_000  # 50 Hz

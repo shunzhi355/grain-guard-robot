@@ -152,7 +152,11 @@ class CameraWidget(QWidget):
         try:
             import cv2  # noqa: PLC0415
 
-            self._cap = cv2.VideoCapture(0)
+            # On RK3588 the GStreamer backend can block indefinitely while
+            # probing /dev/video0 and prevent the main window from appearing.
+            # Use the requested device and the direct V4L2 backend instead.
+            backend = cv2.CAP_V4L2 if str(device).startswith("/dev/video") else cv2.CAP_ANY
+            self._cap = cv2.VideoCapture(device, backend)
             if self._cap.isOpened():
                 self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
                 self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)

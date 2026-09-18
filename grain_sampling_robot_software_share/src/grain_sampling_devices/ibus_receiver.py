@@ -6,8 +6,8 @@ debouncing and the stale-signal timeout used by RCControl.
 
 The receiver channels used by this project are mapped as follows::
 
-    i-BUS CH1 -> CH1  (forward / reverse)
-    i-BUS CH3 -> CH3  (steering)
+    i-BUS CH3 -> CH1  (logical throttle: forward / reverse)
+    i-BUS CH1 -> CH3  (logical steering: left / right)
     i-BUS CH8 -> CH5  (manual / automatic mode switch)
 
 Typical i-BUS frames are 32 bytes, start with ``0x20 0x40``, contain fourteen
@@ -92,7 +92,9 @@ class IBusRCReceiver(_BaseRCReceiver):
     backend as ``auto`` to try i-BUS first and retain the legacy GPIO fallbacks.
     """
 
-    DEFAULT_CHANNEL_MAP: Mapping[str, int] = {"CH1": 1, "CH3": 3, "CH5": 8}
+    # Keep the historical logical keys consumed by RCControl while mapping
+    # them to the transmitter's physical i-BUS channels.
+    DEFAULT_CHANNEL_MAP: Mapping[str, int] = {"CH1": 3, "CH3": 1, "CH5": 8}
 
     def __init__(
         self,

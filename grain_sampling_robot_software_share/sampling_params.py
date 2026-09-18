@@ -20,6 +20,12 @@ x2p_lift / mechanism_node / utils.config）均从本文件导入默认值。
 
 from __future__ import annotations
 
+# 正式流程及独立测试共用；修改后重启机构服务。
+PRESS_SEGMENT_CM = 20.0
+PRESS_DOWN_CM = 3.0
+PRESS_UP_CM = 2.0
+PRESS_PAUSE_S = 1.0
+
 # ===========================================================================
 # 1. 机制执行器 —— PCA9685 通道映射 + 脉宽 + 品种参数
 # ===========================================================================
@@ -38,11 +44,11 @@ CHANNELS: dict[str, int] = {
     "fan": 7,           # 负压风机（未接线，占位）
 }
 
-# 工控机 LVDS I2C 接 PCA9685；总线号可在现场通过环境变量覆盖。
+# LPB3588 实机确认 PCA9685 映射到 Linux I2C2，可用环境变量覆盖。
 PCA9685_I2C_BUS: int = 2
 PCA9685_I2C_ADDRESS: int = 0x40
-PCA9685_I2C_DEVICE: str = ""
-PCA9685_CHASSIS_LEFT: int = 8
+PCA9685_I2C_DEVICE: str = ""  # 由 config/industrial_pc.env 设置为 /dev/i2c-2
+PCA9685_CHASSIS_LEFT: int = 10  # CH8 实机异常，左侧信号改接 CH10（2026-09-16）
 PCA9685_CHASSIS_RIGHT: int = 9
 
 #: PCA9685 内部振荡器实际频率（Hz）。标称 25MHz，但实机示波器校准
@@ -119,13 +125,14 @@ GRAIN_MECHANISM_CONFIG: dict[str, dict[str, float]] = {
 # 2. 遥控 —— RC 通道 GPIO + 死区 + 档位带 + 速度标定
 # ===========================================================================
 
-#: RC 接收机通道 → sysfs GPIO 号（板端实测）。
+#: 旧 GPIO 接收方式的逻辑通道 → sysfs GPIO 号（板端实测）。
 #: CH1 → Pin15 gpio-34、CH3 → Pin22 gpio-40、CH5(接收机CH8模式开关) → Pin40 gpio-111。
 #: 注：CH5 原接 Pin24 gpio-44（SPI0_CS0）抖动、Pin16 gpio-35 读到摇杆信号，
 #: 2026-09-03 最终改接 Pin40 gpio-111（GPIO3_B7，纯 GPIO）。
 RC_PINS: dict[str, int] = {"CH1": 34, "CH3": 40, "CH5": 111}
 
 # 工控机 USB1 -> USB-TTL -> FS-iA10B i-BUS；串口失败报错，不回退 GPIO。
+# i-BUS 实机扫描确认：物理 CH3=油门，CH1=转向，CH8=手动/自动模式。
 RC_RECEIVER_BACKEND: str = "ibus"
 RC_SERIAL_PORT: str = "/dev/ttyUSB0"
 RC_SERIAL_BAUDRATE: int = 115200
@@ -158,22 +165,30 @@ RC_MAX_ANGULAR_RPS: float = 0.8  # 全速转向 rad/s
 # 3. X2P 伺服升降 —— 串口 + Modbus + 转速 + 时长 + 方向
 # ===========================================================================
 
-#: USB3 -> USB-RS485；暂定 ttyUSB1，现场可用 X2P_PORT 覆盖为稳定链接。
-X2P_PORT: str = "/dev/ttyUSB1"
+#: LPB3588 板载 RS485；2026-09-17 实机通讯确认为 ttyS0。
+X2P_PORT: str = "/dev/ttyS0"
 
 #: Modbus 从站地址（与 x2p_config.json 一致）。
 X2P_SLAVE: int = 2
 
 #: 升降转速（r/min）。同时作为 move-timed 距离运动的速度上限（max_rpm）。
 #: 注意：X2P 文档标称电机额定 120 r/min，超过需现场确认安全，勿长期超速。
-#: 2026-08-27 用户实机标定确认 500 r/min 安全可用（现场实测重新标定）。
-X2P_RPM: int = 1000
+#: 2026-08-27 用户实机标定确认 500 r/min 可用；自动回程靠近顶端时
+#: 先使用 200 r/min 的保守速度，减小刹车惯性和冲顶风险。
+X2P_RPM: int = 200
 
 #: 升降时长（秒）。
 X2P_DURATION_S: float = 2.0
 
 #: 升降方向：1=正向，-1=反向翻转（实机方向不对时改这里）。
 X2P_FORWARD_SIGN: int = 1
+
+#: 自动下压循环回程时不贴回顶部机械原点，保留的安全距离（mm）。
+#: 该余量必须大于位置容差，防止刹车惯性导致冲顶。
+X2P_RETURN_CLEARANCE_MM: float = 5.0
+
+#: 编码器距离动作的停止后位置容差（mm）。
+X2P_POSITION_TOLERANCE_MM: float = 2.0
 
 #: x2p 包所在目录（dais516 仓库根）；板端部署后如不在 sys.path 填绝对路径。
 X2P_PACKAGE_PATH: str = ""

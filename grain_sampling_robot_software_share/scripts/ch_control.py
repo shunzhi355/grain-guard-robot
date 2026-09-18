@@ -15,7 +15,9 @@ import sys
 import os
 import fcntl
 
-I2C_BUS = "/dev/i2c-2"
+# TP I2C4，Linux 设备映射待现场核实；支持环境变量覆盖。
+I2C_BUS = (os.environ.get("PCA9685_I2C_DEVICE", "").strip()
+           or f"/dev/i2c-{os.environ.get('PCA9685_I2C_BUS', '4')}")
 I2C_ADDR = 0x40
 LED0_ON_L = 0x06
 

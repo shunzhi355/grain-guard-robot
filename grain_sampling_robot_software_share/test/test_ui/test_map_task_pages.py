@@ -7,7 +7,9 @@ from PySide2.QtCore import Qt
 from PySide2.QtWidgets import QApplication
 
 from grain_sampling_ui.pages.map_page import MapPage, _UploadDialog
+import grain_sampling_ui.pages.task_list_page as task_list_module
 from grain_sampling_ui.pages.task_list_page import (
+    SKIP_MAPPING_WAREHOUSE,
     TaskListPage,
     _CreateTaskDialog,
     _TaskItemWidget,
@@ -281,19 +283,29 @@ class TestCreateTaskDialog:
     """Tests for _CreateTaskDialog."""
 
     @pytest.fixture
-    def dialog(self, qapp: QApplication) -> _CreateTaskDialog:  # noqa: ARG002
+    def dialog(
+        self,
+        qapp: QApplication,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> _CreateTaskDialog:
+        monkeypatch.setattr(task_list_module, "PCD_DIR", str(tmp_path))
+        monkeypatch.delenv("GRAIN_SAMPLING_UI_SKIP_MAPPING", raising=False)
+        (tmp_path / "粮仓D区-01号_20250710.pcd").touch()
         return _CreateTaskDialog()
 
     def test_dialog_creation(self, dialog: _CreateTaskDialog) -> None:
         """Dialog should have correct title and default values."""
         assert dialog.windowTitle() == "本地创建工单"
-        assert dialog._depth_input.currentText() == "2.0 米"
+        assert dialog._depth_inputs[0].currentText() == "2.0 米"
+        assert dialog._depth_inputs[1].currentText() == "无"
+        assert dialog._depth_inputs[2].currentText() == "无"
         # Waypoint list should have one default item
         assert dialog._waypoint_list.count() == 1
 
     def test_dialog_rejects_empty_warehouse(self, dialog: _CreateTaskDialog) -> None:
         """Creating with empty warehouse should show warning."""
-        dialog._warehouse_input.setText("")
+        dialog._warehouse_input.clear()
         # _on_create checks and returns early with error label
         # We verify it does NOT emit the signal
         signals: list[dict] = []
@@ -306,11 +318,11 @@ class TestCreateTaskDialog:
 
     def test_dialog_emits_signal_with_valid_data(self, dialog: _CreateTaskDialog) -> None:
         """Filling valid data should emit task_created signal with waypoints."""
-        dialog._warehouse_input.setText("粮仓D区-01号")
+        assert dialog._warehouse_input.currentText() == "粮仓D区-01号"
         # Set depth via combobox to 3.5m
-        idx = dialog._depth_input.findText("3.5 米")
+        idx = dialog._depth_inputs[0].findText("3.5 米")
         if idx >= 0:
-            dialog._depth_input.setCurrentIndex(idx)
+            dialog._depth_inputs[0].setCurrentIndex(idx)
 
         # Set waypoints: update the default item text, add a second one
         dialog._waypoint_list.clear()
@@ -324,12 +336,49 @@ class TestCreateTaskDialog:
         assert len(signals) == 1
         data = signals[0]
         assert data["warehouse"] == "粮仓D区-01号"
-        assert data["depth"] == 3.5
+        assert data["depth_list"] == [3.5]
+        assert data["skip_mapping"] is False
         waypoints = data["waypoints"]
         assert len(waypoints) == 2
         assert waypoints[0] == {"x": 10.0, "y": 20.0}
         assert waypoints[1] == {"x": 30.0, "y": 40.0}
         assert "created" in data
+
+    def test_dialog_disables_creation_without_map(
+        self,
+        qapp: QApplication,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setattr(task_list_module, "PCD_DIR", str(tmp_path))
+        monkeypatch.delenv("GRAIN_SAMPLING_UI_SKIP_MAPPING", raising=False)
+
+        dialog = _CreateTaskDialog()
+
+        assert dialog._warehouse_input.count() == 0
+        assert not dialog._create_btn.isEnabled()
+        assert dialog._error_label.text() == "暂无地图，请先建图"
+
+    def test_commissioning_task_skips_map_and_uses_one_depth(
+        self,
+        qapp: QApplication,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setattr(task_list_module, "PCD_DIR", str(tmp_path))
+        monkeypatch.setenv("GRAIN_SAMPLING_UI_SKIP_MAPPING", "1")
+        dialog = _CreateTaskDialog()
+
+        assert dialog._warehouse_input.currentText() == SKIP_MAPPING_WAREHOUSE
+        assert dialog._create_btn.isEnabled()
+
+        signals: list[dict] = []
+        dialog.task_created.connect(lambda data: signals.append(data))
+        dialog._on_create()
+
+        assert len(signals) == 1
+        assert signals[0]["skip_mapping"] is True
+        assert signals[0]["depth_list"] == [2.0]
 
     def test_tasklist_page_task_created_flow(self, page: TaskListPage) -> None:
         """Creating a task from task list page should add it to the list."""

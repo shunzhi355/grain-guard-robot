@@ -38,6 +38,12 @@ from grain_sampling_workflow.mechanism_config import GRAIN_MECHANISM_CONFIG
 C = THEME_COLORS
 
 PCD_DIR = os.path.expanduser("~/fastlio2_ws/src/S-FAST_LIO/PCD")
+SKIP_MAPPING_WAREHOUSE = "联调模式（跳过地图）"
+
+
+def _env_flag(name: str) -> bool:
+    """Return True only for an explicit, conventional truthy value."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 # ── Stub task data ───────────────────────────────────────────────────────
 SAMPLE_TASKS: list[dict[str, object]] = [
@@ -481,22 +487,23 @@ class _CreateTaskDialog(QDialog):
 
     def _refresh_warehouse_list(self) -> None:
         self._warehouse_input.clear()
-        if not os.path.isdir(PCD_DIR):
-            return
         warehouses: dict[str, str] = {}
-        for f in os.listdir(PCD_DIR):
-            if not f.endswith(".pcd"):
-                continue
-            base = f[:-4]
-            parts = base.split("_", 1)
-            if len(parts) < 2:
-                continue
-            name = parts[0]
-            ts_str = parts[1] if len(parts) > 1 else ""
-            if name not in warehouses or ts_str > warehouses[name]:
-                warehouses[name] = ts_str
+        if os.path.isdir(PCD_DIR):
+            for f in os.listdir(PCD_DIR):
+                if not f.endswith(".pcd"):
+                    continue
+                base = f[:-4]
+                parts = base.split("_", 1)
+                if len(parts) < 2:
+                    continue
+                name = parts[0]
+                ts_str = parts[1] if len(parts) > 1 else ""
+                if name not in warehouses or ts_str > warehouses[name]:
+                    warehouses[name] = ts_str
         for name in sorted(warehouses.keys()):
-            self._warehouse_input.addItem(name)
+            self._warehouse_input.addItem(name, False)
+        if _env_flag("GRAIN_SAMPLING_UI_SKIP_MAPPING"):
+            self._warehouse_input.addItem(SKIP_MAPPING_WAREHOUSE, True)
 
     def _add_waypoint(self) -> None:
         x = self._x_input.value()
@@ -574,6 +581,7 @@ class _CreateTaskDialog(QDialog):
         grain_type = self._grain_input.currentText()
         data = {
             "warehouse": warehouse,
+            "skip_mapping": bool(self._warehouse_input.currentData()),
             "grain_type": grain_type,
             "depth_list": depth_list,
             "waypoints": waypoints,
@@ -1078,6 +1086,7 @@ class TaskListPage(QWidget):
             "waypoints": task.get("waypoints", []),
             "depth_list": task.get("depth_list", [2.0]),
             "grain_type": task.get("grain_type", "稻谷"),
+            "skip_mapping": bool(task.get("skip_mapping", False)),
             "source": "local",
         }
         self.task_selected.emit(payload)
@@ -1126,6 +1135,7 @@ class TaskListPage(QWidget):
             "waypoints": data.get("waypoints", []),
             "depth_list": data.get("depth_list", [2.0]),
             "depth": data.get("depth_list", [2.0])[0],
+            "skip_mapping": bool(data.get("skip_mapping", False)),
         }
         self._all_tasks.append(new_task)
         self._refresh_local_list()

@@ -24,7 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config", help="JSON配置文件；默认使用内置安全限制"
     )
-    parser.add_argument("--port", help="例如 /dev/ttyUSB0；覆盖配置文件")
+    parser.add_argument(
+        "--port", help="例如 /dev/x2p_lift；覆盖配置文件"
+    )
     parser.add_argument(
         "--slave", type=int, help="覆盖配置文件中的从站地址"
     )
@@ -226,3 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if drive is not None:
             drive.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

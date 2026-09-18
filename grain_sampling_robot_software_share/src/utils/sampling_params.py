@@ -41,6 +41,8 @@ from sampling_params import (  # noqa: F401
     X2P_FORWARD_SIGN,
     X2P_PACKAGE_PATH,
     X2P_PORT,
+    X2P_POSITION_TOLERANCE_MM,
     X2P_RPM,
+    X2P_RETURN_CLEARANCE_MM,
     X2P_SLAVE,
 )
