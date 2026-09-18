@@ -10,6 +10,7 @@ UPSTREAM_URL="https://github.com/zlwang7/S-FAST_LIO.git"
 UPSTREAM_REV="93946196081ff8e6f665a6ddbd8024f65711edab"
 PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-livox-driver2.patch"
 BUILD_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-message-generation-order.patch"
+JAMMY_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-jammy-cxx17.patch"
 SOPHUS_URL="https://github.com/strasdat/Sophus.git"
 SOPHUS_REV="a621ff2e56c56c839a6c40418d42c3c254424b5c"
 SOPHUS_PATCH_FILE="$DEPLOY_DIR/patches/sophus-a621ff-jammy-eigen34.patch"
@@ -25,6 +26,7 @@ done
 mapping_source_ros1
 [ -f "$PATCH_FILE" ] || { echo "[FAIL] patch missing: $PATCH_FILE" >&2; exit 1; }
 [ -f "$BUILD_PATCH_FILE" ] || { echo "[FAIL] build patch missing: $BUILD_PATCH_FILE" >&2; exit 1; }
+[ -f "$JAMMY_PATCH_FILE" ] || { echo "[FAIL] Jammy patch missing: $JAMMY_PATCH_FILE" >&2; exit 1; }
 [ -f "$SOPHUS_PATCH_FILE" ] || { echo "[FAIL] Sophus patch missing: $SOPHUS_PATCH_FILE" >&2; exit 1; }
 
 if [ "$MODE" = "--check" ]; then
@@ -80,6 +82,10 @@ fi
 if ! git -C "$SOURCE_DIR" apply --reverse --check "$BUILD_PATCH_FILE" 2>/dev/null; then
     git -C "$SOURCE_DIR" apply --check "$BUILD_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$BUILD_PATCH_FILE"
+fi
+if ! git -C "$SOURCE_DIR" apply --reverse --check "$JAMMY_PATCH_FILE" 2>/dev/null; then
+    git -C "$SOURCE_DIR" apply --check "$JAMMY_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$JAMMY_PATCH_FILE"
 fi
 
 mapping_source_workspace "$LIVOX_WS"

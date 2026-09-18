@@ -83,6 +83,15 @@ def test_sfast_build_waits_for_generated_messages():
     assert patch_path.name in setup
 
 
+def test_sfast_jammy_patch_enables_cxx17():
+    patch_path = ROOT / "deploy" / "mapping" / "patches" / "sfast-lio-jammy-cxx17.patch"
+    patch = patch_path.read_text(encoding="utf-8")
+    setup = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
+
+    assert "+set(CMAKE_CXX_STANDARD 17)" in patch
+    assert patch_path.name in setup
+
+
 def test_driver2_jammy_patch_enforces_cxx17():
     patch_path = ROOT / "deploy" / "mapping" / "patches" / "livox-driver2-jammy-cxx17.patch"
     patch = patch_path.read_text(encoding="utf-8")
