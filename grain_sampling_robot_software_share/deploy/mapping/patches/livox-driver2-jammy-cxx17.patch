@@ -1,12 +1,6 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -86,7 +86,7 @@ if(ROS_EDITION STREQUAL "ROS1")
-   # Compiler config
-   #---------------------------------------------------------------------------------------
- 
+@@ -89 +89 @@ if(ROS_EDITION STREQUAL "ROS1")
 -  set(CMAKE_CXX_STANDARD 14)
 +  set(CMAKE_CXX_STANDARD 17)
-   set(CMAKE_CXX_STANDARD_REQUIRED ON)
-   set(CMAKE_CXX_EXTENSIONS OFF)
- 
