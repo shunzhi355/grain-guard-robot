@@ -2,7 +2,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 index e151147..992c6cd 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -84,11 +84,13 @@ catkin_package(
+@@ -84,9 +84,11 @@ catkin_package(
  )
  
  add_executable(sfastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
