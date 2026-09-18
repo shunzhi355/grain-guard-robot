@@ -312,7 +312,9 @@ class MappingPage(QWidget):
             QApplication.processEvents()  # 让"正在保存"先显示，避免界面假死
             slam_saved = self._slam_bridge.save_current_map()
             if not slam_saved:
-                self._mapping_state_label.setText("地图保存失败，使用现有文件")
+                self._transition_state("error")
+                self._mapping_state_label.setText("地图保存失败")
+                return
 
         # Step 2: Check for duplicates
         if not os.path.isdir(PCD_DIR):
@@ -336,25 +338,17 @@ class MappingPage(QWidget):
                 except OSError:
                     pass
 
-        # Step 3: Find most recent PCD without scanning all files
-        import glob as _glob
-        pcd_files = _glob.glob(os.path.join(PCD_DIR, "*.pcd"))
-        most_recent = None
-        most_recent_mtime = 0
-        for f in pcd_files:
-            try:
-                mtime = os.path.getmtime(f)
-                if mtime > most_recent_mtime:
-                    most_recent_mtime = mtime
-                    most_recent = f
-            except OSError:
-                continue
-        src_file = most_recent
+        # Step 3: Copy the full map written by this session's SIGINT save.
+        # Never select an arbitrary recent PCD: scans_* and the smaller
+        # GlobalMap_ikdtree.pcd are not the operator's full saved map.
+        src_file = os.path.join(PCD_DIR, "GlobalMap.pcd")
+        if not os.path.isfile(src_file):
+            self._transition_state("error")
+            self._mapping_state_label.setText("地图保存失败")
+            return
 
         try:
-            if src_file:
-                shutil.copy2(src_file, os.path.join(PCD_DIR, new_filename))
-            # else: no source file, but we still mark as saved
+            shutil.copy2(src_file, os.path.join(PCD_DIR, new_filename))
         except Exception:
             self._mapping_state_label.setText("保存失败")
             self._refresh_map_list()
