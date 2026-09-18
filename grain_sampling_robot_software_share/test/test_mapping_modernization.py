@@ -71,3 +71,13 @@ def test_sfast_patch_carries_driver2_and_mid360_contract():
     assert 'lid_topic: "/livox/lidar"' in patch
     assert 'imu_topic: "/livox/imu"' in patch
     assert "pcd_save_en: true" in patch
+
+
+def test_driver2_jammy_patch_enforces_cxx17():
+    patch_path = ROOT / "deploy" / "mapping" / "patches" / "livox-driver2-jammy-cxx17.patch"
+    patch = patch_path.read_text(encoding="utf-8")
+    setup = (ROOT / "deploy" / "mapping" / "setup_livox.sh").read_text(encoding="utf-8")
+
+    assert "-  set(CMAKE_CXX_STANDARD 14)" in patch
+    assert "+  set(CMAKE_CXX_STANDARD 17)" in patch
+    assert patch_path.name in setup

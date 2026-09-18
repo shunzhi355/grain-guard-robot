@@ -10,6 +10,7 @@ SDK_URL="https://github.com/Livox-SDK/Livox-SDK2.git"
 SDK_REV="08f523c930b2f0ba1e98a6afaa8d7476bf479908"
 DRIVER_URL="https://github.com/Livox-SDK/livox_ros_driver2.git"
 DRIVER_REV="4a1def929e5b59c7a8122d19fce6efba581ce9f7"
+DRIVER_PATCH_FILE="$DEPLOY_DIR/patches/livox-driver2-jammy-cxx17.patch"
 MODE="${1:---check}"
 
 missing=()
@@ -49,7 +50,33 @@ clone_or_verify() {
 SDK_DIR="$LIVOX_WS/src/Livox-SDK2"
 DRIVER_DIR="$LIVOX_WS/src/livox_ros_driver2"
 clone_or_verify "$SDK_URL" "$SDK_REV" "$SDK_DIR"
-clone_or_verify "$DRIVER_URL" "$DRIVER_REV" "$DRIVER_DIR"
+if [ ! -d "$DRIVER_DIR/.git" ]; then
+    git clone "$DRIVER_URL" "$DRIVER_DIR"
+fi
+git -C "$DRIVER_DIR" cat-file -e "${DRIVER_REV}^{commit}" 2>/dev/null || git -C "$DRIVER_DIR" fetch --depth 1 origin "$DRIVER_REV"
+if [ "$(git -C "$DRIVER_DIR" rev-parse HEAD)" != "$DRIVER_REV" ]; then
+    [ -z "$(git -C "$DRIVER_DIR" status --porcelain=v1)" ] || {
+        echo "[FAIL] Driver2 revision differs and worktree is dirty: $DRIVER_DIR" >&2; exit 1;
+    }
+    git -C "$DRIVER_DIR" checkout --detach "$DRIVER_REV"
+fi
+
+[ -f "$DRIVER_PATCH_FILE" ] || { echo "[FAIL] Driver2 patch missing: $DRIVER_PATCH_FILE" >&2; exit 1; }
+driver_status="$(git -C "$DRIVER_DIR" status --porcelain=v1)"
+if [ -n "$driver_status" ]; then
+    unexpected_driver_paths="$(printf '%s\n' "$driver_status" | cut -c4- | grep -Ev '^(CMakeLists\.txt|config/MID360_config\.json)$' || true)"
+    [ -z "$unexpected_driver_paths" ] || {
+        printf '[FAIL] unexpected Driver2 changes:\n%s\n' "$unexpected_driver_paths" >&2; exit 1;
+    }
+fi
+if git -C "$DRIVER_DIR" apply --reverse --check "$DRIVER_PATCH_FILE" 2>/dev/null; then
+    cmp -s <(git -C "$DRIVER_DIR" diff -- CMakeLists.txt) "$DRIVER_PATCH_FILE" || {
+        echo "[FAIL] Driver2 CMakeLists.txt has changes beyond the approved patch" >&2; exit 1;
+    }
+else
+    git -C "$DRIVER_DIR" apply --check "$DRIVER_PATCH_FILE"
+    git -C "$DRIVER_DIR" apply "$DRIVER_PATCH_FILE"
+fi
 
 cmake -S "$SDK_DIR" -B "$SDK_DIR/build"
 cmake --build "$SDK_DIR/build" --parallel "$(nproc)"
