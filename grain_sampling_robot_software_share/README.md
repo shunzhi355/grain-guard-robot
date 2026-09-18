@@ -1,7 +1,7 @@
 # 粮食扦样机器人 — 软件系统
 
-> 基于 PySide6 + ROS Noetic + MQTT 的全栈工业机器人控制软件
-> 运行平台：RK3588 / Ubuntu 20.04
+> 基于 PySide6 + Debian ROS1 + MQTT 的全栈工业机器人控制软件
+> 运行平台：RK3588 / Ubuntu 22.04 aarch64
 
 ---
 
@@ -64,8 +64,8 @@ grain_sampling_robot_software/
 | 项目 | 要求 |
 |------|------|
 | 硬件平台 | RK3588（8 核 ARM，4GB+ RAM） |
-| 操作系统 | Ubuntu 20.04 LTS (arm64) |
-| ROS | Noetic Ninjemys |
+| 操作系统 | Ubuntu 22.04 LTS (aarch64) |
+| ROS | Debian packaged ROS1 1.15.x |
 | Python | 3.10 及以上 |
 | GStreamer | 1.20+（RTSP 推流，可选，无 GStreamer 时使用 MJPEG 回退） |
 

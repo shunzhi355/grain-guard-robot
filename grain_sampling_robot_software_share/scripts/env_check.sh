@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # env_check.sh — Environment validation script for Grain Sampling Robot
-# Platform:  RK3588 / Ubuntu 20.04 / ROS Noetic
+# Platform:  RK3588 / Ubuntu 22.04 / aarch64 / Debian ROS1 1.15.x
 # Usage:
 #   chmod +x env_check.sh && ./env_check.sh
 #   (some checks require sudo for hardware access)
@@ -51,10 +51,10 @@ echo -e "${CYAN}── [1/5] Operating System ───────────�
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     echo "  Detected: $PRETTY_NAME"
-    if [[ "$VERSION_ID" == "20.04" ]]; then
-        record PASS "Ubuntu 20.04 — OK"
+    if [[ "$VERSION_ID" == "22.04" ]]; then
+        record PASS "Ubuntu 22.04 — target platform"
     else
-        record WARN "Ubuntu $VERSION_ID detected (20.04 recommended)"
+        record WARN "Ubuntu $VERSION_ID detected (22.04 target)"
     fi
 else
     record WARN "Cannot determine OS version (/etc/os-release missing)"
@@ -72,20 +72,19 @@ fi
 # 2. ROS
 # ═══════════════════════════════════════════════════════════════════════════
 echo ""
-echo -e "${CYAN}── [2/5] ROS Noetic ────────────────────────────${NC}"
+echo -e "${CYAN}── [2/5] Debian ROS1 ──────────────────────────${NC}"
 
-if command -v ros &>/dev/null; then
-    ROS_VER=$(ros --version 2>&1)
-    record PASS "ROS: $ROS_VER"
+if command -v roscore &>/dev/null && command -v roslaunch &>/dev/null; then
+    record PASS "ROS1 commands available"
 else
-    record FAIL "ROS not found — install ros-noetic-ros-base"
+    record FAIL "ROS1 commands unavailable — see deploy/mapping/DEPENDENCIES.md"
 fi
 
-# Check ROS sourcing
-if [[ -f /opt/ros/noetic/setup.bash ]]; then
-    record PASS "ROS setup.bash exists at /opt/ros/noetic/"
+# Debian ROS1 may be directly available without /opt/ros/<distro>.
+if compgen -G "/opt/ros/*/setup.bash" >/dev/null 2>&1; then
+    record PASS "ROS setup.bash discovered under /opt/ros"
 else
-    record FAIL "/opt/ros/noetic/setup.bash not found"
+    record WARN "No /opt/ros setup.bash; direct Debian ROS1 commands may still be valid"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -161,10 +160,12 @@ else
 fi
 
 # Ethernet → LiDAR connectivity
-if ping -c 1 -W 1 192.168.1.12 &>/dev/null; then
-    record PASS "LiDAR (192.168.1.12) reachable on network"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/mapping/runtime.sh"
+mapping_load_config || true
+if ping -I "${RADAR_NETDEV:-eth1}" -c 1 -W 1 "${MID360_IP:-192.168.1.116}" &>/dev/null; then
+    record PASS "MID360 (${MID360_IP:-192.168.1.116}) reachable on ${RADAR_NETDEV:-eth1}"
 else
-    record WARN "LiDAR 192.168.1.12 not responding — check Ethernet config"
+    record WARN "MID360 not responding — check mapping network configuration"
 fi
 
 # USB camera
