@@ -89,7 +89,7 @@ def test_sfast_jammy_patch_enables_cxx17():
     setup = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
 
     assert "-std=c++14" in patch
-    assert "+std=c++17" in patch
+    assert "+ADD_COMPILE_OPTIONS(-std=c++17 )" in patch
     assert patch_path.name in setup
 
 
