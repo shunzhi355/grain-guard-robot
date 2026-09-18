@@ -97,6 +97,15 @@ def test_sfast_jammy_patch_enables_cxx17():
     assert "set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)" in setup
 
 
+def test_sfast_publishes_laser_map():
+    patch_path = ROOT / "deploy" / "mapping" / "patches" / "sfast-lio-laser-map-publish.patch"
+    patch = patch_path.read_text(encoding="utf-8")
+    setup = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
+
+    assert "+            publish_map(pubLaserCloudMap);" in patch
+    assert patch_path.name in setup
+
+
 def test_driver2_jammy_patch_enforces_cxx17():
     patch_path = ROOT / "deploy" / "mapping" / "patches" / "livox-driver2-jammy-cxx17.patch"
     patch = patch_path.read_text(encoding="utf-8")

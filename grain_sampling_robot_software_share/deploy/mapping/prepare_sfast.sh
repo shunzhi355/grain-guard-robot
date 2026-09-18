@@ -11,6 +11,7 @@ UPSTREAM_REV="93946196081ff8e6f665a6ddbd8024f65711edab"
 PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-livox-driver2.patch"
 BUILD_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-message-generation-order.patch"
 JAMMY_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-jammy-cxx17.patch"
+MAP_PUBLISH_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-laser-map-publish.patch"
 SOPHUS_URL="https://github.com/strasdat/Sophus.git"
 SOPHUS_REV="a621ff2e56c56c839a6c40418d42c3c254424b5c"
 SOPHUS_PATCH_FILE="$DEPLOY_DIR/patches/sophus-a621ff-jammy-eigen34.patch"
@@ -27,6 +28,7 @@ mapping_source_ros1
 [ -f "$PATCH_FILE" ] || { echo "[FAIL] patch missing: $PATCH_FILE" >&2; exit 1; }
 [ -f "$BUILD_PATCH_FILE" ] || { echo "[FAIL] build patch missing: $BUILD_PATCH_FILE" >&2; exit 1; }
 [ -f "$JAMMY_PATCH_FILE" ] || { echo "[FAIL] Jammy patch missing: $JAMMY_PATCH_FILE" >&2; exit 1; }
+[ -f "$MAP_PUBLISH_PATCH_FILE" ] || { echo "[FAIL] map publish patch missing: $MAP_PUBLISH_PATCH_FILE" >&2; exit 1; }
 [ -f "$SOPHUS_PATCH_FILE" ] || { echo "[FAIL] Sophus patch missing: $SOPHUS_PATCH_FILE" >&2; exit 1; }
 
 if [ "$MODE" = "--check" ]; then
@@ -97,6 +99,10 @@ if ! grep -q 'set_property(TARGET sfastlio_mapping PROPERTY CXX_STANDARD 17)' "$
 fi
 if ! grep -q 'set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"; then
     sed -i '/add_dependencies(fastlio_mapping_re/a set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"
+fi
+if ! git -C "$SOURCE_DIR" apply --reverse --check "$MAP_PUBLISH_PATCH_FILE" 2>/dev/null; then
+    git -C "$SOURCE_DIR" apply --check "$MAP_PUBLISH_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$MAP_PUBLISH_PATCH_FILE"
 fi
 
 mapping_source_workspace "$LIVOX_WS"
