@@ -83,10 +83,12 @@ if ! git -C "$SOURCE_DIR" apply --reverse --check "$BUILD_PATCH_FILE" 2>/dev/nul
     git -C "$SOURCE_DIR" apply --check "$BUILD_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$BUILD_PATCH_FILE"
 fi
-if ! git -C "$SOURCE_DIR" apply --reverse --check "$JAMMY_PATCH_FILE" 2>/dev/null; then
-    git -C "$SOURCE_DIR" apply --check "$JAMMY_PATCH_FILE"
-    git -C "$SOURCE_DIR" apply "$JAMMY_PATCH_FILE"
+if grep -q -- '-std=c++14' "$SOURCE_DIR/CMakeLists.txt"; then
+    sed -i 's/-std=c++14/-std=c++17/g' "$SOURCE_DIR/CMakeLists.txt"
 fi
+grep -q -- '-std=c++17' "$SOURCE_DIR/CMakeLists.txt" || {
+    echo "[FAIL] S-FAST_LIO CMake is not configured for C++17" >&2; exit 1;
+}
 
 mapping_source_workspace "$LIVOX_WS"
 (cd "$SFAST_WS" && catkin_make -j"$BUILD_JOBS" -l"$BUILD_JOBS")
