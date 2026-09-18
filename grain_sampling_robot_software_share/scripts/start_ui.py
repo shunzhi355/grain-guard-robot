@@ -8,11 +8,59 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import logging
 import sys
+import os
+import faulthandler
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
+
+
+class TeeStream:
+    """Keep terminal output while preserving diagnostics on disk."""
+
+    def __init__(self, terminal, logfile):
+        self.terminal = terminal
+        self.logfile = logfile
+
+    def write(self, text):
+        self.logfile.write(text)
+        self.logfile.flush()
+        return self.terminal.write(text)
+
+    def flush(self):
+        self.logfile.flush()
+        self.terminal.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.terminal, name)
+
+
+def setup_session_log():
+    directory = Path(os.environ.get("GRAIN_UI_LOG_DIR", PROJECT_ROOT / "log" / "ui"))
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (datetime.now().strftime("%Y%m%d-%H%M%S-%f") + f"-{os.getpid()}.log")
+    logfile = path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = TeeStream(sys.stdout, logfile)
+    sys.stderr = TeeStream(sys.stderr, logfile)
+    # Keep the file alive for native crashes, including Qt aborts.
+    faulthandler.enable(file=logfile, all_threads=True)
+    # rospy/Qt imports may install a root handler before ``main.py`` calls
+    # basicConfig().  In that case basicConfig() is a no-op and workflow
+    # INFO/ERROR records never reach this session file.  Replace any early
+    # handlers now that stderr is tee'd to the per-run log.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s",
+        force=True,
+    )
+    print(f"UI session={path} started={datetime.now().astimezone().isoformat()}", flush=True)
+    for name in ("GRAIN_SAMPLING_UI_ENABLE_MECHANISM", "GRAIN_SAMPLING_UI_SKIP_MAPPING",
+                 "GRAIN_SAMPLING_UI_RC_PUBLISH"):
+        print(f"{name}={os.environ.get(name, '<unset>')}", flush=True)
 
 
 def load_qt():
@@ -87,6 +135,7 @@ def main(argv=None):
     parser.add_argument("--check-qt", action="store_true", help="Check installed Qt only, then exit")
     parser.add_argument("--preview-descent", action="store_true", help="Isolated UI-only descent preview")
     args = parser.parse_args(argv)
+    setup_session_log()
     try:
         binding = load_qt()
     except (ImportError, RuntimeError) as exc:
