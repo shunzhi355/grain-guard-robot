@@ -52,6 +52,7 @@ LIVOX_IMU_TOPIC = os.environ.get("LIVOX_IMU_TOPIC", "/livox/imu")
 #: Process-name patterns matched by ``pgrep``/``pkill -f``.
 MAPPING_PATTERN = "sfastlio_mapping"
 RELOC_PATTERN = "fastlio_mapping_re"
+LIVOX_PATTERN = "livox_ros_driver2_node"
 
 
 def _pgrep(pattern: str) -> bool:
@@ -113,6 +114,69 @@ class SlamBridge:
             logger.exception("Mapping environment check failed")
             return False
 
+    def _run_mapping_command(self, command: str, timeout: int = 60) -> bool:
+        """Run a command inside the configured ROS1 mapping environment."""
+        try:
+            result = subprocess.run(
+                ["bash", "-c", f"{self._mapping_shell()} && {command}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=timeout,
+            )
+            return result.returncode == 0
+        except Exception:
+            logger.exception("Mapping command failed: %s", command)
+            return False
+
+    def _ensure_mapping_network(self) -> bool:
+        helper = os.path.join(PROJECT_ROOT, "scripts", "ensure_mapping_network.sh")
+        try:
+            return subprocess.run(["bash", helper], timeout=30).returncode == 0
+        except Exception:
+            logger.exception("Failed to prepare the MID360 network route")
+            return False
+
+    def _ensure_ros_master(self) -> bool:
+        if self._run_mapping_command("timeout 3 rosnode list", timeout=8):
+            return True
+        try:
+            subprocess.Popen(
+                ["bash", "-c", f"{self._mapping_shell()} && setsid nohup roscore > /tmp/roscore.log 2>&1 < /dev/null &"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            logger.exception("Failed to start roscore")
+            return False
+        for _ in range(20):
+            if self._run_mapping_command("timeout 3 rosnode list", timeout=8):
+                return True
+            time.sleep(0.5)
+        logger.error("ROS master did not become ready")
+        return False
+
+    def _ensure_livox_driver(self) -> bool:
+        if not _pgrep(LIVOX_PATTERN):
+            cmd = (
+                f"{self._mapping_shell()} && "
+                f"setsid nohup roslaunch {shlex.quote(LIVOX_PACKAGE)} "
+                f"{shlex.quote(LIVOX_LAUNCH)} > /tmp/livox.log 2>&1 < /dev/null &"
+            )
+            try:
+                subprocess.Popen(
+                    ["bash", "-c", cmd],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                logger.exception("Failed to start livox_ros_driver2")
+                return False
+        return (
+            self._run_mapping_command(
+                f"mapping_wait_for_topic {shlex.quote(LIVOX_LIDAR_TOPIC)}", timeout=45
+            )
+            and self._run_mapping_command(
+                f"mapping_wait_for_topic {shlex.quote(LIVOX_IMU_TOPIC)}", timeout=45
+            )
+        )
+
     def start_mapping(self) -> bool:
         """Ensure sfastlio_mapping is running (idempotent across processes)."""
         if self._mapping_running():
@@ -120,8 +184,14 @@ class SlamBridge:
             return True
         # Mutually exclusive: never run mapping + relocalization together.
         self.stop_relocalization()
+        if not self._ensure_mapping_network():
+            logger.error("MID360 network route is not ready")
+            return False
         if not self._mapping_environment_ready():
             logger.error("Mapping environment is not ready")
+            return False
+        if not self._ensure_ros_master() or not self._ensure_livox_driver():
+            logger.error("ROS master or Livox Driver2 is not ready")
             return False
         if not os.path.isfile(MID360_YAML) or not os.access(MID360_YAML, os.R_OK):
             logger.error("S-FAST_LIO config is missing: %s", MID360_YAML)
@@ -140,7 +210,11 @@ class SlamBridge:
                 ["bash", "-c", cmd],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            return True
+            return (
+                self._run_mapping_command("mapping_wait_for_topic /Odometry", timeout=45)
+                and self._run_mapping_command("mapping_wait_for_topic /cloud_registered", timeout=45)
+                and self._run_mapping_command("mapping_wait_for_topic /Laser_map", timeout=45)
+            )
         except Exception:
             logger.exception("Failed to start sfastlio_mapping")
             return False
