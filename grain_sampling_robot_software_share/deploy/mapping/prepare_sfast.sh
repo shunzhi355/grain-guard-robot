@@ -104,6 +104,9 @@ if ! git -C "$SOURCE_DIR" apply --reverse --check "$MAP_PUBLISH_PATCH_FILE" 2>/d
     git -C "$SOURCE_DIR" apply --check "$MAP_PUBLISH_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$MAP_PUBLISH_PATCH_FILE"
 fi
+grep -q '^[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapping.cpp" || {
+    echo "[FAIL] S-FAST_LIO Laser_map publish call is not active" >&2; exit 1;
+}
 
 mapping_source_workspace "$LIVOX_WS"
 (cd "$SFAST_WS" && catkin_make -j"$BUILD_JOBS" -l"$BUILD_JOBS")
