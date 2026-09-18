@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from contextlib import contextmanager
 from functools import wraps
@@ -59,6 +60,9 @@ from utils.sampling_params import (
     TIGHTEN_PULSE_OPEN,
     X2P_POSITION_TOLERANCE_MM,
     X2P_RETURN_CLEARANCE_MM,
+    PRESS_DOWN_CM,
+    PRESS_UP_CM,
+    PRESS_PAUSE_S,
 )
 
 logger = logging.getLogger(__name__)
@@ -535,6 +539,10 @@ class _BaseMechanismController:
             except Exception:  # noqa: BLE001 - 急停写入尽力而为
                 pass
 
+        drive = getattr(self, "lift_drive", None)
+        if drive is not None:
+            drive.stop()
+
     def reset(self) -> None:
         """清除急停标志，允许继续执行（不影响当前通道状态）。"""
         self._stop_flag.clear()
@@ -691,7 +699,8 @@ class _BaseMechanismController:
         Parameters
         ----------
         direction : str
-            ``up``=向上（提升）/ ``down``=向下（下压）。
+            ``up``/``down`` 为单程；``down_cycle`` 保存原点并往复下压，
+            ``return`` 回到保存原点下方的安全余量位置。
         distance_cm : float
             移动距离（厘米），必须 > 0。
         duration_s : float | None
@@ -702,7 +711,7 @@ class _BaseMechanismController:
         """
         if self.lift_drive is None:
             raise RuntimeError("X2P 伺服未注入，无法按距离移动")
-        if not distance_cm > 0:
+        if not math.isfinite(distance_cm) or not distance_cm > 0:
             raise ValueError("distance_cm 必须大于 0")
         normalized_direction = str(direction).strip().lower()
         if normalized_direction not in {"up", "down", "down_cycle", "return"}:
@@ -712,19 +721,69 @@ class _BaseMechanismController:
             rpm = max(1, int(self.lift_rpm))
             duration_s = distance_mm / (5.0 * rpm / 60.0)
         secs = float(duration_s)
+        if not math.isfinite(secs) or secs <= 0:
+            raise ValueError("duration_s 必须是有限正数")
         with self._lift_motion_lock:
+            if self._stop_flag.is_set():
+                raise RuntimeError("急停已锁定，拒绝升降")
             if normalized_direction == "down_cycle":
                 if self._lift_cycle_origin is not None:
                     raise RuntimeError(
                         "上一次自动下压尚未完成绝对回程，拒绝覆盖原点"
                     )
+                down_mm, up_mm = PRESS_DOWN_CM * 10.0, PRESS_UP_CM * 10.0
+                if (not all(math.isfinite(v) for v in (down_mm, up_mm, PRESS_PAUSE_S))
+                        or not down_mm > up_mm >= 0 or PRESS_PAUSE_S < 0):
+                    raise ValueError("往复参数要求 down > up >= 0，pause >= 0")
+                limits = getattr(self.lift_drive.config, "limits", None)
+                max_distance = float(getattr(limits, "max_distance_mm", 300.0))
+                if distance_mm > max_distance:
+                    raise ValueError("往复下压总行程超过伺服单段行程限制")
+                counts = float(self.lift_drive.counts_per_mm)
+                sign = int(getattr(self.lift_drive.config, "encoder_forward_sign", 1))
+                if not math.isfinite(counts) or counts <= 0 or sign not in (-1, 1):
+                    raise ValueError("编码器比例或方向无效")
                 origin = int(self.lift_drive.read_position())
                 self._lift_cycle_origin = origin
                 logger.info(
                     "LIFT_CYCLE_ORIGIN_SAVED position=%d distance_mm=%.3f",
                     origin, distance_mm,
                 )
-                command_direction = "down"
+                progress = 0.0
+                leg = 0
+                try:
+                    while progress < distance_mm - 1e-9:
+                        bottom = min(progress + down_mm, distance_mm)
+                        targets = [bottom]
+                        # 末程停在段终点，禁止超过目标深度。
+                        if bottom < distance_mm - 1e-9 and up_mm > 0:
+                            targets.append(bottom - up_mm)
+                        for depth in targets:
+                            if self._stop_flag.is_set():
+                                raise RuntimeError("往复下压被急停中断")
+                            target = origin - sign * round(depth * counts)
+                            actual_mm = abs(target - self.lift_drive.read_position()) / counts
+                            leg += 1
+                            logger.info("LIFT_CYCLE_LEG leg=%d depth_mm=%.3f target=%d", leg, depth, target)
+                            result = self.lift_drive.move_to_position(
+                                target, max(actual_mm, 0.001) * secs / distance_mm,
+                                tolerance_mm=tolerance_mm,
+                            )
+                            logger.info("LIFT_CYCLE_LEG_DONE leg=%d result=%s", leg, result)
+                            if self._stop_flag.is_set():
+                                raise RuntimeError("往复下压被急停中断")
+                            progress = depth
+                            if progress < distance_mm - 1e-9 and self._stop_flag.wait(PRESS_PAUSE_S):
+                                raise RuntimeError("往复下压被急停中断")
+                    logger.info("LIFT_CYCLE_COMPLETE origin=%d depth_mm=%.3f legs=%d", origin, progress, leg)
+                    return result
+                except Exception:
+                    logger.exception("LIFT_CYCLE_FAILED origin=%d leg=%d; 原点保留，禁止自动重放", origin, leg)
+                    try:
+                        self.lift_drive.stop()
+                    except Exception:
+                        logger.exception("往复下压失败后的停机失败")
+                    raise
             elif normalized_direction == "return":
                 if self._lift_cycle_origin is None:
                     raise RuntimeError("没有已保存的下压起点，拒绝自动回程")

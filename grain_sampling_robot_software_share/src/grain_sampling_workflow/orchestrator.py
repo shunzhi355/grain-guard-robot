@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import date, datetime
 from typing import Callable, Optional
+from utils.sampling_params import PRESS_SEGMENT_CM
 
 from grain_sampling_workflow.state_machine import (
     SamplingAction,
@@ -38,7 +39,7 @@ MECHANISM_SETTLE_MARGIN: float = 0.5
 #: 由状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度。
 #: 实机联调：单次下压/上升 20cm（用户 2026-09 标定：20cm 长行程编码器
 #: 闭环精度好，实测误差 ~1.2mm；< 30cm max_distance，且 < 25cm 限位）。
-PRESS_STEP_CM: float = 20.0
+PRESS_STEP_CM: float = PRESS_SEGMENT_CM
 
 
 class WorkflowOrchestrator:
