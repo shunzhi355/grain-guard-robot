@@ -3,6 +3,23 @@
 MAPPING_DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAPPING_PROJECT_ROOT="$(cd "${MAPPING_DEPLOY_DIR}/../.." && pwd)"
 
+mapping_source_setup() {
+    local setup="$1"
+    local nounset_was_enabled=0
+    local source_status
+
+    case "$-" in
+        *u*) nounset_was_enabled=1; set +u ;;
+    esac
+    # Catkin-generated setup files may read variables such as ROS_DISTRO before
+    # defining them, so source them without inheriting a caller's nounset mode.
+    # shellcheck disable=SC1090
+    source "$setup"
+    source_status=$?
+    [ "$nounset_was_enabled" -eq 0 ] || set -u
+    return "$source_status"
+}
+
 mapping_load_config() {
     local env_file="${MAPPING_ENV_FILE:-${MAPPING_DEPLOY_DIR}/mapping.env}"
     local app_config="${MAPPING_APP_CONFIG:-${MAPPING_PROJECT_ROOT}/config/livox_config.json}"
@@ -39,13 +56,11 @@ mapping_source_ros1() {
     local setup
     if [ -n "${ROS_SETUP_BASH:-}" ]; then
         [ -f "$ROS_SETUP_BASH" ] || { echo "[FAIL] ROS_SETUP_BASH not found: $ROS_SETUP_BASH" >&2; return 1; }
-        # shellcheck disable=SC1090
-        source "$ROS_SETUP_BASH"
+        mapping_source_setup "$ROS_SETUP_BASH"
     else
         for setup in /opt/ros/*/setup.bash; do
             [ -f "$setup" ] || continue
-            # shellcheck disable=SC1090
-            source "$setup"
+            mapping_source_setup "$setup"
             if [ "${ROS_VERSION:-1}" != "2" ] && command -v roscore >/dev/null 2>&1; then
                 ROS_SETUP_BASH="$setup"
                 export ROS_SETUP_BASH
@@ -67,8 +82,7 @@ mapping_source_workspace() {
     local setup
     for setup in "$workspace/devel/setup.bash" "$workspace/install/setup.bash"; do
         if [ -f "$setup" ]; then
-            # shellcheck disable=SC1090
-            source "$setup"
+            mapping_source_setup "$setup"
             return 0
         fi
     done

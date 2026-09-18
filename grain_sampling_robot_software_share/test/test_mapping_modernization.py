@@ -64,11 +64,15 @@ def test_active_mapping_chain_has_no_legacy_platform_assumptions():
         assert not any(value in text for value in forbidden), path
 
     bridge = (ROOT / "src" / "grain_sampling_workflow" / "slam_bridge.py").read_text(encoding="utf-8")
+    runtime = (ROOT / "deploy" / "mapping" / "runtime.sh").read_text(encoding="utf-8")
     assert "ensure_mapping_network.sh" in bridge
     assert "livox_ros_driver2_node" in bridge
     assert "mapping_wait_for_topic /Odometry" in bridge
     assert "mapping_wait_for_topic /cloud_registered" in bridge
     assert "mapping_wait_for_topic /Laser_map" in bridge
+    assert "mapping_source_setup" in runtime
+    assert "nounset_was_enabled=1; set +u" in runtime
+    assert '[ "$nounset_was_enabled" -eq 0 ] || set -u' in runtime
 
 
 def test_sfast_patch_carries_driver2_and_mid360_contract():
