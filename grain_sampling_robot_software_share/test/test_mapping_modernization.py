@@ -70,6 +70,8 @@ def test_active_mapping_chain_has_no_legacy_platform_assumptions():
     assert "mapping_wait_for_topic /Odometry" in bridge
     assert "mapping_wait_for_topic /cloud_registered" in bridge
     assert "mapping_wait_for_topic /Laser_map" in bridge
+    assert "os.makedirs(PCD_DIR, exist_ok=True)" in bridge
+    assert "self._ensure_pcd_directory()" in bridge
     assert "mapping_source_setup" in runtime
     assert "nounset_was_enabled=1; set +u" in runtime
     assert '[ "$nounset_was_enabled" -eq 0 ] || set -u' in runtime

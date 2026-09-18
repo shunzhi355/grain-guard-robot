@@ -177,6 +177,15 @@ class SlamBridge:
             )
         )
 
+    def _ensure_pcd_directory(self) -> bool:
+        """Create the S-FAST_LIO output directory before periodic PCD writes."""
+        try:
+            os.makedirs(PCD_DIR, exist_ok=True)
+            return os.path.isdir(PCD_DIR) and os.access(PCD_DIR, os.W_OK)
+        except OSError:
+            logger.exception("Failed to prepare the S-FAST_LIO PCD directory: %s", PCD_DIR)
+            return False
+
     def start_mapping(self) -> bool:
         """Ensure sfastlio_mapping is running (idempotent across processes)."""
         if self._mapping_running():
@@ -195,6 +204,9 @@ class SlamBridge:
             return False
         if not os.path.isfile(MID360_YAML) or not os.access(MID360_YAML, os.R_OK):
             logger.error("S-FAST_LIO config is missing: %s", MID360_YAML)
+            return False
+        if not self._ensure_pcd_directory():
+            logger.error("S-FAST_LIO PCD directory is not writable: %s", PCD_DIR)
             return False
         cmd = (
             f"{self._mapping_shell()} && "
