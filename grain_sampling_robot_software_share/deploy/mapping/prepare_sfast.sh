@@ -92,6 +92,12 @@ fi
 grep -q -- '-std=c++17' "$SOURCE_DIR/CMakeLists.txt" || {
     echo "[FAIL] S-FAST_LIO CMake is not configured for C++17" >&2; exit 1;
 }
+if ! grep -q 'set_property(TARGET sfastlio_mapping PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"; then
+    sed -i '/add_dependencies(sfastlio_mapping/a set_property(TARGET sfastlio_mapping PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"
+fi
+if ! grep -q 'set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"; then
+    sed -i '/add_dependencies(fastlio_mapping_re/a set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"
+fi
 
 mapping_source_workspace "$LIVOX_WS"
 (cd "$SFAST_WS" && catkin_make -j"$BUILD_JOBS" -l"$BUILD_JOBS")

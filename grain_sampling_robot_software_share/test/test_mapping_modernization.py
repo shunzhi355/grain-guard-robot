@@ -93,6 +93,8 @@ def test_sfast_jammy_patch_enables_cxx17():
     assert patch_path.name in setup
     assert "sed -i 's/-std=c++14/-std=c++17/g'" in setup
     assert "sed -i 's/-std=c++0x/-std=c++17/g'" in setup
+    assert "set_property(TARGET sfastlio_mapping PROPERTY CXX_STANDARD 17)" in setup
+    assert "set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)" in setup
 
 
 def test_driver2_jammy_patch_enforces_cxx17():
