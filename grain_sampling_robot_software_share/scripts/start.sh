@@ -5,11 +5,22 @@
 # Usage:  bash start.sh
 # ================================================================
 
-source /opt/ros/noetic/setup.bash
-source /home/orangepi/fastlio_ws/devel/setup.bash        # for livox_ros_driver2
-source /home/orangepi/fastlio2_ws/devel/setup.bash 2>/dev/null  # for S-FAST_LIO
-cd ~/grain_sampling_robot_software
-export PYTHONPATH="$HOME/grain_sampling_robot_software/src:${PYTHONPATH:-}"
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../deploy/mapping/runtime.sh
+source "$PROJECT_ROOT/deploy/mapping/runtime.sh"
+mapping_load_config
+mapping_source_ros1
+
+bash "$SCRIPT_DIR/check_mapping_env.sh" --preflight
+bash "$SCRIPT_DIR/ensure_mapping_network.sh"
+bash "$SCRIPT_DIR/check_mapping_env.sh" --runtime
+mapping_source_workspace "$LIVOX_WS"
+mapping_source_workspace "$SFAST_WS"
+
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
 # PID tracking directory — used for clean shutdown
 PID_DIR="/tmp/grain_sampling_pids"
@@ -24,20 +35,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Helper: wait until a ROS topic is publishing (max N seconds)
-wait_for_topic() {
-    local topic=$1 max_wait=${2:-15}
-    local start=$(date +%s)
-    until timeout 2 rostopic hz "$topic" 2>/dev/null | grep -q "average rate"; do
-        if [ $(($(date +%s) - start)) -ge $max_wait ]; then
-            echo "[FAIL] $topic not publishing after ${max_wait}s"
-            return 1
-        fi
-        sleep 1
-    done
-    echo "[OK] $topic publishing"
-}
-
 # 1. Start roscore if not running
 if ! pgrep roscore > /dev/null; then
     echo "[start] Launching roscore..."
@@ -51,11 +48,12 @@ if pgrep -f livox_ros_driver2 > /dev/null 2>&1; then
     pkill -f livox_ros_driver2 2>/dev/null || true
     sleep 1
 fi
-setsid nohup roslaunch livox_ros_driver2 msg_MID360.launch > /tmp/livox.log 2>&1 &
+setsid nohup roslaunch "$LIVOX_PACKAGE" "$LIVOX_LAUNCH" > /tmp/livox.log 2>&1 &
 echo $! > "$PID_DIR/livox.pid"
 disown
-echo "[start] Waiting for /livox/lidar..."
-wait_for_topic "/livox/lidar" 15
+echo "[start] Waiting for Livox lidar and IMU data..."
+mapping_wait_for_topic "$LIVOX_LIDAR_TOPIC"
+mapping_wait_for_topic "$LIVOX_IMU_TOPIC"
 
 # 3. Start S-FAST_LIO relocalization (uses sfast_lio package in fastlio2_ws)
 echo "[start] Launching S-FAST_LIO relocalization..."
@@ -63,11 +61,11 @@ if pgrep -f fastlio_mapping > /dev/null 2>&1; then
     pkill -f fastlio_mapping 2>/dev/null || true
     sleep 1
 fi
-setsid nohup roslaunch sfast_lio mapping_mid360_relocalization.launch > /tmp/sfastlio.log 2>&1 &
+setsid nohup roslaunch "$SFAST_PACKAGE" "$SFAST_RELOCALIZATION_LAUNCH" > /tmp/sfastlio.log 2>&1 &
 echo $! > "$PID_DIR/sfastlio.pid"
 disown
 echo "[start] Waiting for /Odometry..."
-wait_for_topic "/Odometry" 20
+mapping_wait_for_topic "/Odometry" 20
 
 # 4. Start chassis motor driver (needs sudo for PWM)
 echo "[start] Launching motor_driver..."

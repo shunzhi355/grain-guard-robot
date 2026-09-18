@@ -28,13 +28,26 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import subprocess
 import time
 
 logger = logging.getLogger(__name__)
 
-PCD_DIR = os.path.expanduser("~/fastlio2_ws/src/S-FAST_LIO/PCD")
-MID360_YAML = os.path.expanduser("~/fastlio2_ws/src/S-FAST_LIO/config/mid360.yaml")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+MAPPING_RUNTIME = os.path.join(PROJECT_ROOT, "deploy", "mapping", "runtime.sh")
+MAPPING_ENV = os.path.join(PROJECT_ROOT, "deploy", "mapping", "mapping.env")
+SFAST_WS = os.environ.get("SFAST_WS", os.path.expanduser("~/fastlio2_ws"))
+LIVOX_WS = os.environ.get("LIVOX_WS", os.path.expanduser("~/fastlio_ws"))
+PCD_DIR = os.environ.get("SFAST_PCD_DIR", os.path.join(SFAST_WS, "src", "S-FAST_LIO", "PCD"))
+MID360_YAML = os.environ.get("SFAST_CONFIG", os.path.join(SFAST_WS, "src", "S-FAST_LIO", "config", "mid360.yaml"))
+LIVOX_PACKAGE = os.environ.get("LIVOX_PACKAGE", "livox_ros_driver2")
+LIVOX_LAUNCH = os.environ.get("LIVOX_LAUNCH", "msg_MID360.launch")
+SFAST_PACKAGE = os.environ.get("SFAST_PACKAGE", "sfast_lio")
+SFAST_EXECUTABLE = os.environ.get("SFAST_MAPPING_EXECUTABLE", os.path.join(SFAST_WS, "devel", "lib", SFAST_PACKAGE, "sfastlio_mapping"))
+SFAST_RELOCALIZATION_LAUNCH = os.environ.get("SFAST_RELOCALIZATION_LAUNCH", "mapping_mid360_relocalization.launch")
+LIVOX_LIDAR_TOPIC = os.environ.get("LIVOX_LIDAR_TOPIC", "/livox/lidar")
+LIVOX_IMU_TOPIC = os.environ.get("LIVOX_IMU_TOPIC", "/livox/imu")
 
 #: Process-name patterns matched by ``pgrep``/``pkill -f``.
 MAPPING_PATTERN = "sfastlio_mapping"
@@ -81,20 +94,24 @@ class SlamBridge:
     def _reloc_running(self) -> bool:
         return _pgrep(RELOC_PATTERN)
 
-    def _ensure_pcd_save_enabled(self) -> None:
-        """Force ``pcd_save_en: true`` so SIGINT actually writes GlobalMap.pcd.
+    def _mapping_shell(self) -> str:
+        """Return a shell prelude using the parameterized mapping runtime."""
+        return (
+            f"source {shlex.quote(MAPPING_RUNTIME)} && "
+            f"source {shlex.quote(MAPPING_ENV)} && "
+            "mapping_load_config && mapping_source_ros1 && "
+            f"mapping_source_workspace {shlex.quote(LIVOX_WS)} && "
+            f"mapping_source_workspace {shlex.quote(SFAST_WS)}"
+        )
 
-        S-FAST_LIO's save path is gated by ``pcd_save_en``; when false the map
-        is silently discarded on exit.  Idempotent (sed no-ops if already true).
-        """
+    def _mapping_environment_ready(self) -> bool:
+        """Check runtime prerequisites without changing board configuration."""
+        checker = os.path.join(PROJECT_ROOT, "scripts", "check_mapping_env.sh")
         try:
-            subprocess.run(
-                ["sed", "-i", "s/pcd_save_en: false/pcd_save_en: true/", MID360_YAML],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
+            return subprocess.run(["bash", checker, "--runtime"], timeout=45).returncode == 0
         except Exception:
-            logger.exception("Failed to ensure pcd_save_en=true")
+            logger.exception("Mapping environment check failed")
+            return False
 
     def start_mapping(self) -> bool:
         """Ensure sfastlio_mapping is running (idempotent across processes)."""
@@ -103,14 +120,19 @@ class SlamBridge:
             return True
         # Mutually exclusive: never run mapping + relocalization together.
         self.stop_relocalization()
-        self._ensure_pcd_save_enabled()
+        if not self._mapping_environment_ready():
+            logger.error("Mapping environment is not ready")
+            return False
+        if not os.path.isfile(MID360_YAML) or not os.access(MID360_YAML, os.R_OK):
+            logger.error("S-FAST_LIO config is missing: %s", MID360_YAML)
+            return False
         cmd = (
-            "source /opt/ros/noetic/setup.bash && "
-            "source ~/fastlio_ws/devel/setup.bash && "
-            "source ~/fastlio2_ws/devel/setup.bash && "
-            "rosparam load ~/fastlio2_ws/src/S-FAST_LIO/config/mid360.yaml && "
-            "cd ~/fastlio2_ws && "
-            "setsid nohup ~/fastlio2_ws/devel/lib/sfast_lio/sfastlio_mapping "
+            f"{self._mapping_shell()} && "
+            f"mapping_wait_for_topic {shlex.quote(LIVOX_LIDAR_TOPIC)} && "
+            f"mapping_wait_for_topic {shlex.quote(LIVOX_IMU_TOPIC)} && "
+            f"rosparam load {shlex.quote(MID360_YAML)} && "
+            f"cd {shlex.quote(SFAST_WS)} && "
+            f"setsid nohup {shlex.quote(SFAST_EXECUTABLE)} "
             "> /tmp/sfast.log 2>&1 < /dev/null &"
         )
         try:
@@ -171,12 +193,15 @@ class SlamBridge:
         except Exception:
             logger.exception("Failed to update map_file_path")
             return False
+        if not self._mapping_environment_ready():
+            logger.error("Mapping environment is not ready")
+            return False
         cmd = (
-            "source /opt/ros/noetic/setup.bash && "
-            "source ~/fastlio_ws/devel/setup.bash && "
-            "source ~/fastlio2_ws/devel/setup.bash && "
+            f"{self._mapping_shell()} && "
+            f"mapping_wait_for_topic {shlex.quote(LIVOX_LIDAR_TOPIC)} && "
+            f"mapping_wait_for_topic {shlex.quote(LIVOX_IMU_TOPIC)} && "
             "export QT_QPA_PLATFORM=offscreen && "
-            "roslaunch sfast_lio mapping_mid360_relocalization.launch rviz:=false"
+            f"roslaunch {shlex.quote(SFAST_PACKAGE)} {shlex.quote(SFAST_RELOCALIZATION_LAUNCH)} rviz:=false"
         )
         try:
             subprocess.Popen(

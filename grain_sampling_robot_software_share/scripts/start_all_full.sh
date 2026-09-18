@@ -7,19 +7,28 @@
 # 日志:  /tmp/{livox,sfast,mechanism,rc,motor_daemon,cmd_vel_to_motor,gc,obs,ui}.log
 # ============================================================
 
-source /opt/ros/noetic/setup.bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../deploy/mapping/runtime.sh
+source "$PROJECT_ROOT/deploy/mapping/runtime.sh"
+mapping_load_config
+mapping_source_ros1
 export ROS_MASTER_URI=http://localhost:11311
 export ROS_HOSTNAME=localhost
-export PYTHONPATH=/home/orangepi/grain_sampling_robot_software:/home/orangepi/grain_sampling_robot_software/src:$PYTHONPATH
+export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:${PYTHONPATH:-}"
 export QT_QPA_PLATFORM=offscreen   # 仅影响无显示器节点(FAST-LIO); UI 内部会自己设置 DISPLAY
 
 W() { printf '%s\n' "===> $*"; }
 
-# ---------- [0] 雷达网口路由 (已用 systemd 持久化, 兜底再补一次) ----------
-W "[0] Livox 网口路由"
-systemctl is-active livox-route >/dev/null 2>&1 || echo orangepi | sudo -S systemctl start livox-route 2>/dev/null
-ip route get 192.168.1.116 >/dev/null 2>&1 || echo orangepi | sudo -S ip route add 192.168.1.0/24 dev enP3p49s0 src 192.168.1.200 2>/dev/null
-echo "    路由: $(ip route get 192.168.1.116 2>/dev/null | head -1)"
+# ---------- [0] 建图环境与雷达精确路由 ----------
+W "[0] 建图环境与 Livox 专用路由"
+bash "$SCRIPT_DIR/check_mapping_env.sh" --preflight
+bash "$SCRIPT_DIR/ensure_mapping_network.sh"
+bash "$SCRIPT_DIR/check_mapping_env.sh" --runtime
+mapping_source_workspace "$LIVOX_WS"
+mapping_source_workspace "$SFAST_WS"
+echo "    路由: $(ip route get "$MID360_IP" 2>/dev/null | head -1)"
 
 # ---------- [1] GPIO 授权 (34/40/44/111) ----------
 W "[1] GPIO 授权"
@@ -44,29 +53,24 @@ done
 echo "    roscore OK"
 
 # ---------- [3] Livox MID360 驱动 ----------
-W "[3] Livox MID360 驱动 (net 192.168.1.116)"
+W "[3] Livox MID360 驱动 (net $MID360_IP)"
 if ! pgrep -f "livox_ros_driver2_node" >/dev/null; then
-    source /home/orangepi/fastlio_ws/devel/setup.bash
-    cd /home/orangepi/fastlio_ws
-    setsid nohup roslaunch livox_ros_driver2 msg_MID360.launch > /tmp/livox.log 2>&1 < /dev/null &
+    cd "$LIVOX_WS"
+    setsid nohup roslaunch "$LIVOX_PACKAGE" "$LIVOX_LAUNCH" > /tmp/livox.log 2>&1 < /dev/null &
     disown
-    echo "    驱动已启动, 等待 /livox/imu ..."
-    for i in $(seq 1 30); do
-        timeout 2 rostopic hz /livox/imu 2>/dev/null | grep -q average && break; sleep 1
-    done
+    echo "    驱动已启动, 等待 lidar + IMU ..."
 else
     echo "    已在运行"
 fi
-timeout 3 rostopic hz /livox/imu 2>/dev/null | grep average | head -1 | sed 's/^/    imu: /'
+mapping_wait_for_topic "$LIVOX_LIDAR_TOPIC"
+mapping_wait_for_topic "$LIVOX_IMU_TOPIC"
 
 # ---------- [4] S-FAST_LIO 建图 (纯建图/里程计) ----------
 W "[4] S-FAST_LIO 建图"
 if ! pgrep -f "sfastlio_mapping" >/dev/null; then
-    source /home/orangepi/fastlio_ws/devel/setup.bash
-    source /home/orangepi/fastlio2_ws/devel/setup.bash
-    rosparam load /home/orangepi/fastlio2_ws/src/S-FAST_LIO/config/mid360.yaml 2>/dev/null
-    cd /home/orangepi/fastlio2_ws
-    setsid nohup /home/orangepi/fastlio2_ws/devel/lib/sfast_lio/sfastlio_mapping > /tmp/sfast.log 2>&1 < /dev/null &
+    rosparam load "$SFAST_CONFIG"
+    cd "$SFAST_WS"
+    setsid nohup "$SFAST_MAPPING_EXECUTABLE" > /tmp/sfast.log 2>&1 < /dev/null &
     disown
     echo "    建图已启动, 等待 /Odometry ..."
     for i in $(seq 1 30); do

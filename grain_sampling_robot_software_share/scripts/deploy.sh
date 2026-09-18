@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# deploy.sh — One-click deployment script for Grain Sampling Robot
-# Platform:  RK3588 / Ubuntu 20.04 / ROS Noetic
+# deploy.sh — Application deployment script for Grain Sampling Robot
+# Platform:  RK3588 / Ubuntu 22.04 / aarch64 / Debian ROS1 1.15.x
 # Usage:
 #   chmod +x deploy.sh && sudo ./deploy.sh
 #   (root or sudo required for system package installation)
@@ -67,30 +67,18 @@ apt-get install -y -qq \
     network-manager \
     usbutils \
     v4l-utils \
-    ros-noetic-ros-base \
-    ros-noetic-cv-bridge \
-    ros-noetic-image-transport \
-    ros-noetic-tf2 \
-    ros-noetic-tf2-ros \
-    ros-noetic-nav-msgs \
-    ros-noetic-sensor-msgs \
-    ros-noetic-geometry-msgs \
-    ros-noetic-std-msgs \
     > /dev/null
 
 ok "System dependencies installed"
 
 # ── Step 2: Source ROS environment ────────────────────────────────────────
-step 2 "Source ROS environment"
+step 2 "Detect ROS1 environment"
 
-if [[ -f "/opt/ros/noetic/setup.bash" ]]; then
-    # shellcheck source=/dev/null
-    source "/opt/ros/noetic/setup.bash"
-    echo "source /opt/ros/noetic/setup.bash" >> /etc/bash.bashrc
-    ok "ROS Noetic sourced"
-else
-    fail "ROS Noetic not found at /opt/ros/noetic. Install ros-noetic-ros-base first."
-fi
+# shellcheck source=../deploy/mapping/runtime.sh
+source "$PROJECT_ROOT/deploy/mapping/runtime.sh"
+mapping_load_config
+mapping_source_ros1 || fail "Debian ROS1 commands are unavailable; this script does not install ROS"
+ok "ROS1 command environment detected"
 
 # ── Step 3: Install Python dependencies ────────────────────────────────────
 step 3 "Install Python dependencies from requirements.txt"
@@ -104,30 +92,11 @@ pip3 install -r "$PROJECT_ROOT/requirements.txt" --quiet
 ok "Python dependencies installed"
 
 # ── Step 4: Build & install Livox ROS driver ──────────────────────────────
-step 4 "Build and install Livox ROS driver"
+step 4 "Verify explicit mapping dependency bootstrap"
 
-LIVOX_WS="/opt/livox_ros_driver"
-if [[ -d "$LIVOX_WS" ]]; then
-    info "Livox ROS driver already exists at $LIVOX_WS — skipping clone"
-else
-    info "Cloning livox_ros_driver..."
-    git clone -b master https://github.com/Livox-SDK/livox_ros_driver.git "$LIVOX_WS" 2>/dev/null || {
-        warn "Git clone failed; check network or proxy. Livox driver must be installed manually."
-        warn "Skipping Livox driver build..."
-    }
-fi
-
-if [[ -d "$LIVOX_WS/src" ]]; then
-    cd "$LIVOX_WS"
-    catkin build --quiet
-    echo "source $LIVOX_WS/devel/setup.bash" >> /etc/bash.bashrc
-    ok "Livox ROS driver built and installed"
-
-    # Copy project-specific Livox config
-    mkdir -p "$LIVOX_WS/src/livox_ros_driver/config"
-    cp "$PROJECT_ROOT/config/livox_config.json" "$LIVOX_WS/src/livox_ros_driver/config/"
-    ok "Livox configuration deployed"
-fi
+warn "Mapping dependencies are external workspaces and are not implicitly installed here."
+warn "Run deploy/mapping/setup_livox.sh --execute and prepare_sfast.sh --execute as the runtime user."
+info "Frozen dependency identities: $PROJECT_ROOT/deploy/mapping/DEPENDENCIES.md"
 
 # ── Step 5: Install this project (editable) ────────────────────────────────
 step 5 "Install grain-sampling-robot-software"
@@ -165,8 +134,8 @@ python3 -c "import sys; ver=sys.version_info; exit(0 if ver.major==3 and ver.min
     { fail "  Python $PY_VER (<3.10 required)"; ((FAIL++)); }
 
 # ROS
-if ros --version 2>/dev/null; then
-    ok "  ROS Noetic installed"
+if command -v roscore >/dev/null 2>&1 && command -v roslaunch >/dev/null 2>&1; then
+    ok "  Debian ROS1 commands available"
     ((PASS++))
 else
     fail "  ROS not found"
