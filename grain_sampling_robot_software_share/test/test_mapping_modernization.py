@@ -103,6 +103,7 @@ def test_sfast_publishes_laser_map():
     setup = (ROOT / "deploy" / "mapping" / "prepare_sfast.sh").read_text(encoding="utf-8")
 
     assert "+            publish_map(pubLaserCloudMap);" in patch
+    assert '+            if (1) // Publish current ikd-tree points on /Laser_map.' in patch
     assert patch_path.name in setup
     assert "sed -i 's@^[[:space:]]*//[[:space:]]*publish_map" in setup
 

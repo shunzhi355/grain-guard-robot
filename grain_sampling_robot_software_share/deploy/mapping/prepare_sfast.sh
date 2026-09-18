@@ -103,8 +103,14 @@ fi
 if grep -q '^[[:space:]]*//[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapping.cpp"; then
     sed -i 's@^[[:space:]]*//[[:space:]]*publish_map(pubLaserCloudMap);@            publish_map(pubLaserCloudMap);@' "$SOURCE_DIR/src/laserMapping.cpp"
 fi
+if grep -q '^[[:space:]]*if (0) // If you need to see map point' "$SOURCE_DIR/src/laserMapping.cpp"; then
+    sed -i 's/if (0) \/\/ If you need to see map point, change to "if(1)"/if (1) \/\/ Publish current ikd-tree points on \/Laser_map./' "$SOURCE_DIR/src/laserMapping.cpp"
+fi
 grep -q '^[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapping.cpp" || {
     echo "[FAIL] S-FAST_LIO Laser_map publish call is not active" >&2; exit 1;
+}
+grep -q '^[[:space:]]*if (1) // Publish current ikd-tree points' "$SOURCE_DIR/src/laserMapping.cpp" || {
+    echo "[FAIL] S-FAST_LIO map points are not enabled" >&2; exit 1;
 }
 
 mapping_source_workspace "$LIVOX_WS"
