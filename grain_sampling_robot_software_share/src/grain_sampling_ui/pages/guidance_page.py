@@ -640,4 +640,8 @@ class GuidancePage(QWidget):
         if state == SamplingState.COMPLETED:
             self._detail.setText("您可返回主菜单或继续新的任务")
         elif state == SamplingState.STOPPED:
-            self._detail.setText("请检查设备状态后返回主菜单")
+            reason = getattr(self._fsm, "stop_reason", "") if self._fsm else ""
+            if reason:
+                self._detail.setText(f"停止原因：{reason}\n请检查设备状态后返回主菜单")
+            else:
+                self._detail.setText("请检查设备状态后返回主菜单")

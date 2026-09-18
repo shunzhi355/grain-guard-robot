@@ -285,9 +285,9 @@ class TestMechanismIntegration:
                 orch._handle_press_and_suction()
         assert mock_bridge.call_clamp.call_count == 2  # 夹紧 + 回顶后再夹紧
         # press/lift 走 move_lift 精确距离控制（单次 PRESS_STEP_CM=20cm）
-        mock_bridge.call_move_lift.assert_any_call("down", 20.0)
+        mock_bridge.call_move_lift.assert_any_call("down_cycle", 20.0)
         mock_bridge.call_unclamp.assert_called_once()
-        mock_bridge.call_move_lift.assert_any_call("up", 20.0)
+        mock_bridge.call_move_lift.assert_any_call("return", 20.0)
         mock_bridge.call_start_suction.assert_called_once()
         mock_transition.assert_called_with(SamplingAction.SYSTEM_DEPTH_REACHED)
         # pipe counting still works with the real chain

@@ -14,7 +14,7 @@
 | 激光雷达 | Livox MID360（**网口**连接，非 USB） |
 | 底盘 | `dipan/`（motor_driver + goal_controller） |
 | 扦样升降 | X2P 伺服（USB-RS485 Modbus RTU，FTDI FT231X，`/dev/x2p_lift`，导程 5mm） |
-| 多通道执行器 | PCA9685（16 通道 PWM，`/dev/i2c-2`，0x40，50Hz） |
+| 多通道执行器 | PCA9685（16 通道 PWM，TP I2C4，暂定 `/dev/i2c-4`（映射待核实），0x40，50Hz） |
 | 扦样管 | 第 1 节 40cm（夹持在中间），后续每节 1m |
 
 ## 3. 软件架构（ROS Noetic）

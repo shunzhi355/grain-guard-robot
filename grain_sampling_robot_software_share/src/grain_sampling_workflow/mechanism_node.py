@@ -51,6 +51,7 @@ Service                  Action
 from __future__ import annotations
 
 import logging
+import uuid
 import os
 import threading
 import time
@@ -531,6 +532,7 @@ class MechanismNode:
 
         ``kwargs``（如 ``open_bin`` 的 ``depth``）透传给底层动作。
         """
+        logger.info("ACTION_REQUEST action=%s kwargs=%s", action, kwargs)
         resp = Trigger._response_class(success=False, message="starting")
         thread = threading.Thread(
             target=self._execute, args=(action, resp), kwargs=kwargs, daemon=True
@@ -547,9 +549,16 @@ class MechanismNode:
 
     def _execute(self, action: str, resp, **kwargs) -> None:
         """动作工作线程体：执行动作并回填响应 / 记录结果。"""
-        success, message = self.run_action(action, **kwargs)
+        logger.info("ACTION_BEGIN action=%s kwargs=%s", action, kwargs)
+        try:
+            success, message = self.run_action(action, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - service must return a result
+            logger.exception("ACTION_EXCEPTION action=%s", action)
+            success, message = False, f"{action} unhandled exception: {exc}"
         resp.success = success
         resp.message = message
+        log = logger.info if success else logger.error
+        log("ACTION_RESULT action=%s success=%s message=%s", action, success, message)
         with self._lock:
             self.last_results[action] = (success, message)
             self._action_threads.pop(action, None)
@@ -660,10 +669,11 @@ class MechanismNode:
         """move_lift：按距离移动伺服升降（编码器闭环，精确停在目标距离）。"""
         direction = str(req.direction).strip().lower()
         distance_cm = float(req.distance_cm)
-        if direction not in ("up", "down"):
+        if direction not in ("up", "down", "down_cycle", "return"):
             return MoveLift._response_class(
                 success=False,
-                message=f"方向必须是 up/down，得到 {req.direction!r}",
+                message=("方向必须是 up/down/down_cycle/return，"
+                         f"得到 {req.direction!r}"),
             )
         if not distance_cm > 0:
             return MoveLift._response_class(
@@ -672,41 +682,20 @@ class MechanismNode:
         # 时长按 X2P_RPM 与 5mm 导程自动计算，留 20% 余量避免接近段超 max_rpm
         rpm = max(1.0, float(self._x2p_rpm))
         duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0) * 1.2
-        self._ensure_lift_connected()
+        request_id = uuid.uuid4().hex[:12]
+        logger.info("MOVE_REQUEST id=%s direction=%s distance_cm=%s duration_s=%s",
+                    request_id, direction, distance_cm, duration_s)
         try:
+            self._ensure_lift_connected()
             result = self._controller.move_lift(direction, distance_cm, duration_s)
         except Exception as exc:  # noqa: BLE001 - 上报失败
-            # 串口/USB 断开重连恢复：等待设备号变化（重枚举）后重建 lift_drive
-            # 并重试一次，避免一次断连就中断整个扦样流程。
-            if self._wait_lift_device_change(timeout_s=3.0):
-                logger.warning(
-                    "move_lift 失败且检测到 X2P 串口重连，重建后重试一次: %r",
-                    exc,
-                )
-                try:
-                    self._reconnect_lift_and_track()
-                except Exception:  # noqa: BLE001 - 重连失败如实上报
-                    logger.exception("X2P 串口重连失败")
-                    return MoveLift._response_class(
-                        success=False,
-                        message=f"move_lift failed: {exc} (串口重连失败)",
-                    )
-                try:
-                    result = self._controller.move_lift(
-                        direction, distance_cm, duration_s
-                    )
-                except Exception as exc2:  # noqa: BLE001
-                    return MoveLift._response_class(
-                        success=False,
-                        message=f"move_lift 重连后重试失败: {exc2}",
-                    )
-                return MoveLift._response_class(
-                    success=True,
-                    message=f"move_lift {direction} {distance_cm}cm ok (重连后重试): {result}",
-                )
+            # Completion is uncertain: never replay a relative stroke after USB
+            # recovery or an encoder tolerance failure. Workflow will stop.
+            logger.exception("MOVE_FAILED id=%s; automatic replay disabled", request_id)
             return MoveLift._response_class(
-                success=False, message=f"move_lift failed: {exc}"
+                success=False, message=f"move_lift id={request_id} failed (no replay): {exc}"
             )
+        logger.info("MOVE_SUCCESS id=%s result=%s", request_id, result)
         return MoveLift._response_class(
             success=True,
             message=f"move_lift {direction} {distance_cm}cm ok: {result}",
@@ -720,11 +709,14 @@ def main() -> None:
     - ``X2P_PORT``：X2P 伺服串口（工控机启动脚本默认 /dev/ttyUSB1，
       也可使用 /dev/x2p_lift 稳定链接）；设空串禁用 X2P
     - ``X2P_SLAVE``：Modbus 从站地址（默认 2）
-    - ``X2P_RPM``：升降转速 r/min（默认 30）
+    - ``X2P_RPM``：升降转速 r/min（默认值见 sampling_params.py）
     - ``X2P_DURATION``：升降时长秒（默认 2.0）
     - ``X2P_FORWARD_SIGN``：升降方向 1/-1（默认 1）
     """
     import os
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s [%(threadName)s]: %(message)s")
 
     from utils.sampling_params import (
         X2P_DURATION_S,

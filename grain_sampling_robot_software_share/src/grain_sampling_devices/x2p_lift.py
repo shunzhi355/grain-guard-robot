@@ -110,7 +110,8 @@ def build_x2p_lift_drive(
                 limits=SafetyLimits(max_rpm=max(30, int(rpm))),
             )
         drive = X2PDrive(config.port, config.slave)
-        controller = MotionController(drive, config)
+        controller = MotionController(drive, config, output=logger.info)
+        logger.info("X2P implementation=%s config=%r", sys.modules[MotionController.__module__].__file__, config)
     except Exception as exc:  # noqa: BLE001 - 统一包装为设备错误
         raise DeviceError(f"X2P 升降驱动器初始化失败: {exc}") from exc
 
@@ -150,7 +151,7 @@ class _LiftDrive:
         )
 
     def move_distance(self, direction: str, distance_mm: float,
-                      duration_s: float, tolerance_mm: float = 8.0) -> object:
+                      duration_s: float, tolerance_mm: float = 2.0) -> object:
         """按距离移动（编码器闭环，精确停在目标距离）。
 
         方向语义同 :meth:`run_speed`：``up``=提升（→forward）、
@@ -166,9 +167,8 @@ class _LiftDrive:
         duration_s : float
             移动时长（秒）。过长/过短由 x2p 内部按 max_rpm 校验。
         tolerance_mm : float
-            位置容差（毫米）。默认 8.0mm——带负载（夹紧/拧紧）时
-            误差波动到 2~6mm，x2p 默认 0.2mm 过严，放宽到 8mm
-            保证 25cm 行程稳定通过（扦样机升降 8mm 精度足够）。
+            位置容差（毫米），默认 2.0mm。自动回程会另外在
+            原点下方保留安全余量，因此容差必须小于该余量。
         """
         drive_direction = _map_lift_direction(direction)
         move = getattr(self._controller, "move_timed_distance", None)
@@ -178,6 +178,56 @@ class _LiftDrive:
             )
         return move(drive_direction, float(distance_mm), float(duration_s),
                     tolerance_mm=float(tolerance_mm))
+
+    def read_position(self) -> int:
+        """Read the signed absolute encoder count without commanding motion."""
+        read = getattr(self._controller, "read_encoder_position", None)
+        if read is None:
+            raise DeviceError("x2p 控制器不支持读取编码器绝对位置")
+        return int(read())
+
+    @property
+    def counts_per_mm(self) -> float:
+        """Encoder counts per millimetre for the configured screw drive."""
+        config = self.config
+        if config is None:
+            raise DeviceError("x2p 控制器缺少行程配置")
+        configured = getattr(config, "pulses_per_mm", None)
+        if configured is not None:
+            return float(configured)
+        lead = float(config.screw_lead_mm)
+        ratio = float(config.motor_revs_per_screw_rev)
+        counts = float(config.encoder_counts_per_motor_rev)
+        return counts * ratio / lead
+
+    def move_to_position(self, target_position: int, duration_s: float,
+                         tolerance_mm: float = 2.0) -> object:
+        """Move to an absolute encoder target via the safe distance controller."""
+        current = self.read_position()
+        delta = int(target_position) - current
+        distance_mm = abs(delta) / self.counts_per_mm
+        if distance_mm <= float(tolerance_mm):
+            logger.info(
+                "X2P absolute target already reached: current=%d target=%d "
+                "distance_mm=%.4f tolerance_mm=%.4f",
+                current, target_position, distance_mm, tolerance_mm,
+            )
+            return {
+                "mode": "absolute_noop", "start_position": current,
+                "final_position": current, "target_position": int(target_position),
+            }
+        encoder_forward_sign = int(
+            getattr(self.config, "encoder_forward_sign", 1)
+        )
+        direction = "up" if delta * encoder_forward_sign > 0 else "down"
+        logger.info(
+            "X2P absolute move: current=%d target=%d delta=%d direction=%s "
+            "distance_mm=%.4f",
+            current, target_position, delta, direction, distance_mm,
+        )
+        return self.move_distance(
+            direction, distance_mm, duration_s, tolerance_mm=tolerance_mm
+        )
 
     def stop(self) -> None:
         """安全停止（速度归零 + 取消使能 + 确认 OFF）。"""

@@ -2,8 +2,9 @@
 
 把 :mod:`grain_sampling_workflow.rc_control` 的 RC 手动控制逻辑包装为独立
 ROS 节点，使遥控底盘控制在 UI 未运行时同样可用。节点以 10 Hz 采样 RC 接收机，
-经 :class:`~grain_sampling_workflow.ros_bridge.SamplingBridge` 输出到
-``/cmd_vel``（下游底盘逻辑不变），并发布 ``/rc_mode`` 状态话题。
+默认经 :class:`~grain_sampling_workflow.ros_bridge.SamplingBridge` 输出到
+``/cmd_vel``；工控机设置 ``RC_OUTPUT_MODE=direct_tracks`` 后，手动模式直接
+发送左右履带 UDP 指令（CH1→CH8、CH3→CH9）。节点同时发布 ``/rc_mode``。
 
 设计决策
 --------
@@ -28,6 +29,7 @@ ROS 节点，使遥控底盘控制在 UI 未运行时同样可用。节点以 10
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
@@ -50,6 +52,7 @@ except ImportError:
 
 from grain_sampling_devices.rc_receiver import create_rc_receiver
 from grain_sampling_workflow.rc_control import RCControl
+from grain_sampling_workflow.rc_motor_bridge import RCTrackMotorBridge
 from grain_sampling_workflow.ros_bridge import SamplingBridge
 
 # ---------------------------------------------------------------------------
@@ -76,7 +79,8 @@ class RCControlNode:
 
     def __init__(self) -> None:
         self._receiver = None
-        self._bridge: Optional[SamplingBridge] = None
+        self._bridge = None
+        self._navigation_bridge: Optional[SamplingBridge] = None
         self._control: Optional[RCControl] = None
         self._mode_pub = None
         self._rate = None
@@ -100,17 +104,30 @@ class RCControlNode:
         # 在 init_node 之后构造桥；桥内部再次 init_node 会抛 ROSException
         # （已由桥自身捕获），这里再兜一层，构造失败则终止节点。
         try:
-            self._bridge = SamplingBridge(node_name=NODE_NAME)
+            self._navigation_bridge = SamplingBridge(node_name=NODE_NAME)
         except Exception:  # noqa: BLE001 - 记录后重新抛出，节点无法继续
             logger.exception("SamplingBridge init failed — rc_node aborting")
             raise
 
+        output_mode = os.environ.get("RC_OUTPUT_MODE", "cmd_vel").strip().lower()
+        if output_mode == "direct_tracks":
+            self._bridge = RCTrackMotorBridge(
+                self._navigation_bridge,
+                host=os.environ.get("MOTOR_DRIVER_HOST", "127.0.0.1"),
+                port=int(os.environ.get("MOTOR_DRIVER_PORT", "8765")),
+            )
+        elif output_mode == "cmd_vel":
+            self._bridge = self._navigation_bridge
+        else:
+            raise ValueError("RC_OUTPUT_MODE must be cmd_vel or direct_tracks")
+
         self._control = RCControl(self._receiver, self._bridge)
         self._rate = rospy.Rate(TICK_HZ) if HAS_ROS else None
         logger.info(
-            "RC control node started (HAS_ROS=%s, receiver=%s)",
+            "RC control node started (HAS_ROS=%s, receiver=%s, output=%s)",
             HAS_ROS,
             type(self._receiver).__name__,
+            output_mode,
         )
 
     @property
@@ -143,6 +160,8 @@ class RCControlNode:
                 self._receiver.stop()
             except Exception:  # noqa: BLE001 - 关闭尽力而为
                 pass
+        if isinstance(self._bridge, RCTrackMotorBridge):
+            self._bridge.close()
         logger.info("RC control node shut down")
 
     # ------------------------------------------------------------------

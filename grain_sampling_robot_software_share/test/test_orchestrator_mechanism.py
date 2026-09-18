@@ -124,7 +124,7 @@ def test_press_cycle_full_call_order():
     orch._handle_press_and_suction()
 
     assert bridge.calls == [
-        "clamp", "move_lift:down:20", "unclamp", "move_lift:up:20",
+        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
     # 2.0m 需要 2 节管：第 1 节压完 → 等待加管（ADD_PIPE_PROMPT）
@@ -139,7 +139,7 @@ def test_press_cycle_reattaches_clamp_when_depth_reached():
     orch._handle_press_and_suction()
 
     assert bridge.calls == [
-        "clamp", "move_lift:down:20", "unclamp", "move_lift:up:20",
+        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
     assert fsm.current_state == SamplingState.DISCHARGE_WASTE
@@ -208,7 +208,7 @@ def test_press_cycle_durations_from_grain_config(monkeypatch):
     # 每步 = 动作时长 + 停稳余量 0.5s
     assert durations == [3.0, 2.5, 2.0, 2.5, 3.0]
     assert bridge.calls == [
-        "clamp", "move_lift:down:20", "unclamp", "move_lift:up:20",
+        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
 
@@ -254,7 +254,7 @@ def test_unknown_grain_falls_back_to_defaults(monkeypatch):
     # unclamp 1.0 + 0.5 = 1.5
     assert durations == [2.5, 2.5, 1.5, 2.5, 2.5]
     assert bridge.calls == [
-        "clamp", "move_lift:down:20", "unclamp", "move_lift:up:20",
+        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
 

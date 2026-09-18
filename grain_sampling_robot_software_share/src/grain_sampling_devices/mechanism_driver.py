@@ -2,8 +2,8 @@
 
 架构（三层）：
 - :class:`PCA9685`：真实硬件封装。直接通过 Linux i2c-dev（``fcntl.ioctl``
-   I2C_SLAVE=0x0703）访问 ``/dev/i2c-2``, 0x40，无 adafruit 等第三方依赖。
-   顶层不打开任何设备（Windows 开发机无 /dev/i2c-2，import 必须安全）。
+   I2C_SLAVE=0x0703）访问 ``/dev/i2c-4``, 0x40，无 adafruit 等第三方依赖。
+   顶层不打开任何设备（Windows 开发机无 /dev/i2c-4，import 必须安全）。
 - :class:`MechanismController`：真实控制器。I2C 写操作统一加线程锁、
   失败自动重试 2 次、duration 后台 daemon 线程自动回停、急停抢断
   （只停运行中通道）、品种参数来自 ``mechanism_config.get_grain_params``。
@@ -12,7 +12,7 @@
   记录到 ``register_history``），全部动作同时记录到 ``action_history``。
 
 设计约定（mechanism-driver 计划）：
-- PCA9685：工控机 LVDS I²C（默认 /dev/i2c-2），地址 0x40，50Hz，4096 计数/周期
+- PCA9685：工控机 TP I²C（Linux 总线映射待核实）（默认 /dev/i2c-4），地址 0x40，50Hz，4096 计数/周期
 - 执行器映射：CH0/1=螺旋输送、CH2/3/4=开仓(浅/中/深)、CH5=夹紧、CH6=拧紧、
   CH7=负压风机(未接)；伺服升降(未接)
 - 脉宽标定：开/松开/拧松=1000us、关=1900us、夹紧=1900us、拧紧=1300us、停=断电释放（full-off）。
@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 from contextlib import contextmanager
 from functools import wraps
@@ -56,7 +58,14 @@ from utils.sampling_params import (
     SUPPORTED_GRAINS,
     TIGHTEN_PULSE_CLOSE,
     TIGHTEN_PULSE_OPEN,
+    X2P_POSITION_TOLERANCE_MM,
+    X2P_RETURN_CLEARANCE_MM,
+    PRESS_DOWN_CM,
+    PRESS_UP_CM,
+    PRESS_PAUSE_S,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # PCA9685 寄存器 / I2C 常量（复用 dipan/pca9685/pca9685_driver.py 的取值与公式）
@@ -144,7 +153,7 @@ def _serialized_i2c(method):
 class PCA9685:
     """PCA9685 16 通道 PWM 驱动（Linux i2c-dev 直连，无 adafruit）。
 
-    默认硬件：工控机 LVDS I²C，/dev/i2c-2, 0x40, 50Hz。
+    默认硬件：工控机 TP I²C（Linux 总线映射待核实），/dev/i2c-4, 0x40, 50Hz。
     注意：模块顶层不打开设备；``open()`` 是显式的（Windows 上会抛 RuntimeError）。
 
     高层接口 ``set_pwm(channel, pulse_us)`` 直接写脉宽(us)——
@@ -401,6 +410,11 @@ class _BaseMechanismController:
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30
         self.lift_duration = 2.0
+        # A paired automatic press cycle remembers its absolute encoder origin.
+        # Keeping these fields in the shared base also makes mock controllers
+        # exercise exactly the same safety state machine as real hardware.
+        self._lift_motion_lock = threading.Lock()
+        self._lift_cycle_origin: int | None = None
 
     # -- 低层：脉宽写入（子类实现） ---------------------------------------
     def _write_hw(self, channel: int, pulse_us: float) -> None:
@@ -524,6 +538,10 @@ class _BaseMechanismController:
                 self._write_off(ch)
             except Exception:  # noqa: BLE001 - 急停写入尽力而为
                 pass
+
+        drive = getattr(self, "lift_drive", None)
+        if drive is not None:
+            drive.stop()
 
     def reset(self) -> None:
         """清除急停标志，允许继续执行（不影响当前通道状态）。"""
@@ -675,13 +693,14 @@ class _BaseMechanismController:
 
     def move_lift(self, direction: str, distance_cm: float,
                   duration_s: float | None = None,
-                  tolerance_mm: float = 15.0) -> object:
+                  tolerance_mm: float = X2P_POSITION_TOLERANCE_MM) -> object:
         """伺服升降按距离移动（编码器闭环，精确停在目标距离）。
 
         Parameters
         ----------
         direction : str
-            ``up``=向上（提升）/ ``down``=向下（下压）。
+            ``up``/``down`` 为单程；``down_cycle`` 保存原点并往复下压，
+            ``return`` 回到保存原点下方的安全余量位置。
         distance_cm : float
             移动距离（厘米），必须 > 0。
         duration_s : float | None
@@ -692,20 +711,120 @@ class _BaseMechanismController:
         """
         if self.lift_drive is None:
             raise RuntimeError("X2P 伺服未注入，无法按距离移动")
-        if not distance_cm > 0:
+        if not math.isfinite(distance_cm) or not distance_cm > 0:
             raise ValueError("distance_cm 必须大于 0")
+        normalized_direction = str(direction).strip().lower()
+        if normalized_direction not in {"up", "down", "down_cycle", "return"}:
+            raise ValueError("direction 必须是 up/down/down_cycle/return")
         distance_mm = float(distance_cm) * 10.0
         if duration_s is None:
             rpm = max(1, int(self.lift_rpm))
             duration_s = distance_mm / (5.0 * rpm / 60.0)
         secs = float(duration_s)
-        self.action_history.append(
-            ("move_lift", {"direction": direction, "distance_mm": distance_mm,
-                           "duration_s": secs, "x2p": True})
-        )
-        return self.lift_drive.move_distance(
-            direction, distance_mm, secs, tolerance_mm=tolerance_mm
-        )
+        if not math.isfinite(secs) or secs <= 0:
+            raise ValueError("duration_s 必须是有限正数")
+        with self._lift_motion_lock:
+            if self._stop_flag.is_set():
+                raise RuntimeError("急停已锁定，拒绝升降")
+            if normalized_direction == "down_cycle":
+                if self._lift_cycle_origin is not None:
+                    raise RuntimeError(
+                        "上一次自动下压尚未完成绝对回程，拒绝覆盖原点"
+                    )
+                down_mm, up_mm = PRESS_DOWN_CM * 10.0, PRESS_UP_CM * 10.0
+                if (not all(math.isfinite(v) for v in (down_mm, up_mm, PRESS_PAUSE_S))
+                        or not down_mm > up_mm >= 0 or PRESS_PAUSE_S < 0):
+                    raise ValueError("往复参数要求 down > up >= 0，pause >= 0")
+                limits = getattr(self.lift_drive.config, "limits", None)
+                max_distance = float(getattr(limits, "max_distance_mm", 300.0))
+                if distance_mm > max_distance:
+                    raise ValueError("往复下压总行程超过伺服单段行程限制")
+                counts = float(self.lift_drive.counts_per_mm)
+                sign = int(getattr(self.lift_drive.config, "encoder_forward_sign", 1))
+                if not math.isfinite(counts) or counts <= 0 or sign not in (-1, 1):
+                    raise ValueError("编码器比例或方向无效")
+                origin = int(self.lift_drive.read_position())
+                self._lift_cycle_origin = origin
+                logger.info(
+                    "LIFT_CYCLE_ORIGIN_SAVED position=%d distance_mm=%.3f",
+                    origin, distance_mm,
+                )
+                progress = 0.0
+                leg = 0
+                try:
+                    while progress < distance_mm - 1e-9:
+                        bottom = min(progress + down_mm, distance_mm)
+                        targets = [bottom]
+                        # 末程停在段终点，禁止超过目标深度。
+                        if bottom < distance_mm - 1e-9 and up_mm > 0:
+                            targets.append(bottom - up_mm)
+                        for depth in targets:
+                            if self._stop_flag.is_set():
+                                raise RuntimeError("往复下压被急停中断")
+                            target = origin - sign * round(depth * counts)
+                            actual_mm = abs(target - self.lift_drive.read_position()) / counts
+                            leg += 1
+                            logger.info("LIFT_CYCLE_LEG leg=%d depth_mm=%.3f target=%d", leg, depth, target)
+                            result = self.lift_drive.move_to_position(
+                                target, max(actual_mm, 0.001) * secs / distance_mm,
+                                tolerance_mm=tolerance_mm,
+                            )
+                            logger.info("LIFT_CYCLE_LEG_DONE leg=%d result=%s", leg, result)
+                            if self._stop_flag.is_set():
+                                raise RuntimeError("往复下压被急停中断")
+                            progress = depth
+                            if progress < distance_mm - 1e-9 and self._stop_flag.wait(PRESS_PAUSE_S):
+                                raise RuntimeError("往复下压被急停中断")
+                    logger.info("LIFT_CYCLE_COMPLETE origin=%d depth_mm=%.3f legs=%d", origin, progress, leg)
+                    return result
+                except Exception:
+                    logger.exception("LIFT_CYCLE_FAILED origin=%d leg=%d; 原点保留，禁止自动重放", origin, leg)
+                    try:
+                        self.lift_drive.stop()
+                    except Exception:
+                        logger.exception("往复下压失败后的停机失败")
+                    raise
+            elif normalized_direction == "return":
+                if self._lift_cycle_origin is None:
+                    raise RuntimeError("没有已保存的下压起点，拒绝自动回程")
+                counts_per_mm = float(self.lift_drive.counts_per_mm)
+                encoder_up_sign = int(
+                    getattr(self.lift_drive.config, "encoder_forward_sign", 1)
+                )
+                clearance_pulses = round(
+                    float(X2P_RETURN_CLEARANCE_MM) * counts_per_mm
+                )
+                target = (
+                    int(self._lift_cycle_origin)
+                    - encoder_up_sign * clearance_pulses
+                )
+                logger.info(
+                    "LIFT_CYCLE_RETURN origin=%d target=%d clearance_mm=%.3f "
+                    "tolerance_mm=%.3f",
+                    self._lift_cycle_origin, target, X2P_RETURN_CLEARANCE_MM,
+                    tolerance_mm,
+                )
+                result = self.lift_drive.move_to_position(
+                    target, secs, tolerance_mm=tolerance_mm
+                )
+                self._lift_cycle_origin = None
+                self.action_history.append(
+                    ("move_lift", {"direction": "return", "target_position": target,
+                                   "clearance_mm": X2P_RETURN_CLEARANCE_MM,
+                                   "duration_s": secs, "x2p": True})
+                )
+                return result
+            else:
+                command_direction = normalized_direction
+
+            self.action_history.append(
+                ("move_lift", {"direction": normalized_direction,
+                               "distance_mm": distance_mm,
+                               "duration_s": secs, "x2p": True})
+            )
+            return self.lift_drive.move_distance(
+                command_direction, distance_mm, secs, tolerance_mm=tolerance_mm
+            )
 
     def fan(self, duration=None) -> None:
         """负压风机（未接线占位；真实控制器中为占位 no-op）。"""
@@ -732,7 +851,7 @@ class MechanismController(_BaseMechanismController):
     """真实机构控制器：PCA9685 + I2C 锁 + 失败重试 + 急停 + 品种参数。
 
     ``pca9685`` 缺省时：mock_mode=True 用内部记录件，mock_mode=False 用真实
-    :class:`PCA9685`（此时需先调用 ``open()`` 打开 /dev/i2c-2）。
+    :class:`PCA9685`（此时需先调用 ``open()`` 打开 /dev/i2c-4）。
     """
 
     def __init__(self, pca9685=None, mock_mode: bool = False, lift_drive=None) -> None:
@@ -755,7 +874,7 @@ class MechanismController(_BaseMechanismController):
             open_()
 
     def init_escs(self, hold_s: float = 3.0) -> None:
-        """仅初始化机构 CH0–6；底盘 CH8/CH9 由 motor_driver 独立初始化。"""
+        """仅初始化机构 CH0–6；底盘 CH10/CH9 由 motor_driver 独立初始化。"""
         channels = tuple(sorted(set(CHANNELS.values()) - {CHANNELS.get("fan", 7)}))
         for ch in channels:
             self.set_pulse(ch, PULSE_STOP)

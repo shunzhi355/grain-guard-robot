@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import date, datetime
 from typing import Callable, Optional
+from utils.sampling_params import PRESS_SEGMENT_CM
 
 from grain_sampling_workflow.state_machine import (
     SamplingAction,
@@ -38,7 +39,7 @@ MECHANISM_SETTLE_MARGIN: float = 0.5
 #: 由状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度。
 #: 实机联调：单次下压/上升 20cm（用户 2026-09 标定：20cm 长行程编码器
 #: 闭环精度好，实测误差 ~1.2mm；< 30cm max_distance，且 < 25cm 限位）。
-PRESS_STEP_CM: float = 20.0
+PRESS_STEP_CM: float = PRESS_SEGMENT_CM
 
 
 class WorkflowOrchestrator:
@@ -429,9 +430,9 @@ class WorkflowOrchestrator:
             # 状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度）。
             press_cycle = (
                 ("clamp", self._bridge.call_clamp, d["clamp"]),
-                ("press", lambda: self._bridge.call_move_lift("down", step_cm), d["servo"]),
+                ("press", lambda: self._bridge.call_move_lift("down_cycle", step_cm), d["servo"]),
                 ("unclamp", self._bridge.call_unclamp, d["unclamp"]),
-                ("lift", lambda: self._bridge.call_move_lift("up", step_cm), d["servo"]),
+                ("lift", lambda: self._bridge.call_move_lift("return", step_cm), d["servo"]),
                 ("clamp", self._bridge.call_clamp, d["clamp"]),  # 再夹紧，准备下一次下压
             )
             if not self._run_mechanism_sequence(press_cycle):
@@ -655,11 +656,16 @@ class WorkflowOrchestrator:
 
         Returns ``True`` on success, ``False`` when the FSM was stopped.
         """
+        # Relative movement may already have completed before reporting failure.
+        # Replaying it would add a second full stroke.
+        if action in ("press", "lift", "move_lift"):
+            retries = 0
         for attempt in range(retries + 1):
             if not self._fsm.is_running:
                 logger.warning("Mechanism %s skipped — FSM not running", action)
                 return False
             try:
+                logger.info("Mechanism %s begin attempt=%d/%d", action, attempt + 1, retries + 1)
                 ok = call()
             except Exception:
                 logger.exception(
@@ -668,6 +674,7 @@ class WorkflowOrchestrator:
                 )
                 ok = False
             if ok:
+                logger.info("Mechanism %s success attempt=%d", action, attempt + 1)
                 return True
             logger.warning(
                 "Mechanism %s failed (attempt %d/%d)",
@@ -686,6 +693,7 @@ class WorkflowOrchestrator:
     def _stop_fsm(self, reason: str) -> None:
         """Transition the FSM to STOPPED after a mechanism failure."""
         logger.error("Stopping FSM: %s", reason)
+        self._fsm.set_stop_reason(reason)
         # Best-effort hardware halt so nothing keeps running after a failure
         try:
             self._bridge.call_emergency_stop()

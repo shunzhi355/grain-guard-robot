@@ -6,10 +6,10 @@ and converts them into manual chassis control::
     CH5  two-position mode switch  (board-measured 2026-09-03)
             manual band (700~1450 us) -> operator drives the chassis
             auto   band (1550~2300 us) -> chassis handed back to navigation
-    CH1  forward / reverse          (board-measured, deadband 1350~1750 us)
+    CH1 logical throttle (physical i-BUS CH3), forward / reverse
             pulse > 1750 us -> forward  (linear.x > 0)
             pulse < 1350 us -> reverse  (linear.x < 0)
-    CH3  steering                   (board-measured, deadband 1350~1750 us)
+    CH3 logical steering (physical i-BUS CH1), left / right
             pulse < 1350 us -> LEFT  (angular.z > 0)
             pulse > 1750 us -> RIGHT (angular.z < 0)
 
