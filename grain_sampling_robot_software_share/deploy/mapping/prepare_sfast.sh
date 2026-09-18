@@ -10,6 +10,7 @@ UPSTREAM_URL="https://github.com/zlwang7/S-FAST_LIO.git"
 UPSTREAM_REV="93946196081ff8e6f665a6ddbd8024f65711edab"
 PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-livox-driver2.patch"
 SOURCE_DIR="$SFAST_WS/src/S-FAST_LIO"
+BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"
 MODE="${1:---check}"
 
 for cmd in git python3 catkin_make rospack; do
@@ -37,6 +38,6 @@ git -C "$SOURCE_DIR" apply --check "$PATCH_FILE"
 git -C "$SOURCE_DIR" apply "$PATCH_FILE"
 
 mapping_source_workspace "$LIVOX_WS"
-(cd "$SFAST_WS" && catkin_make)
+(cd "$SFAST_WS" && catkin_make -j"$BUILD_JOBS" -l"$BUILD_JOBS")
 [ -x "$SFAST_WS/devel/lib/sfast_lio/sfastlio_mapping" ]
 echo "[PASS] pinned S-FAST_LIO adapted to livox_ros_driver2 and built"

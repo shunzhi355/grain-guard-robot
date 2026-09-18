@@ -11,6 +11,7 @@ SDK_REV="08f523c930b2f0ba1e98a6afaa8d7476bf479908"
 DRIVER_URL="https://github.com/Livox-SDK/livox_ros_driver2.git"
 DRIVER_REV="4a1def929e5b59c7a8122d19fce6efba581ce9f7"
 DRIVER_PATCH_FILE="$DEPLOY_DIR/patches/livox-driver2-jammy-cxx17.patch"
+BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"
 MODE="${1:---check}"
 
 missing=()
@@ -87,7 +88,7 @@ python3 "$DEPLOY_DIR/generate_driver2_config.py" \
     --template "$DRIVER_DIR/config/MID360_config.json" \
     --output "$DRIVER_DIR/config/MID360_config.json"
 
-(cd "$DRIVER_DIR" && ./build.sh ROS1)
+(cd "$LIVOX_WS" && catkin_make -j"$BUILD_JOBS" -l"$BUILD_JOBS" -DROS_EDITION=ROS1)
 mapping_source_workspace "$LIVOX_WS"
 rospack find livox_ros_driver2 >/dev/null
 [ -f "$(rospack find livox_ros_driver2)/launch_ROS1/msg_MID360.launch" ]

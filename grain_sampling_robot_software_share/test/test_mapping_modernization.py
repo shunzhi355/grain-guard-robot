@@ -81,3 +81,10 @@ def test_driver2_jammy_patch_enforces_cxx17():
     assert "-  set(CMAKE_CXX_STANDARD 14)" in patch
     assert "+  set(CMAKE_CXX_STANDARD 17)" in patch
     assert patch_path.name in setup
+
+
+def test_board_builds_default_to_bounded_parallelism():
+    for script_name in ("setup_livox.sh", "prepare_sfast.sh"):
+        script = (ROOT / "deploy" / "mapping" / script_name).read_text(encoding="utf-8")
+        assert 'BUILD_JOBS="${MAPPING_BUILD_JOBS:-2}"' in script
+        assert '-j"$BUILD_JOBS" -l"$BUILD_JOBS"' in script
