@@ -86,6 +86,9 @@ fi
 if grep -q -- '-std=c++14' "$SOURCE_DIR/CMakeLists.txt"; then
     sed -i 's/-std=c++14/-std=c++17/g' "$SOURCE_DIR/CMakeLists.txt"
 fi
+if grep -q -- '-std=c++0x' "$SOURCE_DIR/CMakeLists.txt"; then
+    sed -i 's/-std=c++0x/-std=c++17/g' "$SOURCE_DIR/CMakeLists.txt"
+fi
 grep -q -- '-std=c++17' "$SOURCE_DIR/CMakeLists.txt" || {
     echo "[FAIL] S-FAST_LIO CMake is not configured for C++17" >&2; exit 1;
 }

@@ -92,6 +92,7 @@ def test_sfast_jammy_patch_enables_cxx17():
     assert "+ADD_COMPILE_OPTIONS(-std=c++17 )" in patch
     assert patch_path.name in setup
     assert "sed -i 's/-std=c++14/-std=c++17/g'" in setup
+    assert "sed -i 's/-std=c++0x/-std=c++17/g'" in setup
 
 
 def test_driver2_jammy_patch_enforces_cxx17():
