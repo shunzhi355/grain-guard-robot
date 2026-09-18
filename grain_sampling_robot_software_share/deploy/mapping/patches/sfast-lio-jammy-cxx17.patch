@@ -1,7 +1,12 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -1,2 +1,3 @@
- cmake_minimum_required(VERSION 2.8.3)
+@@ -2,5 +2,5 @@ project(sfast_lio)
  project(sfast_lio)
-+set(CMAKE_CXX_STANDARD 17)
+ SET(CMAKE_BUILD_TYPE "Debug")
+-ADD_COMPILE_OPTIONS(-std=c++14 )
+-ADD_COMPILE_OPTIONS(-std=c++14 )
+-set( CMAKE_CXX_FLAGS "-std=c++14 -O3" )
++ADD_COMPILE_OPTIONS(-std=c++17 )
++ADD_COMPILE_OPTIONS(-std=c++17 )
++set( CMAKE_CXX_FLAGS "-std=c++17 -O3" )
