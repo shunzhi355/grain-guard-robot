@@ -100,9 +100,8 @@ fi
 if ! grep -q 'set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"; then
     sed -i '/add_dependencies(fastlio_mapping_re/a set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"
 fi
-if ! git -C "$SOURCE_DIR" apply --reverse --check "$MAP_PUBLISH_PATCH_FILE" 2>/dev/null; then
-    git -C "$SOURCE_DIR" apply --check "$MAP_PUBLISH_PATCH_FILE"
-    git -C "$SOURCE_DIR" apply "$MAP_PUBLISH_PATCH_FILE"
+if grep -q '^[[:space:]]*//[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapping.cpp"; then
+    sed -i 's@^[[:space:]]*//[[:space:]]*publish_map(pubLaserCloudMap);@            publish_map(pubLaserCloudMap);@' "$SOURCE_DIR/src/laserMapping.cpp"
 fi
 grep -q '^[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapping.cpp" || {
     echo "[FAIL] S-FAST_LIO Laser_map publish call is not active" >&2; exit 1;

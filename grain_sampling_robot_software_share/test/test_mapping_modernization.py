@@ -104,6 +104,7 @@ def test_sfast_publishes_laser_map():
 
     assert "+            publish_map(pubLaserCloudMap);" in patch
     assert patch_path.name in setup
+    assert "sed -i 's@^[[:space:]]*//[[:space:]]*publish_map" in setup
 
 
 def test_driver2_jammy_patch_enforces_cxx17():
