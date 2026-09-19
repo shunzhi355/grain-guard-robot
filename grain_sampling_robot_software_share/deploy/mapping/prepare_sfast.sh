@@ -12,6 +12,7 @@ PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-livox-driver2.patch"
 BUILD_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-message-generation-order.patch"
 JAMMY_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-jammy-cxx17.patch"
 MAP_PUBLISH_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-laser-map-publish.patch"
+SAVE_FINALIZE_PATCH_FILE="$DEPLOY_DIR/patches/sfast-lio-save-finalize.patch"
 SOPHUS_URL="https://github.com/strasdat/Sophus.git"
 SOPHUS_REV="a621ff2e56c56c839a6c40418d42c3c254424b5c"
 SOPHUS_PATCH_FILE="$DEPLOY_DIR/patches/sophus-a621ff-jammy-eigen34.patch"
@@ -29,6 +30,7 @@ mapping_source_ros1
 [ -f "$BUILD_PATCH_FILE" ] || { echo "[FAIL] build patch missing: $BUILD_PATCH_FILE" >&2; exit 1; }
 [ -f "$JAMMY_PATCH_FILE" ] || { echo "[FAIL] Jammy patch missing: $JAMMY_PATCH_FILE" >&2; exit 1; }
 [ -f "$MAP_PUBLISH_PATCH_FILE" ] || { echo "[FAIL] map publish patch missing: $MAP_PUBLISH_PATCH_FILE" >&2; exit 1; }
+[ -f "$SAVE_FINALIZE_PATCH_FILE" ] || { echo "[FAIL] save finalize patch missing: $SAVE_FINALIZE_PATCH_FILE" >&2; exit 1; }
 [ -f "$SOPHUS_PATCH_FILE" ] || { echo "[FAIL] Sophus patch missing: $SOPHUS_PATCH_FILE" >&2; exit 1; }
 
 if [ "$MODE" = "--check" ]; then
@@ -102,6 +104,10 @@ fi
 if ! grep -q 'set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"; then
     sed -i '/add_dependencies(fastlio_mapping_re/a set_property(TARGET fastlio_mapping_re PROPERTY CXX_STANDARD 17)' "$SOURCE_DIR/CMakeLists.txt"
 fi
+if ! grep -q 'GlobalMap.pcd.tmp' "$SOURCE_DIR/src/laserMapping.cpp"; then
+    git -C "$SOURCE_DIR" apply --check "$SAVE_FINALIZE_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$SAVE_FINALIZE_PATCH_FILE"
+fi
 if grep -q '^[[:space:]]*//[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapping.cpp"; then
     sed -i 's@^[[:space:]]*//[[:space:]]*publish_map(pubLaserCloudMap);@            publish_map(pubLaserCloudMap);@' "$SOURCE_DIR/src/laserMapping.cpp"
 fi
@@ -113,6 +119,9 @@ grep -q '^[[:space:]]*publish_map(pubLaserCloudMap);' "$SOURCE_DIR/src/laserMapp
 }
 grep -q '^[[:space:]]*if (1) // Publish current ikd-tree points' "$SOURCE_DIR/src/laserMapping.cpp" || {
     echo "[FAIL] S-FAST_LIO map points are not enabled" >&2; exit 1;
+}
+grep -q 'GlobalMap.pcd.tmp' "$SOURCE_DIR/src/laserMapping.cpp" || {
+    echo "[FAIL] S-FAST_LIO atomic map finalization is not active" >&2; exit 1;
 }
 
 mapping_source_workspace "$LIVOX_WS"

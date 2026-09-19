@@ -32,6 +32,12 @@ import shlex
 import subprocess
 import time
 
+from grain_sampling_workflow.map_save import (
+    MapFileIdentity,
+    map_content_changed,
+    snapshot_map,
+)
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -71,12 +77,12 @@ def _pgrep(pattern: str) -> bool:
 def _pkill(pattern: str, sig: str) -> bool:
     """Send signal ``sig`` (e.g. 'INT', 'TERM') to processes matching pattern."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["pkill", f"-{sig}", "-f", pattern],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=15,
         )
-        return True
+        return result.returncode == 0
     except Exception:
         return False
 
@@ -231,31 +237,44 @@ class SlamBridge:
             logger.exception("Failed to start sfastlio_mapping")
             return False
 
-    def save_current_map(self) -> bool:
+    def save_current_map(
+        self,
+        before_identity: MapFileIdentity | None = None,
+        timeout: float = 60.0,
+    ) -> bool:
         """Save the map by SIGINT-ing sfastlio_mapping and wait for GlobalMap.pcd.
 
         S-FAST_LIO has no ``save_map`` service; its only save path is the SIGINT
-        handler.  Blocks until ``GlobalMap.pcd`` is (re)written or the process
-        exits, whichever comes first.
+        handler.  The save succeeds only after the map content changes and the
+        mapping process exits normally.  Callers should invoke this method off
+        the GUI thread.
         """
         if not self._mapping_running():
             logger.warning("save_current_map: sfastlio_mapping not running")
             return False
         global_map = os.path.join(PCD_DIR, "GlobalMap.pcd")
-        before = os.path.getmtime(global_map) if os.path.exists(global_map) else None
-        _pkill(MAPPING_PATTERN, "INT")
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if os.path.exists(global_map):
-                mtime = os.path.getmtime(global_map)
-                if before is None or mtime > before:
-                    logger.info("GlobalMap.pcd saved")
-                    return True
-            if not self._mapping_running():
-                break
+        before = before_identity or snapshot_map(global_map)
+        if not _pkill(MAPPING_PATTERN, "INT"):
+            logger.warning("save_current_map: SIGINT delivery failed")
+            return False
+        deadline = time.monotonic() + timeout
+        changed = False
+        while time.monotonic() < deadline:
+            changed = map_content_changed(before, snapshot_map(global_map))
+            running = self._mapping_running()
+            if changed and not running:
+                logger.info("GlobalMap.pcd saved and mapping process exited")
+                return True
+            if not running and not changed:
+                logger.warning("save_current_map: process exited without a new GlobalMap.pcd")
+                return False
             time.sleep(0.5)
-        logger.warning("save_current_map: GlobalMap.pcd not updated")
-        return os.path.exists(global_map)
+        logger.warning(
+            "save_current_map: timed out (updated=%s, running=%s)",
+            changed,
+            self._mapping_running(),
+        )
+        return False
 
     def stop_mapping(self) -> bool:
         """Stop mapping immediately (SIGTERM, no save)."""
