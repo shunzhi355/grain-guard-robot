@@ -160,6 +160,7 @@ mock-robot
 | [DEPLOY_GUIDE.md](docs/DEPLOY_GUIDE.md) | 现场部署工程师 | 环境安装、系统配置、网络部署指南 |
 | [API_REFERENCE.md](docs/API_REFERENCE.md) | 开发人员 | 各模块 API 详细参考与代码示例 |
 | [ros-interfaces.md](docs/ros-interfaces.md) | 开发人员 | ROS 话题、服务、动作接口定义 |
+| [X2P手动调整初始位置使用说明.md](docs/X2P手动调整初始位置使用说明.md) | 现场操作/调试人员 | 上电后把升降机构手动挪回物理最高点的完整操作说明 |
 
 ---
 

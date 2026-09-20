@@ -680,8 +680,8 @@ class MainWindow(QMainWindow):
             detail += f"（{aojian}）"
         detail += "\n该任务可能仍占用设备。是否通知云端放弃该任务？"
 
-        # Non-blocking prompt: auto-dismiss after 8s so a stale task marker
-        # never delays ROS startup / UI responsiveness on boot.
+        # Modal prompt: auto-dismiss after 8s so a stale task marker never
+        # leaves the UI waiting indefinitely for operator input.
         box = QMessageBox(
             QMessageBox.Icon.Question,
             "检测到未完成任务",
@@ -894,8 +894,9 @@ def main() -> int:
     # as the unfinished-task prompt then runs without delaying ROS startup.
     window.start_ros()
 
-    # Reboot recovery: prompt to abandon a task left running before shutdown
-    window.check_unfinished_task()
+    # Reboot recovery: defer the modal prompt until after the Qt event loop
+    # starts, otherwise the main window can remain unmapped and appear frozen.
+    QTimer.singleShot(1500, window.check_unfinished_task)
 
     exit_code = app.exec_()
 

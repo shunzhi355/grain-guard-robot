@@ -18,14 +18,14 @@ if TYPE_CHECKING:
 try:
     from PySide2.QtCore import Qt, Signal, Slot
     from PySide2.QtWidgets import (
-        QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+        QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
         QListWidget, QListWidgetItem, QMessageBox, QPushButton,
         QVBoxLayout, QWidget,
     )
 except ImportError:
     from PySide6.QtCore import Qt, Signal, Slot  # type: ignore
     from PySide6.QtWidgets import (  # type: ignore
-        QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+        QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
         QListWidget, QListWidgetItem, QMessageBox, QPushButton,
         QVBoxLayout, QWidget,
     )
@@ -167,10 +167,10 @@ class MappingPage(QWidget):
         save_row.addWidget(self._btn_save)
         layout.addLayout(save_row)
 
-        # Hint
-        hint = QLabel("保存后可在下方列表中加载。")
-        hint.setObjectName("field_hint")
-        layout.addWidget(hint)
+        # Inline feedback keeps the save workflow non-blocking.
+        self._save_hint = QLabel("保存后可在下方列表中加载。")
+        self._save_hint.setObjectName("field_hint")
+        layout.addWidget(self._save_hint)
 
         layout.addStretch()
         return card
@@ -306,6 +306,13 @@ class MappingPage(QWidget):
 
     # ── Save map ──────────────────────────────────────────────────────
 
+    def _set_save_feedback(self, message: str, color_key: str = "text_secondary") -> None:
+        color = THEME_COLORS.get(color_key, THEME_COLORS["text_secondary"])
+        self._save_hint.setText(message)
+        self._save_hint.setStyleSheet(
+            f"font-size: 7pt; color: {color}; background: transparent;"
+        )
+
     @Slot()
     def _on_save_clicked(self) -> None:
         from datetime import datetime
@@ -313,26 +320,22 @@ class MappingPage(QWidget):
         if self._save_in_progress:
             return
 
-        # Use the inline name input instead of QInputDialog popup
+        # Always use the inline name input.  A modal fallback here can leave
+        # the UI blocked after the map has already been saved, because the
+        # dialog is not always dismissed by the window manager.
         name = self._map_name_input.text().strip()
         if not name:
-            # Fall back to dialog if empty
-            name, ok = QInputDialog.getText(
-                self, "保存地图", "请输入地图名称:"
-            )
-            if not ok or not name.strip():
-                return
-            name = name.strip()
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_filename = f"{name}_{ts}.pcd"
+            self._set_save_feedback("请先输入地图名称。", "danger")
+            self._map_name_input.setFocus()
+            return
 
         if self._slam_bridge is None:
             self._show_save_failure("地图保存失败：建图服务不可用")
             return
 
-        # Check for duplicates before starting the asynchronous save. Existing
-        # maps are removed only after the new map has been verified and copied.
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_filename = f"{name}_{ts}.pcd"
+
         if not os.path.isdir(PCD_DIR):
             os.makedirs(PCD_DIR, exist_ok=True)
 
@@ -401,7 +404,9 @@ class MappingPage(QWidget):
 
         self._map_saved_in_session = True
         self._saved_map_path = outcome.destination
+        saved_name = os.path.basename(outcome.destination)
         self._map_name_input.clear()
+        self._set_save_feedback(f"地图已保存：{saved_name}", "success")
         self._refresh_map_list()
         self._transition_state("saved")
         self.save_map_requested.emit()
@@ -410,7 +415,7 @@ class MappingPage(QWidget):
         self._save_in_progress = False
         self._transition_state("error")
         self._mapping_state_label.setText("地图保存失败")
-        QMessageBox.critical(self, "地图保存失败", message)
+        self._set_save_feedback(message, "danger")
 
     # ── State transitions ─────────────────────────────────────────────
 

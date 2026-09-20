@@ -147,19 +147,63 @@ class MotionController:
     def _actual_speed(self) -> int:
         return signed16(self.drive.read_registers(Register.ACTUAL_SPEED)[0])
 
-    def _wait_status(self, expected: DriveStatus, timeout_s: float) -> None:
+    def _servo_enable_monitor(self) -> int:
+        """Return Un058, the servo-enable monitor used as the safety baseline.
+
+        ``Register.STATUS`` (0x3E00) is firmware specific: the lift drive on
+        the RK3588 industrial PC reported ``status=3`` while genuinely
+        disabled and stopped, so keying the OFF baseline off ``status == 1``
+        blocked every motion with a false "仍未进入OFF" interlock.  Un058 is
+        the documented servo-enable monitor (0=disabled) and is what the
+        operator can cross-check with ``python3 -m x2p.cli status``.
+        """
+        return self.drive.read_registers(Register.SERVO_ENABLE_STATUS)[0]
+
+    def _is_disabled_and_stopped(self) -> bool:
+        """True when the drive is really de-energised and not turning."""
+        return (
+            self._servo_enable_monitor() == 0
+            and abs(self._actual_speed()) <= 1
+        )
+
+    def _check_not_faulted(self) -> None:
+        """Fail fast with the E-code when the drive reports a fault."""
+        current = self._status()
+        if current == DriveStatus.FAULT:
+            # 驱动器报警(STATUS=4)：立即读故障码报错，避免空等超时抛出误导性信息
+            raise SafetyInterlockError(self._fault_message(current))
+
+    def _wait_disabled(self, timeout_s: float) -> None:
+        """Wait for software S-ON to be released and the axis to stand still."""
+        last_enable = 0
+        last_speed = 0
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            current = self._status()
-            if current == expected:
+            self._check_not_faulted()
+            last_enable = self._servo_enable_monitor()
+            last_speed = self._actual_speed()
+            if last_enable == 0 and abs(last_speed) <= 1:
                 return
-            if current == DriveStatus.FAULT:
-                # 驱动器报警(STATUS=4)：立即读故障码报错，避免空等超时抛出误导性信息
-                raise SafetyInterlockError(self._fault_message(current))
             time.sleep(self.monitor_interval_s)
-        current = self._status()
         raise MotionTimeoutError(
-            f"等待驱动器状态{expected.name}超时，当前status={current}"
+            "取消软件使能后仍未停机："
+            f"Un058={last_enable}，实际转速={last_speed} r/min；"
+            "检查外部S-ON是否仍有效、是否有外力拖动或驱动器报警"
+        )
+
+    def _wait_enabled(self, timeout_s: float) -> None:
+        """Wait for Un058 to prove that the servo actually energised."""
+        last_enable = 0
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self._check_not_faulted()
+            last_enable = self._servo_enable_monitor()
+            if last_enable != 0:
+                return
+            time.sleep(self.monitor_interval_s)
+        raise MotionTimeoutError(
+            f"伺服使能超时：Un058仍为{last_enable}；"
+            "检查DI1/SRV-ON接线、外部急停和驱动器报警"
         )
 
     def _fault_message(self, status: int) -> str:
@@ -225,16 +269,7 @@ class MotionController:
 
         if verify_off:
             try:
-                self._wait_status(
-                    DriveStatus.OFF, self.config.limits.stop_timeout_s
-                )
-            except MotionTimeoutError:
-                errors.append(
-                    SafetyInterlockError(
-                        "取消软件使能后仍未进入OFF；"
-                        "检查外部S-ON是否仍有效"
-                    )
-                )
+                self._wait_disabled(self.config.limits.stop_timeout_s)
             except Exception as exc:
                 errors.append(exc)
 
@@ -253,10 +288,15 @@ class MotionController:
     def prepare_off(self) -> None:
         """Establish an OFF baseline before changing any motion parameters."""
         self.stop(verify_off=True)
-        if self._status() != DriveStatus.OFF:
+        # status (0x3E00) is firmware specific on this drive and reads 3 while
+        # disabled, so the OFF baseline is proved with Un058 + zero speed.
+        if not self._is_disabled_and_stopped():
             self.state = MotionState.FAULT
             raise SafetyInterlockError(
-                "驱动器未处于OFF，检查外部S-ON是否仍然有效"
+                "驱动器未处于OFF："
+                f"Un058={self._servo_enable_monitor()}，"
+                f"实际转速={self._actual_speed()} r/min；"
+                "检查外部S-ON是否仍然有效"
             )
         self.state = MotionState.ARMED
 
@@ -306,7 +346,7 @@ class MotionController:
 
     def _enable_and_verify(self, additional_forced_inputs: int = 0) -> None:
         self.drive.servo_on(additional_forced_inputs)
-        self._wait_status(DriveStatus.RUN, 1.0)
+        self._wait_enabled(1.0)
         self.state = MotionState.RUNNING
 
     def _wait_speed_command(self, expected_rpm: int) -> None:
