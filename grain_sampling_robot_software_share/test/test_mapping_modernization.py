@@ -73,7 +73,8 @@ def test_active_mapping_chain_has_no_legacy_platform_assumptions():
     assert "os.makedirs(PCD_DIR, exist_ok=True)" in bridge
     assert "self._ensure_pcd_directory()" in bridge
     mapping_page = (ROOT / "src" / "grain_sampling_ui" / "pages" / "mapping_page.py").read_text(encoding="utf-8")
-    assert 'src_file = os.path.join(PCD_DIR, "GlobalMap.pcd")' in mapping_page
+    assert 'source = os.path.join(PCD_DIR, "GlobalMap.pcd")' in mapping_page
+    assert "copy_fresh_map(source, destination, before)" in mapping_page
     assert "Find most recent PCD" not in mapping_page
     assert "地图保存失败，使用现有文件" not in mapping_page
     assert "mapping_source_setup" in runtime

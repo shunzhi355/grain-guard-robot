@@ -9,10 +9,12 @@ S-FAST_LIO runs two mutually-exclusive ROS nodes that both publish /Odometry:
     ``GlobalMap_ikdtree.pcd`` — but only when ``pcd_save_en: true``.
   - ``fastlio_mapping_re`` (重定位): loads a saved map and localizes against it.
 
-They must never run at the same time.  Because ``sfastlio_mapping`` may be
-launched either by ``start_all_full.sh`` (nohup, detached) or by this bridge,
-liveness is detected via ``pgrep`` and shutdown via ``pkill`` — never via a
-subprocess handle, which cannot see externally-launched processes.
+They must never run at the same time.  A mapping session started by this bridge
+is kept in the foreground of a dedicated process group.  The shell sources the
+ROS workspaces and then ``exec`` replaces itself with ``sfastlio_mapping``, so
+the stored Popen PID is the real mapping PID and process-group leader.  External
+mapping processes are detected only as conflicts; they are never adopted or
+signalled by this bridge.
 
 Signals (S-FAST_LIO's ``SigHandle`` only handles SIGINT):
   - ``SIGINT``  -> sets flg_exit, main() writes GlobalMap.pcd, then exits
@@ -28,9 +30,16 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import shlex
 import subprocess
 import time
+
+from grain_sampling_workflow.map_save import (
+    MapFileIdentity,
+    map_content_changed,
+    snapshot_map,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +58,7 @@ SFAST_RELOCALIZATION_LAUNCH = os.environ.get("SFAST_RELOCALIZATION_LAUNCH", "map
 LIVOX_LIDAR_TOPIC = os.environ.get("LIVOX_LIDAR_TOPIC", "/livox/lidar")
 LIVOX_IMU_TOPIC = os.environ.get("LIVOX_IMU_TOPIC", "/livox/imu")
 
-#: Process-name patterns matched by ``pgrep``/``pkill -f``.
+#: Process-name patterns used for conflict/liveness discovery.
 MAPPING_PATTERN = "sfastlio_mapping"
 RELOC_PATTERN = "fastlio_mapping_re"
 LIVOX_PATTERN = "livox_ros_driver2_node"
@@ -71,12 +80,12 @@ def _pgrep(pattern: str) -> bool:
 def _pkill(pattern: str, sig: str) -> bool:
     """Send signal ``sig`` (e.g. 'INT', 'TERM') to processes matching pattern."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["pkill", f"-{sig}", "-f", pattern],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=15,
         )
-        return True
+        return result.returncode == 0
     except Exception:
         return False
 
@@ -86,11 +95,41 @@ class SlamBridge:
 
     def __init__(self) -> None:
         self._connected = False
+        self._mapping_process: subprocess.Popen | None = None
+        self._mapping_pid: int | None = None
+        self._mapping_pgid: int | None = None
 
     # ── Mapping (pure mapping / odometry) ───────────────────
 
-    def _mapping_running(self) -> bool:
-        return _pgrep(MAPPING_PATTERN)
+    def _clear_mapping_session(self) -> None:
+        self._mapping_process = None
+        self._mapping_pid = None
+        self._mapping_pgid = None
+
+    def _owned_mapping_running(self) -> bool:
+        """Return true only for the live process group created by this bridge."""
+        process = self._mapping_process
+        if process is None or self._mapping_pid is None or self._mapping_pgid is None:
+            return False
+        if process.pid != self._mapping_pid or process.poll() is not None:
+            return False
+        try:
+            return os.getpgid(self._mapping_pid) == self._mapping_pgid
+        except ProcessLookupError:
+            return False
+
+    def _signal_owned_mapping(self, sig: signal.Signals) -> bool:
+        """Signal the exact mapping group, rejecting stale or reused PIDs."""
+        if not self._owned_mapping_running():
+            logger.warning("Mapping session ownership is missing or stale")
+            return False
+        assert self._mapping_pgid is not None
+        try:
+            os.killpg(self._mapping_pgid, sig)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            logger.exception("Failed to signal mapping process group %s", self._mapping_pgid)
+            return False
 
     def _reloc_running(self) -> bool:
         return _pgrep(RELOC_PATTERN)
@@ -186,11 +225,58 @@ class SlamBridge:
             logger.exception("Failed to prepare the S-FAST_LIO PCD directory: %s", PCD_DIR)
             return False
 
+    def _launch_mapping_process(self) -> bool:
+        """Launch and own the real mapping process in a new session."""
+        command = (
+            f"{self._mapping_shell()} && "
+            f"mapping_wait_for_topic {shlex.quote(LIVOX_LIDAR_TOPIC)} && "
+            f"mapping_wait_for_topic {shlex.quote(LIVOX_IMU_TOPIC)} && "
+            f"rosparam load {shlex.quote(MID360_YAML)} && "
+            f"cd {shlex.quote(SFAST_WS)} && "
+            f"exec {shlex.quote(SFAST_EXECUTABLE)}"
+        )
+        try:
+            with open("/tmp/sfast.log", "ab", buffering=0) as log_stream:
+                process = subprocess.Popen(
+                    ["bash", "-c", command],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_stream,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            pgid = os.getpgid(process.pid)
+        except Exception:
+            logger.exception("Failed to start owned sfastlio_mapping session")
+            return False
+
+        if pgid != process.pid:
+            logger.error(
+                "Mapping process is not its process-group leader: pid=%s pgid=%s",
+                process.pid,
+                pgid,
+            )
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            return False
+
+        self._mapping_process = process
+        self._mapping_pid = process.pid
+        self._mapping_pgid = pgid
+        logger.info("Owned mapping session started: pid=%s pgid=%s", process.pid, pgid)
+        return True
+
     def start_mapping(self) -> bool:
-        """Ensure sfastlio_mapping is running (idempotent across processes)."""
-        if self._mapping_running():
-            logger.info("sfastlio_mapping already running")
+        """Start and retain ownership of this bridge's mapping process group."""
+        if self._owned_mapping_running():
+            logger.info("Owned sfastlio_mapping session already running")
             return True
+        if self._mapping_process is not None:
+            self._clear_mapping_session()
+        if _pgrep(MAPPING_PATTERN):
+            logger.error("Unowned sfastlio_mapping process exists; refusing to adopt it")
+            return False
         # Mutually exclusive: never run mapping + relocalization together.
         self.stop_relocalization()
         if not self._ensure_mapping_network():
@@ -208,58 +294,80 @@ class SlamBridge:
         if not self._ensure_pcd_directory():
             logger.error("S-FAST_LIO PCD directory is not writable: %s", PCD_DIR)
             return False
-        cmd = (
-            f"{self._mapping_shell()} && "
-            f"mapping_wait_for_topic {shlex.quote(LIVOX_LIDAR_TOPIC)} && "
-            f"mapping_wait_for_topic {shlex.quote(LIVOX_IMU_TOPIC)} && "
-            f"rosparam load {shlex.quote(MID360_YAML)} && "
-            f"cd {shlex.quote(SFAST_WS)} && "
-            f"setsid nohup {shlex.quote(SFAST_EXECUTABLE)} "
-            "> /tmp/sfast.log 2>&1 < /dev/null &"
-        )
-        try:
-            subprocess.Popen(
-                ["bash", "-c", cmd],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return (
-                self._run_mapping_command("mapping_wait_for_topic /Odometry", timeout=45)
-                and self._run_mapping_command("mapping_wait_for_topic /cloud_registered", timeout=45)
-                and self._run_mapping_command("mapping_wait_for_topic /Laser_map", timeout=45)
-            )
-        except Exception:
-            logger.exception("Failed to start sfastlio_mapping")
+        if not self._launch_mapping_process():
             return False
+        ready = (
+            self._run_mapping_command("mapping_wait_for_topic /Odometry", timeout=45)
+            and self._run_mapping_command("mapping_wait_for_topic /cloud_registered", timeout=45)
+            and self._run_mapping_command("mapping_wait_for_topic /Laser_map", timeout=45)
+        )
+        if not ready:
+            self.stop_mapping()
+        return ready
 
-    def save_current_map(self) -> bool:
+    def save_current_map(
+        self,
+        before_identity: MapFileIdentity | None = None,
+        timeout: float = 60.0,
+    ) -> bool:
         """Save the map by SIGINT-ing sfastlio_mapping and wait for GlobalMap.pcd.
 
         S-FAST_LIO has no ``save_map`` service; its only save path is the SIGINT
-        handler.  Blocks until ``GlobalMap.pcd`` is (re)written or the process
-        exits, whichever comes first.
+        handler.  The save succeeds only after the map content changes and the
+        mapping process exits normally.  Callers should invoke this method off
+        the GUI thread.
         """
-        if not self._mapping_running():
-            logger.warning("save_current_map: sfastlio_mapping not running")
+        if not self._owned_mapping_running():
+            logger.warning("save_current_map: no live owned mapping session")
             return False
+        process = self._mapping_process
+        assert process is not None
         global_map = os.path.join(PCD_DIR, "GlobalMap.pcd")
-        before = os.path.getmtime(global_map) if os.path.exists(global_map) else None
-        _pkill(MAPPING_PATTERN, "INT")
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if os.path.exists(global_map):
-                mtime = os.path.getmtime(global_map)
-                if before is None or mtime > before:
-                    logger.info("GlobalMap.pcd saved")
-                    return True
-            if not self._mapping_running():
-                break
+        before = before_identity or snapshot_map(global_map)
+        if not self._signal_owned_mapping(signal.SIGINT):
+            logger.warning("save_current_map: SIGINT delivery failed")
+            return False
+        deadline = time.monotonic() + timeout
+        changed = False
+        while time.monotonic() < deadline:
+            changed = map_content_changed(before, snapshot_map(global_map))
+            running = process.poll() is None
+            if changed and not running:
+                logger.info("GlobalMap.pcd saved and mapping process exited")
+                self._clear_mapping_session()
+                return True
+            if not running and not changed:
+                logger.warning("save_current_map: process exited without a new GlobalMap.pcd")
+                self._clear_mapping_session()
+                return False
             time.sleep(0.5)
-        logger.warning("save_current_map: GlobalMap.pcd not updated")
-        return os.path.exists(global_map)
+        logger.warning(
+            "save_current_map: timed out (updated=%s, running=%s)",
+            changed,
+            process.poll() is None,
+        )
+        return False
 
     def stop_mapping(self) -> bool:
         """Stop mapping immediately (SIGTERM, no save)."""
-        return _pkill(MAPPING_PATTERN, "TERM")
+        process = self._mapping_process
+        if process is None or not self._signal_owned_mapping(signal.SIGTERM):
+            return False
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            logger.error("Owned mapping process did not exit after SIGTERM")
+            return False
+        self._clear_mapping_session()
+        return True
+
+    @property
+    def mapping_pid(self) -> int | None:
+        return self._mapping_pid if self._owned_mapping_running() else None
+
+    @property
+    def mapping_pgid(self) -> int | None:
+        return self._mapping_pgid if self._owned_mapping_running() else None
 
     # ── Relocalization ─────────────────────────────────────
 

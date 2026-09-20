@@ -5,8 +5,11 @@ Matches grain-sampling-console.html #screen-mapping prototype layout:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import logging
 import os
 import subprocess
+import threading
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -28,14 +31,28 @@ except ImportError:
     )
 
 from grain_sampling_ui.theme import THEME_COLORS
+from grain_sampling_workflow.map_save import (
+    MapFileIdentity,
+    copy_fresh_map,
+    snapshot_map,
+)
 
 PCD_DIR = os.path.expanduser("~/fastlio2_ws/src/S-FAST_LIO/PCD")
+_logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _MapSaveOutcome:
+    success: bool
+    destination: str | None = None
+    error: str | None = None
 
 
 class MappingPage(QWidget):
     start_mapping_requested = Signal()
     stop_mapping_requested = Signal()
     save_map_requested = Signal()
+    _save_finished = Signal(object)
 
     MAPPING_STATES = {
         "idle": ("空闲", THEME_COLORS["text_secondary"]),
@@ -52,7 +69,10 @@ class MappingPage(QWidget):
         self._slam_bridge: Optional[SlamBridge] = None  # type: ignore[name-defined]
         self._map_saved_in_session: bool = False
         self._saved_map_path: str | None = None
+        self._save_in_progress = False
+        self._save_thread: threading.Thread | None = None
         self._setup_ui()
+        self._save_finished.connect(self._on_save_finished)
         self._refresh_map_list()
 
     # ── UI setup ──────────────────────────────────────────────────────
@@ -289,7 +309,9 @@ class MappingPage(QWidget):
     @Slot()
     def _on_save_clicked(self) -> None:
         from datetime import datetime
-        import shutil
+
+        if self._save_in_progress:
+            return
 
         # Use the inline name input instead of QInputDialog popup
         name = self._map_name_input.text().strip()
@@ -305,18 +327,12 @@ class MappingPage(QWidget):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         new_filename = f"{name}_{ts}.pcd"
 
-        # Step 1.5: Save current map via SIGINT (S-FAST_LIO has no save service)
-        slam_saved = False
-        if self._slam_bridge is not None:
-            self._mapping_state_label.setText("正在保存地图...")
-            QApplication.processEvents()  # 让"正在保存"先显示，避免界面假死
-            slam_saved = self._slam_bridge.save_current_map()
-            if not slam_saved:
-                self._transition_state("error")
-                self._mapping_state_label.setText("地图保存失败")
-                return
+        if self._slam_bridge is None:
+            self._show_save_failure("地图保存失败：建图服务不可用")
+            return
 
-        # Step 2: Check for duplicates
+        # Check for duplicates before starting the asynchronous save. Existing
+        # maps are removed only after the new map has been verified and copied.
         if not os.path.isdir(PCD_DIR):
             os.makedirs(PCD_DIR, exist_ok=True)
 
@@ -331,38 +347,70 @@ class MappingPage(QWidget):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-            # Remove existing files with this name prefix
-            for f in existing:
-                try:
-                    os.remove(os.path.join(PCD_DIR, f))
-                except OSError:
-                    pass
 
-        # Step 3: Copy the full map written by this session's SIGINT save.
-        # Never select an arbitrary recent PCD: scans_* and the smaller
-        # GlobalMap_ikdtree.pcd are not the operator's full saved map.
-        src_file = os.path.join(PCD_DIR, "GlobalMap.pcd")
-        if not os.path.isfile(src_file):
-            self._transition_state("error")
-            self._mapping_state_label.setText("地图保存失败")
-            return
+        source = os.path.join(PCD_DIR, "GlobalMap.pcd")
+        before = snapshot_map(source)
+        destination = os.path.join(PCD_DIR, new_filename)
+        old_paths = [os.path.join(PCD_DIR, filename) for filename in existing]
 
+        self._save_in_progress = True
+        self._mapping_state_label.setText("正在保存地图...")
+        self._btn_save.setEnabled(False)
+        self._btn_toggle.setEnabled(False)
+        self._save_thread = threading.Thread(
+            target=self._save_map_worker,
+            args=(before, source, destination, old_paths),
+            name="mapping-save",
+            daemon=True,
+        )
+        self._save_thread.start()
+
+    def _save_map_worker(
+        self,
+        before: MapFileIdentity,
+        source: str,
+        destination: str,
+        old_paths: list[str],
+    ) -> None:
+        """Finalize and copy a map without blocking the Qt GUI thread."""
         try:
-            shutil.copy2(src_file, os.path.join(PCD_DIR, new_filename))
-        except Exception:
-            self._mapping_state_label.setText("保存失败")
-            self._refresh_map_list()
+            assert self._slam_bridge is not None
+            if not self._slam_bridge.save_current_map(before_identity=before):
+                raise RuntimeError("未检测到本轮生成的新 GlobalMap.pcd")
+            copy_fresh_map(source, destination, before)
+            for old_path in old_paths:
+                if old_path != destination:
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        _logger.warning("Could not remove replaced map: %s", old_path)
+            outcome = _MapSaveOutcome(True, destination=destination)
+        except Exception as exc:
+            _logger.exception("Map save failed")
+            outcome = _MapSaveOutcome(False, error=str(exc))
+        self._save_finished.emit(outcome)
+
+    @Slot(object)
+    def _on_save_finished(self, outcome: _MapSaveOutcome) -> None:
+        self._save_in_progress = False
+        self._save_thread = None
+        if not outcome.success or not outcome.destination:
+            detail = outcome.error or "未检测到本轮生成的新 GlobalMap.pcd"
+            self._show_save_failure(f"地图保存失败：{detail}")
             return
 
-        # Step 4: Mark saved in session
         self._map_saved_in_session = True
-        self._saved_map_path = os.path.join(PCD_DIR, new_filename)
-
-        # Clear the input after successful save
+        self._saved_map_path = outcome.destination
         self._map_name_input.clear()
-
         self._refresh_map_list()
         self._transition_state("saved")
+        self.save_map_requested.emit()
+
+    def _show_save_failure(self, message: str) -> None:
+        self._save_in_progress = False
+        self._transition_state("error")
+        self._mapping_state_label.setText("地图保存失败")
+        QMessageBox.critical(self, "地图保存失败", message)
 
     # ── State transitions ─────────────────────────────────────────────
 
@@ -394,4 +442,5 @@ class MappingPage(QWidget):
         self._btn_toggle.style().unpolish(self._btn_toggle)
         self._btn_toggle.style().polish(self._btn_toggle)
 
-        self._btn_save.setEnabled(is_mapping)
+        self._btn_toggle.setEnabled(not self._save_in_progress)
+        self._btn_save.setEnabled(is_mapping and not self._save_in_progress)
