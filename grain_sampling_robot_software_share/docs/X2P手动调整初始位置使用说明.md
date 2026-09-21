@@ -366,8 +366,81 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ### 10.3 驱动不动，但程序不报错
 
 1. 读一下状态确认使能情况：`python3 scripts/manual_lift_adjust.py --status`
-2. 若提示伺服使能超时，检查 DI1 / SRV-ON 接线、外部急停和驱动器报警。
+2. 若提示伺服使能超时，直接跳到 10.3.1 跑使能链路诊断。
 3. 若驱动器显示报警，用 `python3 -m x2p.cli --port /dev/ttyS0 status` 看 `status`，报警时程序会给出 `E码`。
+
+#### 10.3.1 `伺服使能超时：Un058仍为0`
+
+这条报错的意思是：程序已经把 DI1 强制为有效，但驱动器上报的使能监视 `Un058` 还是 0。
+从 2026-09 起，报错本身会附带一行"使能链路快照"和判读，例如：
+
+```
+伺服使能超时：Un058仍为0；检查DI1/SRV-ON接线、外部急停和驱动器报警
+使能链路快照：P400_DI1功能=1，P415_强制输入=1，Un032_DI状态=0，Un058_伺服使能=0，STATUS_0x3E00=3，Un100_故障码=0
+判读：Un032 第0位为0：驱动器没把 DI1 当成有效输入，查 24V/DI 公共端与端子接线
+```
+
+先按快照判读。要更细的定位，停掉服务后跑专用诊断：
+
+```bash
+sudo systemctl stop grain-sampling
+cd "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share"
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python3 scripts/x2p_enable_diag.py --dry-run          # 只读快照，不动任何东西
+python3 scripts/x2p_enable_diag.py --confirm ENABLE   # 真实写使能寄存器
+python3 scripts/x2p_enable_diag.py --watch 6 --confirm ENABLE   # 强迫后连续观察 6s
+python3 scripts/x2p_enable_diag.py --control --confirm ENABLE   # 加对照试验
+```
+
+第二条命令会**真实让伺服上电**（不会让它转动，但负载/重力可能带动机构轻微动作），
+所以必须先把人清开、手放在急停上。它会依次验证两条使能途径并回读寄存器，
+最后无论成败都撤销强制输入并取消使能。
+
+`--dry-run` 还会多打印 DI1–DI4 的功能分配（`Pn400..Pn403`）和 Modbus 写入策略
+（`Pn604/Pn605`），用来排除"SRV-ON 根本没配在任何 DI 上"这类问题。
+若怀疑使能反应比程序等待更慢，用 `--watch 6` 在强制 DI1 后按 0.5s 间隔连打
+`Un058/Un032/Pn415`，能直接看出是一动不动还是慢慢爬上去。
+
+按快照对号入座：
+
+| 现象 | 含义 | 下一步 |
+|---|---|---|
+| `P400_DI1功能` ≠ 1 | DI1 没配置成 SRV-ON | 把 Pn400 改成 1 后重新上电驱动器 |
+| `Pn400..Pn403` 全无功能 1 | SRV-ON 没配在任何 DI 上 | 给某个 DI 配 SRV-ON(功能1)，重新上电驱动器 |
+| SRV-ON 配在 DI2/DI3/DI4 | 程序强制的 DI1 不是使能端子 | 把接线或配置对齐后重试 |
+| `P415_强制输入` 第0位 = 0 | 强制写入没生效 | 串口/驱动器版本问题，保留原始输出反馈维护 |
+| `Un032_DI状态` 第0位 = 0 | 驱动器没认到 DI1 有效 | 查 DI 公共端(COM)、24V 和端子接线 |
+| `Un032` 第0位 = 1 但 `Un058` = 0 | 驱动器主动拒绝使能 | 看驱动面板 E 码、动力电是否上电、外部急停/限位 |
+| `Fn000=1` 后 `Un058` = 1 | 内部使能可用 | 反馈维护，把 `servo_on()` 改走 Fn000 |
+| 两条途径都不动 `Un058` | 不在 Modbus 控制方式 | 查驱动器主电源与保护状态 |
+| `--watch` 期间 `Un058` 慢慢变 1 | 使能反应慢，不是断路 | 反馈维护，考虑加长使能核验等待时间 |
+
+`--control` 会额外把一个**空闲 DI** 强制为有效，验证 `Pn415` 强制输入通道本身
+能不能改变 `Un032`。这一步能把两种结论分开：
+
+| 对照现象 | 含义 | 下一步 |
+|---|---|---|
+| 强制空闲 DI 后 `Un032` 对应位由 0 变 1 | `Pn415` 通道正常，DI1 那条路的问题是真的 | 回到上表按 `Un032` 第 0 位判读 |
+| 强制空闲 DI 后 `Un032` 对应位不动 | `Pn415` 很可能不是本驱动器的强制输入寄存器，或写入被忽略 | 软件使能这条路整体可疑，先改用硬件方式把 DI1 接 24V+COM 复核 |
+
+### 10.3.2 板端 `src/` 版本不确定时的自包含探测
+
+若板端代码没有同步到最新（例如报错里**没有**"使能链路快照"那一行），或者不方便
+`git pull`，用自包含探测脚本。它自带最小 Modbus RTU 实现，**完全不 import 项目的
+`x2p` 包**，因此板端 `src/` 无论新旧都能跑：
+
+```bash
+sudo systemctl stop grain-sampling
+python3 /tmp/x2p_enable_probe.py        # 先把脚本拷到 /tmp，见下
+```
+
+脚本位置：仓库内 `scripts/x2p_enable_probe.py`。拷到板端后直接执行即可，不需要
+`export PYTHONPATH`。它做的检查与 `--control` 相同（基线 → 强制 DI1 → 改试
+`Fn000=1` → 对照强制空闲 DI），并把整段寄存器值打印出来；结束前同样无条件撤销
+强制输入并取消使能。把完整输出发回维护人员即可定位。
+
+如果连 `python3 -m x2p.cli --port /dev/ttyS0 status` 都读不到（通信本身失败），
+那就不是使能问题，先查串口、波特率 9600、从站 2 和接线。
 
 ### 10.4 `取消软件使能后仍未停机：Un058=…，实际转速=… r/min`
 
@@ -418,6 +491,8 @@ MANUAL_LIFT_MAX_CM=40 python3 scripts/manual_lift_adjust.py down 30
 | 工具 | 依赖 | 用途 |
 |---|---|---|
 | `scripts/manual_lift_adjust.py` | 直连串口，不依赖 ROS | 上电后人工把机构挪回最高点，可连续微调 |
+| `scripts/x2p_enable_diag.py` | 直连串口 | `伺服使能超时` 时定位 SRV-ON 使能链断点（会真实写使能寄存器，需 `--confirm ENABLE`） |
+| `scripts/x2p_enable_probe.py` | 只需 pyserial | 同上，但自带 Modbus 实现、不依赖项目的 `x2p` 包；板端 `src/` 版本不确定时用 |
 | `scripts/move_lift.py` | ROS + `/mechanism/move_lift` 服务 | 服务层单次移动，用于联调验证 ROS 通路 |
 | `python3 -m x2p.cli status` | 直连串口 | 只读核对驱动器状态寄存器 |
 | 自动流程 `press` / `lift` | ROS + 机构节点 | 正常作业，必须建立在正确起点上 |
@@ -428,6 +503,10 @@ MANUAL_LIFT_MAX_CM=40 python3 scripts/manual_lift_adjust.py down 30
 
 ## 12. 验证情况说明
 
-本程序的逻辑由 `test/test_x2p_manual_adjust.py` 覆盖（方向别名、非法与超限距离、时长换算、容差收紧、行程软限位、交互循环、`Ctrl-C` 停机、`Un058` 停机判据回归等）。
+本程序的逻辑由 `test/test_x2p_manual_adjust.py` 覆盖（方向别名、非法与超限距离、时长换算、容差收紧、行程软限位、交互循环、`Ctrl-C` 停机、`Un058` 停机判据回归、使能链路快照与判读等）；使能诊断脚本的逻辑由 `test/test_x2p_enable_diag.py` 覆盖（强制位回读、DI 功能分配、使能链判读、单点读失败容错、`--watch` 参数、`--control` 对照、旧板端无 `read_enable_chain()` 等），自包含探测脚本由 `test/test_x2p_enable_probe.py` 覆盖（不依赖 `x2p` 包、三种故障分支判读、结束前撤销 Pn415/Fn000 等）。
 
 需要明确的是：**这些测试使用桩驱动，没有连接真实伺服**。首次上机仍应按第 3 节用小距离验证方向、行程和编码器符号，确认无误后再投入使用。
+
+截至 2026-09-20，本程序**尚未在 LPA3588 + 真实 X2P 伺服上完成一次成功移动**：
+现场停在"使能超时（Un058 一直为 0）"。所以 §10.3.1 的使能诊断应先跑通，
+再按第 3 节验证移动方向和编码器符号，之后才能交给作业流程使用。

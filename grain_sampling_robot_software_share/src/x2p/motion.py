@@ -44,6 +44,11 @@ class MotionState(Enum):
     FAULT = "fault"
 
 
+#: 使能核验窗口。RTU 传输每次读写最长约 1 s 且会重试一次，1 s 的旧值
+#: 在偶发慢应答时只够采到一个样本，容易把"其实是能上电"误判成超时。
+ENABLE_VERIFY_TIMEOUT_S = 3.0
+
+
 def _finite_number(name: str, value: object) -> int | float:
     if (
         isinstance(value, bool)
@@ -204,7 +209,60 @@ class MotionController:
         raise MotionTimeoutError(
             f"伺服使能超时：Un058仍为{last_enable}；"
             "检查DI1/SRV-ON接线、外部急停和驱动器报警"
+            + self._enable_chain_hint()
         )
+
+    def _enable_chain_hint(self) -> str:
+        """附带 SRV-ON 使能链路的现场快照，避免只能靠猜。
+
+        快照按信号流顺序给出：DI1 功能(Pn400) → 强制输入(Pn415) →
+        驱动器看到的 DI 状态(Un032 bit0) → 使能结果(Un058) → 状态/故障码。
+        任何一项读不到都不影响报错本身。
+        """
+        reader = getattr(self.drive, "read_enable_chain", None)
+        if reader is None:
+            return ""
+        try:
+            values = reader()
+        except Exception:  # noqa: BLE001 - 诊断信息不能掩盖原始报错
+            return ""
+        if not values:
+            return ""
+        rendered = "，".join(f"{key}={value}" for key, value in values.items())
+        hints = self._enable_chain_hints(values)
+        text = f"\n使能链路快照：{rendered}"
+        if hints:
+            text += "\n判读：" + "；".join(hints)
+        return text
+
+    @staticmethod
+    def _enable_chain_hints(values: dict[str, object]) -> list[str]:
+        """把寄存器快照翻译成下一步该查什么。"""
+        forced = values.get("P415_强制输入")
+        inputs = values.get("Un032_DI状态")
+        enabled = values.get("Un058_伺服使能")
+        function = values.get("P400_DI1功能")
+        hints: list[str] = []
+        if isinstance(function, int) and function != DigitalInputFunction.SERVO_ON:
+            hints.append(f"Pn400={function}，DI1 未配置为 SRV-ON(1)")
+        if isinstance(forced, int) and not forced & 0x01:
+            hints.append("Pn415 第0位没有置起，强制位没有写进驱动器")
+        if isinstance(inputs, int) and not inputs & 0x01:
+            hints.append(
+                "Un032 第0位为0：驱动器没把 DI1 当成有效输入，"
+                "查 24V/DI 公共端与端子接线"
+            )
+        if (
+            isinstance(inputs, int)
+            and inputs & 0x01
+            and isinstance(enabled, int)
+            and enabled == 0
+        ):
+            hints.append(
+                "DI1 已有效但 Un058 仍为0：驱动器主动拒绝使能，"
+                "查主电源、外部急停/限位和驱动面板 E 码"
+            )
+        return hints
 
     def _fault_message(self, status: int) -> str:
         """驱动器报警(STATUS=4)时读 Un100 故障码低字节，生成明确报错。
@@ -346,7 +404,7 @@ class MotionController:
 
     def _enable_and_verify(self, additional_forced_inputs: int = 0) -> None:
         self.drive.servo_on(additional_forced_inputs)
-        self._wait_enabled(1.0)
+        self._wait_enabled(ENABLE_VERIFY_TIMEOUT_S)
         self.state = MotionState.RUNNING
 
     def _wait_speed_command(self, expected_rpm: int) -> None:

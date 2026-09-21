@@ -719,6 +719,72 @@ def test_controller_no_longer_waits_on_undocumented_status_register():
     assert not hasattr(controller, "_wait_status")
 
 
+def test_enable_timeout_includes_chain_snapshot_and_verdict():
+    """使能超时的报错要带寄存器快照和判读，不能只给一句“检查接线”。"""
+    from x2p.errors import MotionTimeoutError
+
+    class _ChainDrive(_FakeDrive):
+        def servo_on(self, additional_forced_inputs=0):
+            self.servo_on_calls += 1  # 不改变 Un058
+
+        def read_enable_chain(self):
+            return {
+                "P400_DI1功能": 1,
+                "P415_强制输入": 0x01,
+                "Un032_DI状态": 0x00,
+                "Un058_伺服使能": 0,
+                "STATUS_0x3E00": 3,
+                "Un100_故障码": 0,
+            }
+
+    controller = _controller(_ChainDrive(status=3, enable=0))
+    with pytest.raises(MotionTimeoutError) as excinfo:
+        controller._enable_and_verify()
+    message = str(excinfo.value)
+    assert "使能链路快照" in message
+    assert "Un032_DI状态=0" in message
+    assert "24V/DI 公共端" in message
+
+
+def test_enable_chain_hints_flag_di_active_but_refused():
+    hints = MotionController._enable_chain_hints(
+        {
+            "P400_DI1功能": 1,
+            "P415_强制输入": 0x01,
+            "Un032_DI状态": 0x01,
+            "Un058_伺服使能": 0,
+        }
+    )
+    assert any("主动拒绝使能" in hint for hint in hints)
+
+
+def test_enable_chain_hint_is_optional_for_stub_drives():
+    """桩驱动没有 read_enable_chain 时，原报错必须保持原样。"""
+    controller = _controller(_FakeDrive(status=3, enable=0))
+    assert controller._enable_chain_hint() == ""
+
+
+def test_read_enable_chain_reports_per_register_failures():
+    """快照里单个寄存器读失败只记文字，不能让整份诊断中断。"""
+    from x2p.drive import X2PDrive
+    from x2p.registers import Register
+
+    class _PartialClient:
+        def read_registers(self, address, count=1):
+            if address == Register.DIGITAL_INPUT_STATUS:
+                raise RuntimeError("timeout")
+            return [1]
+
+        def close(self):
+            return None
+
+    drive = object.__new__(X2PDrive)  # 仅注入桩 client，绕过串口构造
+    drive.client = _PartialClient()
+    snapshot = drive.read_enable_chain()
+    assert snapshot["Un032_DI状态"] == "读取失败(timeout)"
+    assert snapshot["Un058_伺服使能"] == 1
+
+
 def test_is_disabled_and_stopped_requires_zero_speed():
     controller = _controller(_FakeDrive(status=3, enable=0, speed=0))
     assert controller._is_disabled_and_stopped() is True

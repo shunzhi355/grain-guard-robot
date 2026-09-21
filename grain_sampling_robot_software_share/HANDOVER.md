@@ -75,6 +75,35 @@ python3 scripts/manual_lift_adjust.py --status   # 只读位置
 
 完整使用文档见 `docs/X2P手动调整初始位置使用说明.md`（命令表、参数与环境变量、真实输出示例、常见故障排查）。
 
+若手动程序报 `伺服使能超时：Un058仍为0`，先跑使能链路诊断（会真实写使能寄存器，
+需现场确认安全后加 `--confirm ENABLE`）：
+
+```bash
+python3 scripts/x2p_enable_diag.py --dry-run          # 只读快照
+python3 scripts/x2p_enable_diag.py --confirm ENABLE   # 定位使能链断点
+```
+
+它按 Pn400 → Pn415 → Un032 → Un058 的顺序回读寄存器，并分别试强制 DI1 和 Fn000=1，
+退出前自动撤销强制输入、取消使能。判读表见使用文档 §10.3.1。
+
+`--dry-run` 额外汇总 DI1–DI4 的功能分配（`Pn400..Pn403`）与 Modbus 写入策略
+（`Pn604/Pn605`），用于排除"SRV-ON 没有配在任何 DI 上"或"使能端子不是 DI1"；
+`--watch <秒>` 在强制 DI1 后按 0.5s 间隔连续打印 `Un058/Un032/Pn415`，
+用于区分"使能链断了"和"使能反应比程序等待更慢"。
+
+`--control` 额外把一个空闲 DI 强制为有效，用 `Un032` 的对应位判断 `Pn415`
+强制输入通道本身通不通：位翻转说明通道正常、是驱动器拒绝使能；位不翻转说明
+`Pn415` 可能不是本驱动器的强制输入寄存器，软件使能这条路整体可疑。
+
+板端 `src/` 版本不确定、或不方便 `git pull` 时，改用自包含的
+`scripts/x2p_enable_probe.py`：它自带最小 Modbus RTU 实现，**不 import 项目的
+`x2p` 包**，板端代码新旧都能跑，检查项与 `--control` 相同。
+
+> 注意：报错里的"使能链路快照"和本诊断脚本都是 2026-09-20 新增的。若实机报错
+> **没有**那行快照，说明板端跑的是同步前的旧 `src/x2p/`。这不影响诊断：用
+> 自包含的 `scripts/x2p_enable_probe.py` 即可（它不读板端 `x2p` 包）。
+> `x2p_enable_diag.py` 已改为不依赖 `read_enable_chain()`，旧板端也能直接跑。
+
 只读确认驱动器状态：
 
 ```bash
@@ -110,7 +139,7 @@ python3 scripts/ch_control.py <通道0-15> <脉宽us|off|init|read>
 | 导航 | ✅ 测试通过（点1/点2 ARRIVED，误差 ~0.12m） |
 | 底盘 + 遥控 | ✅ 顺滑 |
 | 扦样机构 | ⚠️ 早期位置误差 -19.9mm 记录基于旧容差 15mm；现容差已收到 `X2P_POSITION_TOLERANCE_MM = 2.0` 并加入低速接近段，待现场复测 |
-| X2P 手动调整 | ✅ 新增 `scripts/manual_lift_adjust.py`（交互式直连串口，不依赖 ROS） |
+| X2P 手动调整 | ⚠️ 程序已交付（`scripts/manual_lift_adjust.py`，交互式直连串口）；但 2026-09-20 LPA3588 实机卡在"伺服使能超时（Un058=0）"，尚未完成一次真实移动。诊断工具 `scripts/x2p_enable_diag.py` 已就绪，待现场跑通使能后复测移动 |
 | 里程计 | ❌ /Odometry 无数据（暂搁置） |
 
 ## 9. 已知问题与待办

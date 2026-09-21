@@ -69,6 +69,30 @@ class X2PDrive:
         address = digital_input_function_register(di_number)
         return self.read_registers(address)[0]
 
+    #: SRV-ON 使能链路的关键寄存器，按信号流顺序排列，供诊断快照使用。
+    ENABLE_CHAIN_REGISTERS: tuple[tuple[str, Register], ...] = (
+        ("P400_DI1功能", Register.DI1_FUNCTION),
+        ("P415_强制输入", Register.FORCE_DIGITAL_INPUTS),
+        ("Un032_DI状态", Register.DIGITAL_INPUT_STATUS),
+        ("Un058_伺服使能", Register.SERVO_ENABLE_STATUS),
+        ("STATUS_0x3E00", Register.STATUS),
+        ("Un100_故障码", Register.LAST_FAULT_CODE),
+    )
+
+    def read_enable_chain(self) -> dict[str, object]:
+        """Best-effort snapshot of every register in the SRV-ON chain.
+
+        Individual read failures are recorded as text instead of raising, so a
+        diagnostic report always completes and can be pasted into a ticket.
+        """
+        values: dict[str, object] = {}
+        for label, address in self.ENABLE_CHAIN_REGISTERS:
+            try:
+                values[label] = self.read_registers(address)[0]
+            except Exception as exc:  # noqa: BLE001 - 诊断模式不因单点失败中断
+                values[label] = f"读取失败({exc})"
+        return values
+
     def force_digital_inputs(self, mask: int) -> None:
         if not 0 <= mask <= 0xFF:
             raise ValueError("数字输入强制掩码必须在0x00..0xFF之间")

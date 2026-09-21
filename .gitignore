@@ -52,3 +52,6 @@ mock_server_data/
 /tmp_edge_profile/
 /tmp_manual.txt
 /manual-page*.png
+
+# Windows reserved-name file created by a bad ssh redirection
+NUL
