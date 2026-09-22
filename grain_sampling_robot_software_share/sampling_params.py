@@ -101,8 +101,8 @@ ENABLE_UNWIRED_CHANNELS: bool = False
 
 #: 未知品种的兜底时序参数（秒）。
 DEFAULT_GRAIN_PARAMS: dict[str, float] = {
-    "sampling_duration": 120.0,  # 扦样时长，默认 2 min
-    "convey_duration": 120.0,    # 输送时长，默认 2 min
+    "sampling_duration": 10.0,  # 扦样时长，默认 2 min
+    "convey_duration": 10.0,    # 输送时长，默认 2 min
     "open_duration": 5.0,        # 开仓保持时长（秒），之后自动关同仓（暂定 5s，以实测为准）
     "close_duration": 3.0,       # 关仓时长
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
@@ -183,9 +183,9 @@ X2P_DURATION_S: float = 2.0
 #: 升降方向：1=正向，-1=反向翻转（实机方向不对时改这里）。
 X2P_FORWARD_SIGN: int = 1
 
-#: 自动下压循环回程时不贴回顶部机械原点，保留的安全距离（mm）。
-#: 该余量必须大于位置容差，防止刹车惯性导致冲顶。
-X2P_RETURN_CLEARANCE_MM: float = 5.0
+#: 自动下压循环回程相对于本轮保存起点的下方余量（mm）。
+#: 实机要求每轮精确回到保存的编码器起点，避免多轮累计下移。
+X2P_RETURN_CLEARANCE_MM: float = 0.0
 
 #: 编码器距离动作的停止后位置容差（mm）。
 X2P_POSITION_TOLERANCE_MM: float = 2.0

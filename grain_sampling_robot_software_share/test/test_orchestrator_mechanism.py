@@ -246,7 +246,7 @@ def test_add_pipe_durations_from_grain_config(monkeypatch):
 
 
 def test_unknown_grain_falls_back_to_defaults(monkeypatch):
-    """未设置品种时回退默认时长（clamp=2s, unclamp=3s, press/lift 跟 clamp），时序仍完整。"""
+    """未设置品种时回退默认时长（clamp=2s, unclamp=5s, press/lift 跟 clamp），时序仍完整。"""
     bridge = RecordingBridge()
     orch, fsm, durations = _make_orch(bridge, depth_target=1.0)
     orch._grain = ""  # 品种未知 → DEFAULT_GRAIN_PARAMS
@@ -254,8 +254,8 @@ def test_unknown_grain_falls_back_to_defaults(monkeypatch):
     orch._handle_press_and_suction()
 
     # clamp 2.0 + 停稳余量 0.5 = 2.5；servo(press/lift) 回退 clamp=2.0 → 2.5；
-    # unclamp 3.0 + 0.5 = 3.5
-    assert durations == [2.5, 2.5, 3.5, 2.5, 2.5]
+    # unclamp 5.0 + 0.5 = 5.5
+    assert durations == [2.5, 2.5, 5.5, 2.5, 2.5]
     assert bridge.calls == [
         "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
