@@ -118,7 +118,13 @@ def _approach_profile(
 
 
 class MotionController:
-    """High-level API with bounded speed and experimental position motion."""
+    """High-level API for bounded internal-position motion.
+
+    The public ``run_speed`` name is kept for compatibility with the lift
+    adapter, but it now converts the requested speed/time pair into a relative
+    position command and executes it through the drive's internal position
+    table (Pn706/Pn708 + Pn701 trigger).
+    """
 
     def __init__(
         self,
@@ -295,9 +301,17 @@ class MotionController:
             )
 
     def stop(self, *, verify_off: bool = True) -> None:
-        """Set speed to zero, wait for standstill, then remove software S-ON."""
+        """Cancel the active position segment, stop, then remove software S-ON."""
         self.state = MotionState.STOPPING
         errors: list[Exception] = []
+
+        try:
+            # In position mode Pn301 is not the active command.  Clearing
+            # Pn701 first cancels the internal position segment; Pn301=0 is
+            # retained as a harmless compatibility stop for speed-mode drives.
+            self.drive.write_register(Register.POSITION_SEGMENT, 0)
+        except Exception as exc:
+            errors.append(exc)
 
         try:
             self.drive.set_speed(0)
@@ -312,11 +326,6 @@ class MotionController:
                 time.sleep(self.monitor_interval_s)
             else:
                 raise MotionTimeoutError("停止超时：实际速度未归零")
-        except Exception as exc:
-            errors.append(exc)
-
-        try:
-            self.drive.write_register(Register.POSITION_SEGMENT, 0)
         except Exception as exc:
             errors.append(exc)
 
@@ -425,13 +434,34 @@ class MotionController:
             "当前控制模式未接受通讯速度命令"
         )
 
+    def _verify_position_configuration(self) -> None:
+        """Verify the drive is configured for internal position + auto mode 2."""
+        tuning_mode = self.drive.read_registers(Register.TUNING_MODE)[0]
+        command_pulses = self.drive.read_registers(
+            Register.COMMAND_PULSES_PER_REV
+        )[0]
+        expected_pulses = self.config.encoder_counts_per_motor_rev
+        if tuning_mode != 2:
+            raise ConfigurationError(
+                f"当前Pn002={tuning_mode}，要求自动调整模式2(Pn002=2)；"
+                "请先运行 scripts/configure_x2p_position_auto2.py 并断电重启"
+            )
+        if command_pulses != expected_pulses:
+            raise ConfigurationError(
+                f"内部位置脉冲单位不匹配：Pn008={command_pulses}，"
+                f"控制器配置encoder_counts_per_motor_rev={expected_pulses}。"
+                "请先运行 scripts/configure_x2p_position_auto2.py "
+                f"--command-pulses-per-rev {expected_pulses}，"
+                "否则Pn706位置会按错误比例移动"
+            )
+
     def run_speed(
         self,
         direction: str | Direction,
         rpm: int,
         duration_s: float,
     ) -> MotionResult:
-        """Run in the hardware-verified speed mode, then return to OFF."""
+        """Run the same timed displacement through internal position mode."""
         limits = self.config.limits
         if type(rpm) is not int:
             raise ValueError("rpm必须是整数")
@@ -448,59 +478,36 @@ class MotionController:
                 f"duration_s不能超过{limits.max_duration_s}"
             )
         parsed_direction = Direction.parse(direction)
-        signed_rpm = rpm * direction_sign(direction, self.config.forward_sign)
-
-        self.drive.diagnostic()
-        self.prepare_off()
-        start = time.monotonic()
-        peak = 0
-        try:
-            forced_inputs = self._select_control_path(position=False)
-            source = self.drive.read_registers(Register.SPEED_SOURCE)[0]
-            if source != 0:
-                raise ConfigurationError(
-                    f"速度命令要求Pn300=0，当前为{source}"
-                )
-            self.drive.write_register(Register.MODBUS_NO_SAVE, 0)
-            self.drive.write_register(Register.MODBUS_SAVE_POLICY, 1)
-            self.drive.set_speed(signed_rpm)
-            readback = signed16(
-                self.drive.read_registers(Register.SPEED_COMMAND)[0]
+        encoder_counts = self.config.encoder_counts_per_motor_rev
+        pulses = round(rpm * duration_s * encoder_counts / 60.0)
+        if pulses < 1:
+            raise ValueError("按rpm和duration_s换算后的位置脉冲必须大于0")
+        if pulses > limits.max_move_pulses:
+            raise ValueError(
+                f"换算后的位置脉冲{pulses}超过安全上限"
+                f"{limits.max_move_pulses}"
             )
-            if readback != signed_rpm:
-                raise ConfigurationError(
-                    "Pn301速度指令写入读回不一致: "
-                    f"{readback}!={signed_rpm}"
-                )
-            self._enable_and_verify(forced_inputs)
-            self._wait_speed_command(signed_rpm)
-            deadline = time.monotonic() + duration_s
-            while time.monotonic() < deadline:
-                actual = self._actual_speed()
-                peak = max(peak, abs(actual))
-                monitored = signed16(
-                    self.drive.read_registers(
-                        Register.MONITORED_SPEED_COMMAND
-                    )[0]
-                )
-                torque = signed16(
-                    self.drive.read_registers(Register.TORQUE_COMMAND)[0]
-                )
-                self._emit(
-                    f"实际转速: {actual} r/min, 速度命令: {monitored} r/min, "
-                    f"转矩: {torque / 10:.1f}%"
-                )
-                time.sleep(self.monitor_interval_s)
-        finally:
-            self.stop(verify_off=True)
 
+        move_result = self._move_pulses(
+            direction,
+            pulses,
+            rpm,
+            mode="speed_position",
+            timeout_s=None,
+            record_result=False,
+            tolerance_pulses=max(2, min(50, pulses // 100)),
+        )
+        signed_rpm = rpm * direction_sign(
+            direction, self.config.forward_sign
+        )
         result = MotionResult(
-            mode="speed",
-            direction=parsed_direction.name.lower(),
-            target=float(signed_rpm),
-            elapsed_s=time.monotonic() - start,
-            peak_abs_rpm=peak,
-            final_rpm=self._actual_speed(),
+            **{
+                **asdict(move_result),
+                "mode": "position",
+                "direction": parsed_direction.name.lower(),
+                "target": float(signed_rpm),
+                "requested_duration_s": duration_s,
+            }
         )
         self._record(result)
         return result
@@ -513,7 +520,7 @@ class MotionController:
         *,
         tolerance_mm: float | None = None,
     ) -> MotionResult:
-        """Move a screw distance using speed control and encoder feedback."""
+        """Move a screw distance through Pn706 internal position mode."""
         limits = self.config.limits
         distance_mm = _finite_number("distance_mm", distance_mm)
         duration_s = _finite_number("duration_s", duration_s)
@@ -538,10 +545,6 @@ class MotionController:
         if not 0 < tolerance <= distance_mm:
             raise ValueError("tolerance_mm必须大于0且不超过移动距离")
 
-        parsed_direction = Direction.parse(direction)
-        sign = direction_sign(direction, self.config.forward_sign)
-        self.drive.diagnostic()
-        self.prepare_off()
         plan = plan_timed_move(
             distance_mm,
             duration_s,
@@ -554,174 +557,38 @@ class MotionController:
             ),
             max_rpm=limits.max_rpm,
         )
-        (
-            approach_rpm,
-            approach_window_mm,
-            conservative_duration_s,
-        ) = _approach_profile(
-            command_rpm=plan.command_rpm,
-            distance_mm=distance_mm,
-            tolerance_mm=tolerance,
-            screw_lead_mm=self.config.screw_lead_mm,
-            motor_revs_per_screw_rev=(
-                self.config.motor_revs_per_screw_rev
-            ),
-            monitor_interval_s=self.monitor_interval_s,
-        )
-
         counts_per_mm = plan.target_pulses / distance_mm
         tolerance_pulses = max(1, round(tolerance * counts_per_mm))
-        approach_window_pulses = round(approach_window_mm * counts_per_mm)
-        approach_active = (
-            approach_rpm < plan.command_rpm
-            and approach_window_mm >= distance_mm
+        parsed_direction = Direction.parse(direction)
+        move_result = self._move_pulses(
+            direction,
+            plan.target_pulses,
+            plan.command_rpm,
+            mode="timed_distance",
+            timeout_s=None,
+            record_result=False,
+            tolerance_pulses=tolerance_pulses,
         )
-        initial_rpm = approach_rpm if approach_active else plan.command_rpm
-        signed_rpm = initial_rpm * sign
-        signed_approach_rpm = approach_rpm * sign
-        encoder_sign = (
-            parsed_direction.value * self.config.encoder_forward_sign
+        target_position = int(move_result.start_position) + int(
+            move_result.target
         )
-        start_position = 0
-        target_position = 0
-        peak = 0
-        start = 0.0
-        last_output = 0.0
-        arrival_elapsed = 0.0
-        previous_progress = 0
-        previous_time = 0.0
-        try:
-            forced_inputs = self._select_control_path(position=False)
-            source = self.drive.read_registers(Register.SPEED_SOURCE)[0]
-            if source != 0:
-                raise ConfigurationError(
-                    f"定时距离命令要求Pn300=0，当前为{source}"
-                )
-            self.drive.write_register(Register.MODBUS_NO_SAVE, 0)
-            self.drive.write_register(Register.MODBUS_SAVE_POLICY, 1)
-            self.drive.set_speed(signed_rpm)
-            readback = signed16(
-                self.drive.read_registers(Register.SPEED_COMMAND)[0]
-            )
-            if readback != signed_rpm:
-                raise ConfigurationError(
-                    f"Pn301写入读回不一致: {readback}!={signed_rpm}"
-                )
-
-            start_position = self.drive.read_signed32(
-                Register.SERVO_POSITION_ENCODER
-            )
-            signed_target_pulses = plan.target_pulses * encoder_sign
-            target_position = start_position + signed_target_pulses
-            self._emit(
-                f"MOVE_BEGIN start={start_position} target={target_position} "
-                f"distance_mm={distance_mm} tolerance_mm={tolerance} "
-                f"cruise_rpm={plan.command_rpm} approach_rpm={approach_rpm} "
-                f"approach_window_mm={approach_window_mm:.3f}"
-            )
-            start = time.monotonic()
-            previous_time = start
-            self._enable_and_verify(forced_inputs)
-            self._wait_speed_command(signed_rpm)
-
-            expected_duration_s = max(
-                plan.nominal_duration_s, conservative_duration_s
-            )
-            deadline = start + expected_duration_s + max(
-                2.0, expected_duration_s * 0.25
-            )
-            while time.monotonic() < deadline:
-                position = self.drive.read_signed32(
-                    Register.SERVO_POSITION_ENCODER
-                )
-                now = time.monotonic()
-                progress = (position - start_position) * encoder_sign
-                remaining = plan.target_pulses - progress
-                if progress < -tolerance_pulses:
-                    raise SafetyInterlockError(
-                        "编码器位置向目标反方向变化；"
-                        "检查forward_sign和机械方向"
-                    )
-                # Position is the safety-critical feedback.  Decide whether to
-                # stop immediately after reading it; querying actual speed can
-                # block for a full Modbus timeout and used to let the axis keep
-                # travelling after it had already reached the target.
-                if remaining <= tolerance_pulses:
-                    if (
-                        progress >= plan.target_pulses
-                        and progress > previous_progress
-                    ):
-                        target_fraction = (
-                            plan.target_pulses - previous_progress
-                        ) / (progress - previous_progress)
-                        arrival_time = previous_time + target_fraction * (
-                            now - previous_time
-                        )
-                        arrival_elapsed = arrival_time - start
-                    else:
-                        arrival_elapsed = now - start
-                    break
-                if (
-                    not approach_active
-                    and approach_rpm < plan.command_rpm
-                    and tolerance_pulses < remaining <= approach_window_pulses
-                ):
-                    self.drive.set_speed(signed_approach_rpm)
-                    readback = signed16(
-                        self.drive.read_registers(Register.SPEED_COMMAND)[0]
-                    )
-                    if readback != signed_approach_rpm:
-                        raise ConfigurationError(
-                            "接近目标时的低速指令写入读回不一致: "
-                            f"{readback}!={signed_approach_rpm}"
-                        )
-                    approach_active = True
-                    self._emit(
-                        f"进入低速接近段: {signed_approach_rpm} r/min, "
-                        f"剩余约{remaining / counts_per_mm:.3f} mm"
-                    )
-                # Speed is telemetry, so read it only after all position-based
-                # safety decisions for this iteration have been made.
-                actual = self._actual_speed()
-                peak = max(peak, abs(actual))
-                if now - last_output >= 0.25:
-                    self._emit(
-                        f"位置: {position} pulse, 剩余: {remaining} pulse, "
-                        f"速度: {actual} r/min"
-                    )
-                    last_output = now
-                previous_progress = progress
-                previous_time = now
-                time.sleep(self.monitor_interval_s)
-            else:
-                raise PositionNotReachedError(
-                    "编码器位置在允许时间内未到达目标"
-                )
-        finally:
-            self.stop(verify_off=True)
-
-        final_position = self.drive.read_signed32(
-            Register.SERVO_POSITION_ENCODER
-        )
+        final_position = int(move_result.final_position)
         error_pulses = target_position - final_position
         error_mm = error_pulses / counts_per_mm
-        self._emit(f"MOVE_STOP start={start_position} target={target_position} "
-                   f"final={final_position} error_mm={error_mm:.4f} tolerance_mm={tolerance}")
-        if abs(error_pulses) > tolerance_pulses:
-            raise PositionNotReachedError(
-                f"停止后位置误差{error_pulses} pulse/"
-                f"{error_mm:.4f} mm，超过容差{tolerance:.4f} mm"
-            )
-
+        self._emit(
+            f"MOVE_STOP start={move_result.start_position} "
+            f"target={target_position} final={final_position} "
+            f"error_mm={error_mm:.4f} tolerance_mm={tolerance}"
+        )
         result = MotionResult(
             mode="timed_distance",
             direction=parsed_direction.name.lower(),
             target=distance_mm * parsed_direction.value,
-            elapsed_s=arrival_elapsed,
-            peak_abs_rpm=peak,
-            final_rpm=self._actual_speed(),
-            start_position=start_position,
-            final_position=final_position,
+            elapsed_s=move_result.elapsed_s,
+            peak_abs_rpm=move_result.peak_abs_rpm,
+            final_rpm=move_result.final_rpm,
+            start_position=move_result.start_position,
+            final_position=move_result.final_position,
             completed=True,
             requested_duration_s=duration_s,
             position_error_pulses=error_pulses,
@@ -739,6 +606,26 @@ class MotionController:
         """
         return self.drive.read_signed32(Register.SERVO_POSITION_ENCODER)
 
+    def move_pulses(
+        self,
+        direction: str | Direction,
+        pulses: int,
+        rpm: int,
+        *,
+        timeout_s: float | None = None,
+        tolerance_pulses: int | None = None,
+    ) -> MotionResult:
+        """Execute one relative move with Pn321=1 internal Pr1 position mode."""
+        return self._move_pulses(
+            direction,
+            pulses,
+            rpm,
+            mode="position",
+            timeout_s=timeout_s,
+            record_result=True,
+            tolerance_pulses=tolerance_pulses,
+        )
+
     def experimental_move_pulses(
         self,
         direction: str | Direction,
@@ -748,11 +635,13 @@ class MotionController:
         allow_experimental: bool = False,
         timeout_s: float | None = None,
     ) -> MotionResult:
+        """Compatibility wrapper for the formerly experimental Pr1 path."""
+        del allow_experimental
         return self._experimental_move_pulses(
             direction,
             pulses,
             rpm,
-            allow_experimental=allow_experimental,
+            allow_experimental=True,
             timeout_s=timeout_s,
             record_result=True,
         )
@@ -767,12 +656,29 @@ class MotionController:
         timeout_s: float | None,
         record_result: bool,
     ) -> MotionResult:
-        """Try one Pr1 relative move; this path has not worked on this drive yet."""
-        if not allow_experimental:
-            raise SafetyInterlockError(
-                "内部位置触发尚未通过实机验证；"
-                "必须显式设置allow_experimental=True"
-            )
+        del allow_experimental
+        return self._move_pulses(
+            direction,
+            pulses,
+            rpm,
+            mode="experimental_position",
+            timeout_s=timeout_s,
+            record_result=record_result,
+            tolerance_pulses=None,
+        )
+
+    def _move_pulses(
+        self,
+        direction: str | Direction,
+        pulses: int,
+        rpm: int,
+        *,
+        mode: str,
+        timeout_s: float | None,
+        record_result: bool,
+        tolerance_pulses: int | None,
+    ) -> MotionResult:
+        """Execute one Pr1 relative move and always remove servo enable."""
         limits = self.config.limits
         if type(pulses) is not int:
             raise ValueError("pulses必须是整数")
@@ -788,12 +694,24 @@ class MotionController:
             else _finite_number("timeout_s", timeout_s)
         )
         if not 0 < timeout <= limits.position_timeout_s:
-            raise ValueError(f"timeout_s必须在0..{limits.position_timeout_s}之间")
+            raise ValueError(
+                f"timeout_s必须在0..{limits.position_timeout_s}之间"
+            )
+        tolerance = (
+            max(2, min(50, pulses // 100))
+            if tolerance_pulses is None
+            else tolerance_pulses
+        )
+        if type(tolerance) is not int or not 1 <= tolerance <= pulses:
+            raise ValueError("tolerance_pulses必须在1..pulses之间")
 
         parsed_direction = Direction.parse(direction)
-        signed_pulses = pulses * direction_sign(direction, self.config.forward_sign)
+        signed_pulses = pulses * direction_sign(
+            direction, self.config.forward_sign
+        )
         self.drive.diagnostic()
         self.prepare_off()
+        self._verify_position_configuration()
         start = time.monotonic()
         peak = 0
         completed = False
@@ -802,22 +720,32 @@ class MotionController:
             forced_inputs = self._select_control_path(position=True)
             self.drive.write_register(Register.MODBUS_NO_SAVE, 0)
             self.drive.write_register(Register.MODBUS_SAVE_POLICY, 1)
-            self.drive.write_register(Register.POSITION_SOURCE, 1)
-            self.drive.write_register(Register.POSITION_MODE, 6)
-            self.drive.write_register(Register.POSITION_SEGMENT, 0)
-            self.drive.write_register(Register.POSITION_ACCEL, 500)
-            self.drive.write_register(Register.POSITION_DECEL, 500)
-            self.drive.write_register(Register.POSITION_S_CURVE, 100)
+            for label, address, value in (
+                ("Pn321位置指令来源", Register.POSITION_SOURCE, 1),
+                ("Pn700内部位置模式", Register.POSITION_MODE, 6),
+                ("Pn701当前段", Register.POSITION_SEGMENT, 0),
+                ("Pn703加速时间", Register.POSITION_ACCEL, 500),
+                ("Pn704减速时间", Register.POSITION_DECEL, 500),
+                ("Pn705S曲线时间", Register.POSITION_S_CURVE, 100),
+                ("Pn708位置速度", Register.PR1_SPEED, rpm),
+            ):
+                self.drive.write_register(address, value)
+                readback = self.drive.read_registers(address)[0]
+                if readback != value:
+                    raise ConfigurationError(
+                        f"{label}写入读回不一致: {readback}!={value}"
+                    )
             self.drive.write_signed32(Register.PR1_PULSES, signed_pulses)
-            self.drive.write_register(Register.PR1_SPEED, rpm)
-            if self.drive.read_signed32(Register.PR1_PULSES) != signed_pulses:
+            if (
+                self.drive.read_signed32(Register.PR1_PULSES)
+                != signed_pulses
+            ):
                 raise ConfigurationError("Pn706位置写入读回不一致")
 
             start_position = self.drive.read_signed32(
                 Register.FEEDBACK_COMMAND_PULSES
             )
             target_position = start_position + signed_pulses
-            tolerance = max(2, min(50, pulses // 100))
             self.drive.write_register(Register.POSITION_SEGMENT, 1)
             self._enable_and_verify(forced_inputs)
             enabled_inputs = digital_input_bit(1) | forced_inputs
@@ -830,7 +758,9 @@ class MotionController:
                 position = self.drive.read_signed32(
                     Register.FEEDBACK_COMMAND_PULSES
                 )
-                deviation = self.drive.read_signed32(Register.POSITION_DEVIATION)
+                deviation = self.drive.read_signed32(
+                    Register.POSITION_DEVIATION
+                )
                 self._emit(
                     f"实际转速: {actual} r/min, 位置: {position} pulse, "
                     f"位置偏差: {deviation}"
@@ -843,23 +773,31 @@ class MotionController:
                 time.sleep(self.monitor_interval_s)
             if not completed:
                 raise PositionNotReachedError(
-                    "实验性位置运动未到位；已执行安全停止"
+                    "内部位置运动未到位；已执行安全停止"
                 )
         finally:
             self.stop(verify_off=True)
 
+        final_position = self.drive.read_signed32(
+            Register.FEEDBACK_COMMAND_PULSES
+        )
+        error_pulses = target_position - final_position
+        if abs(error_pulses) > tolerance:
+            raise PositionNotReachedError(
+                f"停止后位置误差{error_pulses} pulse，超过容差"
+                f"{tolerance} pulse"
+            )
         result = MotionResult(
-            mode="experimental_position",
+            mode=mode,
             direction=parsed_direction.name.lower(),
             target=float(signed_pulses),
             elapsed_s=time.monotonic() - start,
             peak_abs_rpm=peak,
             final_rpm=self._actual_speed(),
             start_position=start_position,
-            final_position=self.drive.read_signed32(
-                Register.FEEDBACK_COMMAND_PULSES
-            ),
+            final_position=final_position,
             completed=completed,
+            position_error_pulses=error_pulses,
         )
         if record_result:
             self._record(result)

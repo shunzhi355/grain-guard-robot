@@ -76,7 +76,9 @@ def build_x2p_lift_drive(
     -------
     object
         一个 ``LiftDrive`` 适配对象，暴露：
-        ``run_speed(direction, rpm, duration_s)``、``stop()``、``close()``。
+        ``run_speed(direction, rpm, duration_s)``、``move_distance()``、
+        ``stop()``、``close()``。其中 ``run_speed`` 保留旧接口名称，底层
+        已改为内部位置控制模式。
 
     Raises
     ------
@@ -137,7 +139,7 @@ class _LiftDrive:
 
     def run_speed(self, direction: str, rpm: Optional[int] = None,
                   duration_s: Optional[float] = None) -> object:
-        """按方向运行速度模式（安全流程内置：OFF→使能→运行→停→OFF）。
+        """按方向运行位置模式（安全流程内置：OFF→使能→定位→停→OFF）。
 
         方向语义：``up``=提升（映射到驱动器 forward）、``down``=下压
         （映射到驱动器 reverse）。实机方向反了用 ``forward_sign`` 翻转，

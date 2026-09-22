@@ -403,9 +403,9 @@ class _BaseMechanismController:
         self.throttle_close = PULSE_CLOSE
         self.stop_value = PULSE_STOP
         #: 可选 X2P 伺服升降驱动器（USB-RS485）。提供时 press/lift 走真实
-        #: 伺服（需暴露 ``run_speed(direction, rpm, duration_s)`` 与
-        #: ``stop()``，与 dais516 x2p.MotionController 接口一致）；缺省为
-        #: 占位 no-op。
+        #: 伺服（需暴露位置控制接口；兼容入口为
+        #: ``run_speed(direction, rpm, duration_s)`` 与 ``stop()``，由
+        #: dais516 x2p.MotionController 转换为内部位置段）；缺省为占位 no-op。
         self.lift_drive = None
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30
@@ -860,8 +860,9 @@ class MechanismController(_BaseMechanismController):
         super().__init__(pca9685=pca9685, mock_mode=mock_mode)
         #: 可选 X2P 伺服升降驱动器（USB-RS485）。提供时 press/lift 走
         #: 真实伺服；缺省为占位 no-op。调用方负责构造并注入：
-        #: ``lift_drive`` 需暴露 ``run_speed(direction, rpm, duration_s)``
-        #: 与 ``stop()``（与 dais516 x2p.MotionController 接口一致）。
+        #: ``lift_drive`` 需暴露位置控制接口；兼容入口
+        #: ``run_speed(direction, rpm, duration_s)`` 与 ``stop()`` 由
+        #: dais516 x2p.MotionController 提供。
         self.lift_drive = lift_drive
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30

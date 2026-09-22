@@ -154,6 +154,9 @@ class X2PDrive:
             "servo_position_encoder_ppr": self.read_signed32(
                 Register.SERVO_POSITION_ENCODER
             ),
+            "encoder_resolution_ppr": self.read_signed32(
+                Register.ENCODER_RESOLUTION
+            ),
             "positioning_status": self.read_registers(
                 Register.POSITIONING_STATUS
             )[0],

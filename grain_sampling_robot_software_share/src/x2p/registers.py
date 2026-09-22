@@ -9,6 +9,9 @@ from enum import IntEnum
 
 class Register(IntEnum):
     CONTROL_MODE = 0x0001  # Pn001; restart required
+    TUNING_MODE = 0x0002  # Pn002; restart required, 2=auto tuning mode 2
+    RIGIDITY = 0x0003  # Pn003
+    LOAD_INERTIA = 0x0004  # Pn004, 0.01 times
     COMMAND_PULSES_PER_REV = 0x0008  # Pn008
 
     SPEED_SOURCE = 0x0300  # Pn300: 0 uses Pn301
@@ -38,10 +41,12 @@ class Register(IntEnum):
     POSITION_DEVIATION = 0x2010  # Un016, signed 32-bit
     SERVO_POSITION_COMMAND = 0x2014  # Un020, signed 32-bit
     SERVO_POSITION_ENCODER = 0x2016  # Un022, signed 32-bit
+    ENCODER_RESOLUTION = 0x2018  # Un024, encoder lines/ppr
     DIGITAL_INPUT_STATUS = 0x2020  # Un032
     CURRENT_POSITION_SEGMENT = 0x202A  # Un042
     POSITIONING_STATUS = 0x202C  # Un044
     SERVO_ENABLE_STATUS = 0x203A  # Un058
+    INERTIA_MONITOR = 0x2055  # Un085, 0.01 times
 
     STATUS = 0x3E00
     LAST_FAULT_CODE = 0x2064  # Un100 最后一次故障码；低字节=E码(E04/E37等)
