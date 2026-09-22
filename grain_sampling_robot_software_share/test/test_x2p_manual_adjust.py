@@ -633,11 +633,13 @@ class _FakeDrive:
     def servo_on(self, additional_forced_inputs=0):
         self.servo_on_calls += 1
         self.enable = 1
+        self.status = DriveStatus.RUN
 
     def servo_off(self):
         self.servo_off_calls += 1
         if self.clears_enable_on_servo_off:
             self.enable = 0
+            self.status = 3
 
     def diagnostic(self, value=0x51A3):
         return None
@@ -686,32 +688,46 @@ def test_stop_verifies_off_with_un058_and_speed():
 
 
 def test_status_fault_reports_e_code():
-    drive = _FakeDrive(status=DriveStatus.FAULT, enable=0, speed=0, fault_code=0x0004)
+    drive = _FakeDrive(
+        status=DriveStatus.FAULT,
+        enable=0,
+        speed=0,
+        fault_code=0x0004,
+        clears_enable_on_servo_off=False,
+    )
     controller = _controller(drive)
     with pytest.raises(SafetyInterlockError, match="E04"):
         controller.stop(verify_off=True)
 
 
-def test_wait_disabled_times_out_when_un058_stays_set():
+def test_wait_disabled_times_out_when_status_stays_run():
     from x2p.errors import MotionTimeoutError
 
-    drive = _FakeDrive(status=3, enable=1, clears_enable_on_servo_off=False)
+    drive = _FakeDrive(
+        status=DriveStatus.RUN, enable=1, clears_enable_on_servo_off=False
+    )
     controller = _controller(drive)
     with pytest.raises((MotionTimeoutError, SafetyInterlockError)) as excinfo:
         controller.stop(verify_off=True)
     assert "仍未停机" in str(excinfo.value)
 
 
-def test_wait_enabled_requires_un058_to_change():
+def test_wait_enabled_requires_status_run():
     from x2p.errors import MotionTimeoutError
 
     class _StubbornDrive(_FakeDrive):
         def servo_on(self, additional_forced_inputs=0):
-            self.servo_on_calls += 1  # 不改变 Un058
+            self.servo_on_calls += 1  # 不改变 STATUS
 
     controller = _controller(_StubbornDrive(status=3, enable=0))
     with pytest.raises(MotionTimeoutError, match="伺服使能超时"):
         controller._enable_and_verify()
+
+
+def test_wait_enabled_accepts_x7p_status_run():
+    """X7P proves S-ON with STATUS=2; Un058 is not an X7P monitor."""
+    controller = _controller(_FakeDrive(status=DriveStatus.RUN, enable=0))
+    controller._wait_enabled(0.05)
 
 
 def test_controller_no_longer_waits_on_undocumented_status_register():
@@ -732,9 +748,8 @@ def test_enable_timeout_includes_chain_snapshot_and_verdict():
                 "P400_DI1功能": 1,
                 "P415_强制输入": 0x01,
                 "Un032_DI状态": 0x00,
-                "Un058_伺服使能": 0,
                 "STATUS_0x3E00": 3,
-                "Un100_故障码": 0,
+                "Un000_转速": 0,
             }
 
     controller = _controller(_ChainDrive(status=3, enable=0))
@@ -752,7 +767,7 @@ def test_enable_chain_hints_flag_di_active_but_refused():
             "P400_DI1功能": 1,
             "P415_强制输入": 0x01,
             "Un032_DI状态": 0x01,
-            "Un058_伺服使能": 0,
+            "STATUS_0x3E00": 3,
         }
     )
     assert any("主动拒绝使能" in hint for hint in hints)
@@ -782,7 +797,7 @@ def test_read_enable_chain_reports_per_register_failures():
     drive.client = _PartialClient()
     snapshot = drive.read_enable_chain()
     assert snapshot["Un032_DI状态"] == "读取失败(timeout)"
-    assert snapshot["Un058_伺服使能"] == 1
+    assert snapshot["STATUS_0x3E00"] == 1
 
 
 def test_is_disabled_and_stopped_requires_zero_speed():

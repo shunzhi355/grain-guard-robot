@@ -5,7 +5,7 @@
 
 覆盖：
 - 模块可无 rospy import（HAS_ROS=False + 回退消息类型）
-- 18 个服务注册（12 动作 Trigger + 6 个 open_bin/close_bin 深度变体）
+- 19 个服务注册（12 动作 Trigger + lift_health + 6 个深度变体）
 - 服务触发动作（线程化执行 + 品种时长注入）
 - 动作失败重试 N 次后返回 success=False
 - 急停：停运行中通道 + 锁定 + 抢断阻塞动作线程
@@ -58,9 +58,10 @@ def test_registers_services(mock_mechanism):
     # HAS_ROS=False（本机无 rospy）：SetGrain/MoveLift 为回退类（无 ROS 序列化），
     # set_grain/move_lift 服务跳过注册：12 个 Trigger 动作服务
     # + 3 个 open_bin + 3 个 close_bin 深度变体。
-    assert len(calls) == 18
+    assert len(calls) == 19
     names = [c.args[0] for c in calls]
     expected = [f"/mechanism/{a}" for a in mn.ACTION_SERVICES]
+    expected += ["/mechanism/lift_health"]
     expected += [f"/mechanism/open_bin/{d}" for d in mn.OPEN_BIN_DEPTHS]
     expected += [f"/mechanism/close_bin/{d}" for d in mn.OPEN_BIN_DEPTHS]
     assert sorted(names) == sorted(expected)
@@ -318,6 +319,49 @@ def test_press_lift_not_placeholder_when_lift_drive_injected(mock_mechanism):
         assert "placeholder" not in msg
 
 
+def test_lift_health_reads_encoder_without_motion(mock_mechanism):
+    class _FakeDrive:
+        def __init__(self):
+            self.reads = 0
+
+        def read_position(self):
+            self.reads += 1
+            return 12345
+
+    drive = _FakeDrive()
+    mock_mechanism.lift_drive = drive
+    node = mn.MechanismNode(controller=mock_mechanism)
+
+    resp = node._handle_lift_health(_trigger_req())
+
+    assert resp.success is True
+    assert "12345" in resp.message
+    assert drive.reads == 1
+    assert mock_mechanism.action_history == []
+
+
+def test_lift_health_failure_detaches_dead_drive(mock_mechanism):
+    class _DeadDrive:
+        closed = False
+
+        def read_position(self):
+            raise RuntimeError("通信超时或应答过短")
+
+        def close(self):
+            self.closed = True
+
+    drive = _DeadDrive()
+    mock_mechanism.lift_drive = drive
+    node = mn.MechanismNode(controller=mock_mechanism)
+
+    resp = node._handle_lift_health(_trigger_req())
+
+    assert resp.success is False
+    assert "通信超时或应答过短" in resp.message
+    assert drive.closed is True
+    assert mock_mechanism.lift_drive is None
+
+
 # ── 异步模式 / 并发 ─────────────────────────────────────────────────────
 
 
@@ -379,4 +423,4 @@ def test_start_is_idempotent(mock_mechanism):
     with patch("grain_sampling_workflow.mechanism_node.rospy") as mock_rospy:
         node.start()
         node.start()
-    assert mock_rospy.Service.call_count == 18  # 只注册一次（12 Trigger + 6 open_bin/close_bin 变体）
+    assert mock_rospy.Service.call_count == 19  # 只注册一次（含 lift_health）

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
+import threading
 import time
 from typing import Protocol
 
@@ -52,10 +53,10 @@ def signed16(value: int) -> int:
 
 
 class ModbusRTUClient:
-    """Modbus client：读写均重试 1 次，抗 RS485 偶发超时/CRC 损坏。
+    """Modbus client：对安全可重放交易重试 1 次，抗超时/CRC 损坏。
 
-    X2P 升降伺服的所有写操作均为幂等（设速度/设目标/设 DI 电平），位置触发
-    为边沿触发（重写同一电平不产生新上升沿），故写重试安全。
+    普通配置写入可重试；Pn701 在内部位置模式 7 下是立即执行命令，
+    因此非零 Pn701 写入绝不自动重放，避免丢应答时发生二次运动。
     """
 
     def __init__(
@@ -65,6 +66,7 @@ class ModbusRTUClient:
         timeout: float = 1.0,  # USB-RS485 occasional slow ack (2026-09, was 0.5)
         *,
         serial_port: SerialPort | None = None,
+        min_request_interval_s: float = 0.05,
     ):
         if not 1 <= slave <= 247:
             raise ValueError("slave必须在1..247之间")
@@ -83,6 +85,15 @@ class ModbusRTUClient:
             )
         else:
             raise ValueError("port和serial_port至少提供一个")
+        if min_request_interval_s < 0:
+            raise ValueError("min_request_interval_s不能小于0")
+        # X2P at 9600 baud becomes unreliable when monitor reads are sent
+        # back-to-back.  Serialize callers and leave a quiet interval between
+        # complete RTU transactions; this also prevents two ROS callbacks from
+        # interleaving frames on the same RS485 adapter.
+        self.min_request_interval_s = float(min_request_interval_s)
+        self._last_exchange_end = 0.0
+        self._io_lock = threading.Lock()
 
     def __enter__(self) -> "ModbusRTUClient":
         return self
@@ -94,14 +105,32 @@ class ModbusRTUClient:
         self.serial.close()
 
     def _exchange(self, function: int, body: bytes, response_length: int) -> bytes:
+        with self._io_lock:
+            return self._exchange_locked(function, body, response_length)
+
+    def _exchange_locked(
+        self, function: int, body: bytes, response_length: int
+    ) -> bytes:
         request = add_crc(bytes((self.slave, function)) + body)
         logger.debug("[TX] %s", request.hex(" "))
         # 读/写均重试 1 次，且 CRC 校验失败也纳入重试（RS485 偶发损坏）。
         # 实测 3 次联调各撞一次：超时(写)/CRC(写)/CRC(读)，需重试兜底。
-        attempts = 2
+        position_execute_write = (
+            function == 0x06
+            and len(body) >= 4
+            and int.from_bytes(body[:2], "big") == 0x0701
+            and int.from_bytes(body[2:4], "big") != 0
+        )
+        attempts = 1 if position_execute_write else 2
         response = b""
         crc_ok = False
         for attempt in range(attempts):
+            remaining = (
+                self.min_request_interval_s
+                - (time.monotonic() - self._last_exchange_end)
+            )
+            if remaining > 0:
+                time.sleep(remaining)
             try:
                 self.serial.reset_input_buffer()
                 self.serial.write(request)
@@ -117,6 +146,8 @@ class ModbusRTUClient:
                     request.hex(" "),
                 )
                 raise
+            finally:
+                self._last_exchange_end = time.monotonic()
             crc_ok = (
                 len(response) >= 5
                 and crc16(response[:-2]) == int.from_bytes(response[-2:], "little")
@@ -128,6 +159,24 @@ class ModbusRTUClient:
                 response.hex(" "),
                 crc_ok,
             )
+            # During position motion the X2P occasionally rejects a monitor
+            # read with exception 0x03 even though the same register succeeds
+            # immediately before and after it.  Retry reads only: writes are
+            # deliberately not replayed here, so a position command can never
+            # be triggered twice by this recovery path.
+            transient_read_exception = (
+                crc_ok
+                and function == 0x03
+                and len(response) >= 5
+                and response[1] == (function | 0x80)
+                and response[2] == 0x03
+            )
+            if transient_read_exception and attempt + 1 < attempts:
+                logger.warning(
+                    "X2P监控读取暂时返回0x03，延时后重试"
+                )
+                time.sleep(0.10)
+                continue
             if crc_ok:
                 break
             if attempt + 1 < attempts:

@@ -74,9 +74,8 @@ class X2PDrive:
         ("P400_DI1功能", Register.DI1_FUNCTION),
         ("P415_强制输入", Register.FORCE_DIGITAL_INPUTS),
         ("Un032_DI状态", Register.DIGITAL_INPUT_STATUS),
-        ("Un058_伺服使能", Register.SERVO_ENABLE_STATUS),
         ("STATUS_0x3E00", Register.STATUS),
-        ("Un100_故障码", Register.LAST_FAULT_CODE),
+        ("Un000_转速", Register.ACTUAL_SPEED),
     )
 
     def read_enable_chain(self) -> dict[str, object]:

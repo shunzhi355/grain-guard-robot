@@ -11,7 +11,7 @@ Parameters written by default:
     Pn003 = 14      starting rigidity
     Pn008 = 131072  command pulses per motor revolution (17-bit encoder)
     Pn321 = 1       internal multi-position command source
-    Pn700 = 6       Pn701-selected single segment
+    Pn700 = 7       Pn701-selected segment, execute immediately
     Pn701 = 0       idle until a motion command selects Pr1
     Pn400 = 1       DI1 = SRV-ON
     Pn401 = 11      DI2 = CTRG
@@ -169,9 +169,7 @@ def run(args: argparse.Namespace) -> int:
             "Un032DI状态": _read_u16(
                 drive, Register.DIGITAL_INPUT_STATUS
             ),
-            "Un058伺服使能": _read_u16(
-                drive, Register.SERVO_ENABLE_STATUS
-            ),
+            "STATUS运行状态": _read_u16(drive, Register.STATUS),
             "Un085惯量比": _safe_read_u16(
                 drive, Register.INERTIA_MONITOR
             ),
@@ -180,12 +178,12 @@ def run(args: argparse.Namespace) -> int:
         for label, value in current.items():
             print(f"  {label:<28} = {value}")
 
-        enabled = current["Un058伺服使能"]
+        status = current["STATUS运行状态"]
         speed = signed16(_read_u16(drive, Register.ACTUAL_SPEED))
-        if enabled != 0 or abs(speed) > 1:
+        if status == 2 or abs(speed) > 1:
             raise RuntimeError(
                 "驱动器当前已使能或电机未静止，拒绝修改参数："
-                f"Un058={enabled}, Un000={speed} r/min"
+                f"STATUS={status}, Un000={speed} r/min"
             )
 
         planned = {
@@ -194,7 +192,7 @@ def run(args: argparse.Namespace) -> int:
             "Pn003刚性": args.rigidity,
             "Pn008每转指令脉冲": args.command_pulses_per_rev,
             "Pn321内部多段位置": 1,
-            "Pn700选择Pn701段": 6,
+            "Pn700选择Pn701段并立即执行": 7,
             "Pn701空闲": 0,
         }
         if not args.no_di_config:
@@ -224,7 +222,7 @@ def run(args: argparse.Namespace) -> int:
             args.command_pulses_per_rev,
         )
         drive.write_register(Register.POSITION_SOURCE, 1)
-        drive.write_register(Register.POSITION_MODE, 6)
+        drive.write_register(Register.POSITION_MODE, 7)
         drive.write_register(Register.POSITION_SEGMENT, 0)
         if not args.no_di_config:
             drive.write_register(Register.DI1_FUNCTION, 1)
@@ -240,7 +238,7 @@ def run(args: argparse.Namespace) -> int:
                 args.command_pulses_per_rev,
             ),
             ("Pn321位置指令来源", Register.POSITION_SOURCE, 1),
-            ("Pn700内部位置模式", Register.POSITION_MODE, 6),
+            ("Pn700内部位置模式", Register.POSITION_MODE, 7),
             ("Pn701当前段", Register.POSITION_SEGMENT, 0),
         ]
         if not args.no_di_config:
@@ -259,7 +257,7 @@ def run(args: argparse.Namespace) -> int:
         print("参数写入完成；程序未使能电机、未运动、未触发惯量辨识。")
         print("Pn001/Pn002/Pn008必须断电重新上电后才按新配置运行。")
         print(
-            "上电后先运行 scripts/x2p_enable_diag.py 检查Un058，"
+            "上电后先运行 scripts/x2p_enable_diag.py 检查STATUS，"
             "再做低速小行程位置测试。"
         )
         return 0

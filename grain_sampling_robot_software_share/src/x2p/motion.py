@@ -131,7 +131,7 @@ class MotionController:
         drive: X2PDrive,
         config: ControllerConfig | None = None,
         *,
-        monitor_interval_s: float = 0.05,
+        monitor_interval_s: float = 0.10,
         output: Callable[[str], None] | None = print,
     ):
         self.drive = drive
@@ -158,22 +158,10 @@ class MotionController:
     def _actual_speed(self) -> int:
         return signed16(self.drive.read_registers(Register.ACTUAL_SPEED)[0])
 
-    def _servo_enable_monitor(self) -> int:
-        """Return Un058, the servo-enable monitor used as the safety baseline.
-
-        ``Register.STATUS`` (0x3E00) is firmware specific: the lift drive on
-        the RK3588 industrial PC reported ``status=3`` while genuinely
-        disabled and stopped, so keying the OFF baseline off ``status == 1``
-        blocked every motion with a false "仍未进入OFF" interlock.  Un058 is
-        the documented servo-enable monitor (0=disabled) and is what the
-        operator can cross-check with ``python3 -m x2p.cli status``.
-        """
-        return self.drive.read_registers(Register.SERVO_ENABLE_STATUS)[0]
-
     def _is_disabled_and_stopped(self) -> bool:
         """True when the drive is really de-energised and not turning."""
         return (
-            self._servo_enable_monitor() == 0
+            self._status() != DriveStatus.RUN
             and abs(self._actual_speed()) <= 1
         )
 
@@ -186,51 +174,70 @@ class MotionController:
 
     def _wait_disabled(self, timeout_s: float) -> None:
         """Wait for software S-ON to be released and the axis to stand still."""
-        last_enable = 0
+        last_status = 0
         last_speed = 0
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self._check_not_faulted()
-            last_enable = self._servo_enable_monitor()
+            last_status = self._status()
             last_speed = self._actual_speed()
-            if last_enable == 0 and abs(last_speed) <= 1:
+            if last_status != DriveStatus.RUN and abs(last_speed) <= 1:
                 return
             time.sleep(self.monitor_interval_s)
         raise MotionTimeoutError(
             "取消软件使能后仍未停机："
-            f"Un058={last_enable}，实际转速={last_speed} r/min；"
+            f"STATUS={last_status}，实际转速={last_speed} r/min；"
             "检查外部S-ON是否仍有效、是否有外力拖动或驱动器报警"
         )
 
     def _wait_enabled(self, timeout_s: float) -> None:
-        """Wait for the drive to prove that the servo actually energised.
+        """Wait for the X7P state display to enter servo RUN (STATUS=2).
 
-        Normally Un058 is the documented enable monitor.  The deployed X2P
-        firmware, however, reports Un058=0 even while Pn415 has forced DI1
-        active and STATUS has changed to RUN (2).  Accept that documented RUN
-        state as the fallback proof instead of rejecting a healthy enable.
+        X7P's documented monitor table ends at Un046.  Address 0x203A is not
+        an X7P servo-enable monitor, so its constant zero must not veto S-ON.
+        The board test proves 0x3E00 changes 1 -> 2 on S-ON and back to 1 on
+        S-OFF, and mode-7 position motion runs while it is 2.
         """
-        last_enable = 0
         last_status = 0
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self._check_not_faulted()
-            last_enable = self._servo_enable_monitor()
             last_status = self._status()
-            if last_enable != 0 or last_status == DriveStatus.RUN:
+            if last_status == DriveStatus.RUN:
                 return
             time.sleep(self.monitor_interval_s)
         raise MotionTimeoutError(
-            f"伺服使能超时：Un058={last_enable}，状态={last_status}；"
+            f"伺服使能超时：STATUS={last_status}；"
             "检查DI1/SRV-ON接线、外部急停和驱动器报警"
             + self._enable_chain_hint()
         )
+
+    def check_motion_ready(self) -> dict[str, int]:
+        """Validate communication, position configuration and servo enable.
+
+        The check never writes a position or speed command.  It briefly proves
+        S-ON through STATUS=2 and always removes software enable before returning,
+        making it suitable for the workflow preflight before the clamp moves.
+        """
+        self.drive.diagnostic()
+        self.prepare_off()
+        self._verify_position_configuration()
+        forced_inputs = self._select_control_path(position=True)
+        try:
+            self._enable_and_verify(forced_inputs)
+            return {
+                "status": self._status(),
+                "speed_rpm": self._actual_speed(),
+                "encoder_position": self.read_encoder_position(),
+            }
+        finally:
+            self.stop(verify_off=True)
 
     def _enable_chain_hint(self) -> str:
         """附带 SRV-ON 使能链路的现场快照，避免只能靠猜。
 
         快照按信号流顺序给出：DI1 功能(Pn400) → 强制输入(Pn415) →
-        驱动器看到的 DI 状态(Un032 bit0) → 使能结果(Un058) → 状态/故障码。
+        驱动器看到的 DI 状态(Un032 bit0) → 运行状态(STATUS=2)。
         任何一项读不到都不影响报错本身。
         """
         reader = getattr(self.drive, "read_enable_chain", None)
@@ -254,7 +261,7 @@ class MotionController:
         """把寄存器快照翻译成下一步该查什么。"""
         forced = values.get("P415_强制输入")
         inputs = values.get("Un032_DI状态")
-        enabled = values.get("Un058_伺服使能")
+        status = values.get("STATUS_0x3E00")
         function = values.get("P400_DI1功能")
         hints: list[str] = []
         if isinstance(function, int) and function != DigitalInputFunction.SERVO_ON:
@@ -269,11 +276,12 @@ class MotionController:
         if (
             isinstance(inputs, int)
             and inputs & 0x01
-            and isinstance(enabled, int)
-            and enabled == 0
+            and isinstance(status, int)
+            and status != DriveStatus.RUN
         ):
             hints.append(
-                "DI1 已有效但 Un058 仍为0：驱动器主动拒绝使能，"
+                f"DI1 已有效但 STATUS={status}未进入RUN(2)："
+                "驱动器主动拒绝使能，"
                 "查主电源、外部急停/限位和驱动面板 E 码"
             )
         return hints
@@ -363,13 +371,11 @@ class MotionController:
     def prepare_off(self) -> None:
         """Establish an OFF baseline before changing any motion parameters."""
         self.stop(verify_off=True)
-        # status (0x3E00) is firmware specific on this drive and reads 3 while
-        # disabled, so the OFF baseline is proved with Un058 + zero speed.
         if not self._is_disabled_and_stopped():
             self.state = MotionState.FAULT
             raise SafetyInterlockError(
                 "驱动器未处于OFF："
-                f"Un058={self._servo_enable_monitor()}，"
+                f"STATUS={self._status()}，"
                 f"实际转速={self._actual_speed()} r/min；"
                 "检查外部S-ON是否仍然有效"
             )
@@ -732,7 +738,7 @@ class MotionController:
             self.drive.write_register(Register.MODBUS_SAVE_POLICY, 1)
             for label, address, value in (
                 ("Pn321位置指令来源", Register.POSITION_SOURCE, 1),
-                ("Pn700内部位置模式", Register.POSITION_MODE, 6),
+                ("Pn700内部位置模式", Register.POSITION_MODE, 7),
                 ("Pn701当前段", Register.POSITION_SEGMENT, 0),
                 ("Pn703加速时间", Register.POSITION_ACCEL, 500),
                 ("Pn704减速时间", Register.POSITION_DECEL, 500),
@@ -764,14 +770,12 @@ class MotionController:
             )
             target_position = start_position + encoder_pulses
             self._enable_and_verify(forced_inputs)
-            # This X2P firmware only latches the selected Pr segment while
-            # the servo is already in RUN.  Selecting Pr1 before enable can
-            # leave Un042 at 0 and the following CTRG edge is ignored.
+            # Mode 7 executes the segment immediately when Pn701 becomes
+            # non-zero.  Board testing proved mode 6 + DI2/CTRG was ignored,
+            # while this path moved the encoder on the same 5 mm command.
             self.drive.write_register(Register.POSITION_SEGMENT, 1)
             if self.drive.read_registers(Register.POSITION_SEGMENT)[0] != 1:
                 raise ConfigurationError("Pn701位置段选择写入读回不一致")
-            enabled_inputs = digital_input_bit(1) | forced_inputs
-            self.drive.trigger_position(enabled_inputs)
             deadline = time.monotonic() + timeout
             settled = 0
             while time.monotonic() < deadline:
@@ -780,12 +784,10 @@ class MotionController:
                 position = self.drive.read_signed32(
                     Register.SERVO_POSITION_ENCODER
                 )
-                deviation = self.drive.read_signed32(
-                    Register.POSITION_DEVIATION
-                )
+                remaining = target_position - position
                 self._emit(
                     f"实际转速: {actual} r/min, 位置: {position} pulse, "
-                    f"位置偏差: {deviation}"
+                    f"剩余距离: {remaining} pulse"
                 )
                 at_target = abs(position - target_position) <= tolerance
                 settled = settled + 1 if at_target and abs(actual) <= 1 else 0

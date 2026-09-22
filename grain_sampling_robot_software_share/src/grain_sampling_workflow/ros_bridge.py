@@ -137,6 +137,10 @@ class SamplingBridge:
 
     def __init__(self, node_name: str = "sampling_bridge") -> None:
         self._node_name: str = node_name
+        # Exact failure returned by the most recent service call.  The
+        # orchestrator uses it as the UI stop reason instead of discarding the
+        # actionable hardware message.
+        self.last_error: str = ""
 
         # Navigation state (updated by topic callback)
         self._nav_completed: bool = False
@@ -301,6 +305,10 @@ class SamplingBridge:
         """
         return self._call_trigger("/mechanism/clamp")
 
+    def call_lift_health(self) -> bool:
+        """Verify X2P communication by reading the encoder without motion."""
+        return self._call_trigger("/mechanism/lift_health")
+
     def call_unclamp(self) -> bool:
         """Release the clamp of the sampling mechanism.
 
@@ -349,6 +357,7 @@ class SamplingBridge:
         jogs.  Stub mode (no ROS) returns True.
         """
         if not HAS_ROS:
+            self.last_error = ""
             logger.debug("[Stub] move_lift(%s, %.1fcm) -> True", direction, distance_cm)
             return True
 
@@ -364,6 +373,7 @@ class SamplingBridge:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
             logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
         except Exception:
+            self.last_error = f"{service_name}: service unavailable"
             logger.exception(
                 "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
                 service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
@@ -374,6 +384,7 @@ class SamplingBridge:
             proxy = rospy.ServiceProxy(service_name, MoveLift)
             response = proxy(direction=direction, distance_cm=float(distance_cm))
         except Exception:
+            self.last_error = f"{service_name}: service call exception"
             logger.exception(
                 "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
                 service_name, time.monotonic() - started,
@@ -386,12 +397,14 @@ class SamplingBridge:
         )
 
         if not response.success:
+            self.last_error = f"{service_name}: {response.message}"
             logger.warning(
                 "Service %s returned failure: %s",
                 service_name, response.message,
             )
             return False
 
+        self.last_error = ""
         logger.info(
             "Service %s succeeded: %s", service_name, response.message
         )
@@ -556,6 +569,7 @@ class SamplingBridge:
     def _call_trigger(self, service_name: str) -> bool:
         """Call a ``std_srvs/Trigger`` service, return success."""
         if not HAS_ROS:
+            self.last_error = ""
             logger.debug("[Stub] Trigger %s -> True", service_name)
             return True
 
@@ -569,6 +583,7 @@ class SamplingBridge:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
             logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
         except Exception:
+            self.last_error = f"{service_name}: service unavailable"
             logger.exception(
                 "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
                 service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
@@ -579,6 +594,7 @@ class SamplingBridge:
             proxy = rospy.ServiceProxy(service_name, Trigger)
             response = proxy()
         except Exception:
+            self.last_error = f"{service_name}: service call exception"
             logger.exception(
                 "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
                 service_name, time.monotonic() - started,
@@ -591,12 +607,14 @@ class SamplingBridge:
         )
 
         if not response.success:
+            self.last_error = f"{service_name}: {response.message}"
             logger.warning(
                 "Service %s returned failure: %s",
                 service_name, response.message,
             )
             return False
 
+        self.last_error = ""
         logger.info("Service %s succeeded", service_name)
         return True
 

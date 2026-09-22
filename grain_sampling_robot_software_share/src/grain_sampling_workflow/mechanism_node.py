@@ -410,6 +410,13 @@ class MechanismNode:
                 else self._make_action_handler(action)
             )
             self._services.append(rospy.Service(name, Trigger, handler))
+        self._services.append(
+            rospy.Service(
+                f"{self.SERVICE_PREFIX}/lift_health",
+                Trigger,
+                self._handle_lift_health,
+            )
+        )
         if SetGrain is not _FallbackSetGrain:
             self._services.append(
                 rospy.Service(f"{self.SERVICE_PREFIX}/set_grain", SetGrain, self._handle_set_grain)
@@ -701,6 +708,44 @@ class MechanismNode:
             message=f"move_lift {direction} {distance_cm}cm ok: {result}",
         )
 
+    def _handle_lift_health(self, req=None) -> object:
+        """Read the lift encoder without moving it.
+
+        A serial port opening successfully does not prove that the X2P drive is
+        responding.  This service is deliberately read-only so the workflow can
+        verify the complete UART/RS485/Modbus path before operating the clamp.
+        """
+        try:
+            self._ensure_lift_connected()
+            lift = getattr(self._controller, "lift_drive", None)
+            if lift is None:
+                raise RuntimeError(
+                    f"X2P servo unavailable on {self._x2p_port}: no responding drive"
+                )
+            position = lift.read_position()
+            check = getattr(lift, "health_check", None)
+            readiness = check() if callable(check) else None
+        except Exception as exc:  # noqa: BLE001 - return the hardware cause to UI
+            logger.exception("X2P read-only health check failed")
+            lift = getattr(self._controller, "lift_drive", None)
+            if lift is not None:
+                try:
+                    lift.close()
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    pass
+                self._controller.lift_drive = None
+            return Trigger._response_class(
+                success=False,
+                message=f"X2P communication health check failed: {exc}",
+            )
+        return Trigger._response_class(
+            success=True,
+            message=(
+                "X2P communication and servo-enable healthy; "
+                f"encoder_position={position}; readiness={readiness}"
+            ),
+        )
+
 
 def main() -> None:
     """启动入口（板端运行：真实控制器；开发机：mock 模式）。
@@ -750,13 +795,27 @@ def main() -> None:
         def _build_lift() -> object:
             from grain_sampling_devices.x2p_lift import build_x2p_lift_drive
 
-            return build_x2p_lift_drive(
+            drive = build_x2p_lift_drive(
                 port=x2p_port,
                 slave=runtime_x2p_slave,
                 rpm=runtime_x2p_rpm,
                 duration_s=runtime_x2p_duration,
                 forward_sign=runtime_x2p_forward_sign,
             )
+            try:
+                position = drive.read_position()
+            except Exception:
+                try:
+                    drive.close()
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    pass
+                raise
+            logger.info(
+                "X2P communication probe passed: port=%s encoder_position=%s",
+                x2p_port,
+                position,
+            )
+            return drive
 
         def _reconnect_lift() -> None:
             old_drive = getattr(controller, "lift_drive", None)

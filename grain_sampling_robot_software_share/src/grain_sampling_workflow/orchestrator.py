@@ -415,16 +415,16 @@ class WorkflowOrchestrator:
         import math
         target_m = self._fsm.get_target_depth()
         pipes_needed = max(1, int(math.ceil(target_m)))
-        # Pipe is now pressed — increment count
-        self._fsm.current_pipe_index += 1
-        current = self._fsm.current_pipe_index
-        logger.info(
-            "Press: pipe %d/%d pressed for %.1fm target",
-            current, pipes_needed, target_m,
-        )
         if self._mechanism_connected:
             d = self._get_mechanism_durations()
             step_cm = PRESS_STEP_CM
+            # The clamp must not operate until the complete X2P communication
+            # path has answered a read-only encoder request.  This makes a dead
+            # RS485 link fail safely before any mechanism starts moving.
+            if not self._call_mechanism(
+                "lift health", self._bridge.call_lift_health
+            ):
+                return
             # 正常下压循环：夹紧 → 下压(精确距离) → 松开 → 上升 → 再夹紧。
             # press/lift 走 move_lift 编码器闭环精确距离控制（单次 step_cm cm，
             # 状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度）。
@@ -443,6 +443,13 @@ class WorkflowOrchestrator:
                 return  # final failure already stopped the FSM
         else:
             time.sleep(0.5)  # mechanism placeholder
+        # Only account for a pipe after the complete cycle succeeded.
+        self._fsm.current_pipe_index += 1
+        current = self._fsm.current_pipe_index
+        logger.info(
+            "Press: pipe %d/%d pressed for %.1fm target",
+            current, pipes_needed, target_m,
+        )
         if current >= pipes_needed:
             # Target depth reached → skip add-pipe prompt, go to waste discharge
             self._fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
@@ -687,7 +694,13 @@ class WorkflowOrchestrator:
             "Mechanism %s failed after %d attempts — stopping FSM",
             action, retries + 1,
         )
-        self._stop_fsm(f"mechanism {action} failed")
+        detail = getattr(getattr(self, "_bridge", None), "last_error", "")
+        if not isinstance(detail, str):
+            detail = ""
+        reason = f"mechanism {action} failed"
+        if detail.strip():
+            reason = f"{reason}: {detail.strip()}"
+        self._stop_fsm(reason)
         return False
 
     def _stop_fsm(self, reason: str) -> None:

@@ -188,6 +188,13 @@ class _LiftDrive:
             raise DeviceError("x2p 控制器不支持读取编码器绝对位置")
         return int(read())
 
+    def health_check(self) -> object:
+        """Prove the drive can enable without issuing a motion command."""
+        check = getattr(self._controller, "check_motion_ready", None)
+        if check is None:
+            raise DeviceError("x2p 控制器不支持无位移使能预检")
+        return check()
+
     @property
     def counts_per_mm(self) -> float:
         """Encoder counts per millimetre for the configured screw drive."""

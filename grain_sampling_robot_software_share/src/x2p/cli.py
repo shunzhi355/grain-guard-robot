@@ -95,10 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _status(drive: X2PDrive) -> dict[str, int]:
     encoder_resolution = drive.read_signed32(Register.ENCODER_RESOLUTION)
+    status = drive.read_registers(Register.STATUS)[0]
     return {
-        "status": drive.read_registers(Register.STATUS)[0],
+        "status": status,
         "speed_rpm": signed16(drive.read_registers(Register.ACTUAL_SPEED)[0]),
-        "servo_enabled": drive.read_registers(Register.SERVO_ENABLE_STATUS)[0],
+        "servo_enabled": int(status == 2),
         "control_mode_pn001": drive.read_registers(Register.CONTROL_MODE)[0],
         "speed_source_pn300": drive.read_registers(Register.SPEED_SOURCE)[0],
         "encoder_resolution_un024": encoder_resolution,
