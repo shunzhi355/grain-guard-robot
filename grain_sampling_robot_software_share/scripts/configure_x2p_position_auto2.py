@@ -98,6 +98,17 @@ def _read_u16(drive: object, address: int) -> int:
     return int(drive.read_registers(address)[0])
 
 
+def _read_parameter(drive: object, address: int) -> int:
+    """Read a parameter using its Modbus storage width.
+
+    Pn008 is a 32-bit value stored low word first; all parameters this
+    configuration utility otherwise touches are single 16-bit registers.
+    """
+    if address == Register.COMMAND_PULSES_PER_REV:
+        return int(drive.read_signed32(address))
+    return _read_u16(drive, address)
+
+
 def _safe_read_u16(drive: object, address: int) -> int | str:
     try:
         return _read_u16(drive, address)
@@ -110,7 +121,7 @@ def _verify_or_raise(
 ) -> None:
     failures: list[str] = []
     for label, address, expected in checks:
-        actual = _read_u16(drive, address)
+        actual = _read_parameter(drive, address)
         print(f"  {label:<28} = {actual}")
         if actual != expected:
             failures.append(f"{label}: 期望{expected}，实际{actual}")
@@ -144,8 +155,8 @@ def run(args: argparse.Namespace) -> int:
             "Pn002调整模式": _read_u16(drive, Register.TUNING_MODE),
             "Pn003刚性": _read_u16(drive, Register.RIGIDITY),
             "Pn004负载惯量比": _read_u16(drive, Register.LOAD_INERTIA),
-            "Pn008每转指令脉冲": _read_u16(
-                drive, Register.COMMAND_PULSES_PER_REV
+            "Pn008每转指令脉冲": drive.read_signed32(
+                Register.COMMAND_PULSES_PER_REV
             ),
             "Pn321位置指令来源": _read_u16(
                 drive, Register.POSITION_SOURCE
@@ -208,7 +219,7 @@ def run(args: argparse.Namespace) -> int:
         drive.write_register(Register.CONTROL_MODE, 0)
         drive.write_register(Register.TUNING_MODE, 2)
         drive.write_register(Register.RIGIDITY, args.rigidity)
-        drive.write_register(
+        drive.write_signed32(
             Register.COMMAND_PULSES_PER_REV,
             args.command_pulses_per_rev,
         )

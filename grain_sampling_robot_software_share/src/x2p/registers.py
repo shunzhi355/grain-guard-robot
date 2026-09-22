@@ -12,7 +12,7 @@ class Register(IntEnum):
     TUNING_MODE = 0x0002  # Pn002; restart required, 2=auto tuning mode 2
     RIGIDITY = 0x0003  # Pn003
     LOAD_INERTIA = 0x0004  # Pn004, 0.01 times
-    COMMAND_PULSES_PER_REV = 0x0008  # Pn008
+    COMMAND_PULSES_PER_REV = 0x0008  # Pn008, 32-bit (low word first)
 
     SPEED_SOURCE = 0x0300  # Pn300: 0 uses Pn301
     SPEED_COMMAND = 0x0301  # Pn301, signed r/min

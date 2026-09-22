@@ -203,17 +203,25 @@ class MotionController:
         )
 
     def _wait_enabled(self, timeout_s: float) -> None:
-        """Wait for Un058 to prove that the servo actually energised."""
+        """Wait for the drive to prove that the servo actually energised.
+
+        Normally Un058 is the documented enable monitor.  The deployed X2P
+        firmware, however, reports Un058=0 even while Pn415 has forced DI1
+        active and STATUS has changed to RUN (2).  Accept that documented RUN
+        state as the fallback proof instead of rejecting a healthy enable.
+        """
         last_enable = 0
+        last_status = 0
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             self._check_not_faulted()
             last_enable = self._servo_enable_monitor()
-            if last_enable != 0:
+            last_status = self._status()
+            if last_enable != 0 or last_status == DriveStatus.RUN:
                 return
             time.sleep(self.monitor_interval_s)
         raise MotionTimeoutError(
-            f"伺服使能超时：Un058仍为{last_enable}；"
+            f"伺服使能超时：Un058={last_enable}，状态={last_status}；"
             "检查DI1/SRV-ON接线、外部急停和驱动器报警"
             + self._enable_chain_hint()
         )
@@ -437,9 +445,9 @@ class MotionController:
     def _verify_position_configuration(self) -> None:
         """Verify the drive is configured for internal position + auto mode 2."""
         tuning_mode = self.drive.read_registers(Register.TUNING_MODE)[0]
-        command_pulses = self.drive.read_registers(
+        command_pulses = self.drive.read_signed32(
             Register.COMMAND_PULSES_PER_REV
-        )[0]
+        )
         expected_pulses = self.config.encoder_counts_per_motor_rev
         if tuning_mode != 2:
             raise ConfigurationError(
@@ -569,8 +577,10 @@ class MotionController:
             record_result=False,
             tolerance_pulses=tolerance_pulses,
         )
-        target_position = int(move_result.start_position) + int(
-            move_result.target
+        target_position = int(move_result.start_position) + (
+            direction_sign(direction, self.config.forward_sign)
+            * self.config.encoder_forward_sign
+            * plan.target_pulses
         )
         final_position = int(move_result.final_position)
         error_pulses = target_position - final_position
@@ -742,10 +752,17 @@ class MotionController:
             ):
                 raise ConfigurationError("Pn706位置写入读回不一致")
 
+            # Un014 is reconstructed from *command* pulses.  It changes as
+            # soon as Pr1 is accepted, even if a brake, torque inhibit, or
+            # mechanical disconnection prevents the axis from moving.  Use
+            # the actual encoder position (Un022) for all arrival decisions.
             start_position = self.drive.read_signed32(
-                Register.FEEDBACK_COMMAND_PULSES
+                Register.SERVO_POSITION_ENCODER
             )
-            target_position = start_position + signed_pulses
+            encoder_pulses = (
+                signed_pulses * self.config.encoder_forward_sign
+            )
+            target_position = start_position + encoder_pulses
             self.drive.write_register(Register.POSITION_SEGMENT, 1)
             self._enable_and_verify(forced_inputs)
             enabled_inputs = digital_input_bit(1) | forced_inputs
@@ -756,7 +773,7 @@ class MotionController:
                 actual = self._actual_speed()
                 peak = max(peak, abs(actual))
                 position = self.drive.read_signed32(
-                    Register.FEEDBACK_COMMAND_PULSES
+                    Register.SERVO_POSITION_ENCODER
                 )
                 deviation = self.drive.read_signed32(
                     Register.POSITION_DEVIATION
@@ -779,7 +796,7 @@ class MotionController:
             self.stop(verify_off=True)
 
         final_position = self.drive.read_signed32(
-            Register.FEEDBACK_COMMAND_PULSES
+            Register.SERVO_POSITION_ENCODER
         )
         error_pulses = target_position - final_position
         if abs(error_pulses) > tolerance:
