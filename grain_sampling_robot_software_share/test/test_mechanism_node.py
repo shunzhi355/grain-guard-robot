@@ -362,6 +362,35 @@ def test_lift_health_failure_detaches_dead_drive(mock_mechanism):
     assert mock_mechanism.lift_drive is None
 
 
+def test_move_lift_uses_full_configured_rpm(mock_mechanism):
+    """200 r/min 不再被 1.2 时长余量降成约 167 r/min。"""
+    captured = {}
+
+    def move_lift(direction, distance_cm, duration_s):
+        captured.update(
+            direction=direction,
+            distance_cm=distance_cm,
+            duration_s=duration_s,
+        )
+        return "ok"
+
+    mock_mechanism.move_lift = move_lift
+    node = mn.MechanismNode(controller=mock_mechanism)
+    node._x2p_rpm = 200.0
+    req = mn.MoveLift._request_class(
+        direction="down_cycle", distance_cm=20.0
+    )
+
+    resp = node._handle_move_lift(req)
+
+    assert resp.success is True
+    assert captured == {
+        "direction": "down_cycle",
+        "distance_cm": 20.0,
+        "duration_s": pytest.approx(12.0),
+    }
+
+
 # ── 异步模式 / 并发 ─────────────────────────────────────────────────────
 
 

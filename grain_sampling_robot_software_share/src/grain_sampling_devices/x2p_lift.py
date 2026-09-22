@@ -169,8 +169,8 @@ class _LiftDrive:
         duration_s : float
             移动时长（秒）。过长/过短由 x2p 内部按 max_rpm 校验。
         tolerance_mm : float
-            位置容差（毫米），默认 2.0mm。自动回程会另外在
-            原点下方保留安全余量，因此容差必须小于该余量。
+            位置容差（毫米），默认 2.0mm。自动回程目标是
+            当轮保存的编码器原点，不另外保留下方余量。
         """
         drive_direction = _map_lift_direction(direction)
         move = getattr(self._controller, "move_timed_distance", None)

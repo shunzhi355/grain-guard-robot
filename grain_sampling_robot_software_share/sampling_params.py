@@ -106,7 +106,7 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "open_duration": 5.0,        # 开仓保持时长（秒），之后自动关同仓（暂定 5s，以实测为准）
     "close_duration": 3.0,       # 关仓时长
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
-    "unclamp_duration": 3.0,     # 松开时长（实机确认 3s）
+    "unclamp_duration": 5.0,     # 松开时长（实机确认 5s）
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）
     "untighten_duration": 3.0,   # 旋松时长
     "throttle_open": 1200.0,     # 输送/节流开（实机标定：开=1200us）

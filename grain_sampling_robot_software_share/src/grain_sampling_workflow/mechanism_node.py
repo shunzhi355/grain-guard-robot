@@ -686,9 +686,10 @@ class MechanismNode:
             return MoveLift._response_class(
                 success=False, message="distance_cm 必须大于 0"
             )
-        # 时长按 X2P_RPM 与 5mm 导程自动计算，留 20% 余量避免接近段超 max_rpm
+        # 时长按 X2P_RPM 与 5mm 导程精确计算。X2P_RPM 已是经过
+        # SafetyLimits 校验的软件上限，不再额外乘 1.2 降速。
         rpm = max(1.0, float(self._x2p_rpm))
-        duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0) * 1.2
+        duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0)
         request_id = uuid.uuid4().hex[:12]
         logger.info("MOVE_REQUEST id=%s direction=%s distance_cm=%s duration_s=%s",
                     request_id, direction, distance_cm, duration_s)

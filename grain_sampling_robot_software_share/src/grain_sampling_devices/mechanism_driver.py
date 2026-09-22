@@ -700,7 +700,7 @@ class _BaseMechanismController:
         ----------
         direction : str
             ``up``/``down`` 为单程；``down_cycle`` 保存原点并往复下压，
-            ``return`` 回到保存原点下方的安全余量位置。
+            ``return`` 回到本轮保存的编码器原点。
         distance_cm : float
             移动距离（厘米），必须 > 0。
         duration_s : float | None

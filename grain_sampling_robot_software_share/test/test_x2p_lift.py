@@ -235,7 +235,7 @@ def _cycle_controller(lift):
     )
 
 
-def test_press_cycle_returns_to_saved_origin_with_clearance():
+def test_press_cycle_returns_exactly_to_saved_origin():
     lift = _FakeCycleLift(position=20)
     ctrl = _cycle_controller(lift)
 
@@ -244,8 +244,8 @@ def test_press_cycle_returns_to_saved_origin_with_clearance():
     lift.position = -5_212_400
     ctrl.move_lift("return", 20.0, duration_s=3.0)
 
-    # 20 - round(5 mm * 26214.4 pulse/mm) = -131052，即原点下方 5 mm。
-    assert lift.absolute_calls[-1] == (-131_052, 3.0, 2.0)
+    # 目标必须是当轮保存的 20 pulse，不再向下留 5 mm 余量。
+    assert lift.absolute_calls[-1] == (20, 3.0, 2.0)
     assert ctrl._lift_cycle_origin is None
 
 
@@ -355,7 +355,7 @@ def test_repeated_cycles_save_new_origin():
         ctrl.move_lift("down_cycle", 20)
         assert ctrl._lift_cycle_origin == origin
         ctrl.move_lift("return", 20)
-        assert lift.position == origin - round(5 * lift.counts_per_mm)
+        assert lift.position == origin
         assert ctrl._lift_cycle_origin is None
 
 
