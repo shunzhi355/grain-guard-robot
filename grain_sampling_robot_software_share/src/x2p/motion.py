@@ -48,6 +48,12 @@ class MotionState(Enum):
 #: 在偶发慢应答时只够采到一个样本，容易把"其实是能上电"误判成超时。
 ENABLE_VERIFY_TIMEOUT_S = 3.0
 
+# Internal-position commands need time not only for their constant-speed
+# travel, but also for the configured 500 ms acceleration/deceleration ramps
+# and three stopped samples.  The old fixed 15 s deadline expired exactly as
+# a 195 mm return reached its target, producing a false "not reached" error.
+POSITION_SETTLE_MARGIN_S = 3.0
+
 
 def _finite_number(name: str, value: object) -> int | float:
     if (
@@ -57,6 +63,26 @@ def _finite_number(name: str, value: object) -> int | float:
     ):
         raise ValueError(f"{name}必须是有限数字")
     return value
+
+
+def _position_timeout_budget(
+    *,
+    pulses: int,
+    rpm: int,
+    encoder_counts_per_motor_rev: int,
+    configured_timeout_s: float,
+) -> float:
+    """Return a safe deadline covering travel, ramps and final settling."""
+    travel_s = (
+        pulses
+        / encoder_counts_per_motor_rev
+        * 60.0
+        / rpm
+    )
+    return max(
+        float(configured_timeout_s),
+        travel_s + POSITION_SETTLE_MARGIN_S,
+    )
 
 
 def _approach_profile(
@@ -704,12 +730,21 @@ class MotionController:
             raise ValueError(f"pulses必须在1..{limits.max_move_pulses}之间")
         if not 1 <= rpm <= limits.max_rpm:
             raise ValueError(f"rpm必须在1..{limits.max_rpm}之间")
-        timeout = (
-            limits.position_timeout_s
-            if timeout_s is None
-            else _finite_number("timeout_s", timeout_s)
-        )
-        if not 0 < timeout <= limits.position_timeout_s:
+        if timeout_s is None:
+            timeout = _position_timeout_budget(
+                pulses=pulses,
+                rpm=rpm,
+                encoder_counts_per_motor_rev=(
+                    self.config.encoder_counts_per_motor_rev
+                ),
+                configured_timeout_s=limits.position_timeout_s,
+            )
+        else:
+            timeout = _finite_number("timeout_s", timeout_s)
+        if not 0 < timeout or (
+            timeout_s is not None
+            and timeout > limits.position_timeout_s
+        ):
             raise ValueError(
                 f"timeout_s必须在0..{limits.position_timeout_s}之间"
             )
@@ -795,10 +830,6 @@ class MotionController:
                     completed = True
                     break
                 time.sleep(self.monitor_interval_s)
-            if not completed:
-                raise PositionNotReachedError(
-                    "内部位置运动未到位；已执行安全停止"
-                )
         finally:
             self.stop(verify_off=True)
 
@@ -808,9 +839,18 @@ class MotionController:
         error_pulses = target_position - final_position
         if abs(error_pulses) > tolerance:
             raise PositionNotReachedError(
-                f"停止后位置误差{error_pulses} pulse，超过容差"
-                f"{tolerance} pulse"
+                f"内部位置运动未到位；已执行安全停止；"
+                f"目标={target_position} pulse，最终={final_position} pulse，"
+                f"误差={error_pulses} pulse，容差={tolerance} pulse"
             )
+        if not completed:
+            # The deadline can fall between the first and third zero-speed
+            # samples.  Safety stop first, then accept the command only when
+            # the final encoder position independently proves it arrived.
+            self._emit(
+                "到位确认窗口结束，安全停止后编码器位置在容差内"
+            )
+            completed = True
         result = MotionResult(
             mode=mode,
             direction=parsed_direction.name.lower(),

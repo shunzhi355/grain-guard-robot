@@ -10,7 +10,7 @@ try:  # pragma: no cover - depends on the developer environment
 except ImportError:  # pragma: no cover
     sys.modules["serial"] = ModuleType("serial")
 
-from x2p.motion import _approach_profile
+from x2p.motion import _approach_profile, _position_timeout_budget
 
 
 def test_approach_profile_accounts_for_modbus_latency() -> None:
@@ -45,3 +45,26 @@ def test_approach_profile_does_not_accelerate_an_already_slow_move() -> None:
     assert rpm == 10
     assert window_mm == 0.0
     assert duration_s == 6.0
+
+
+def test_position_timeout_covers_long_return_and_settling() -> None:
+    counts_per_mm = 131_072 / 5.0
+    timeout_s = _position_timeout_budget(
+        pulses=round(195.0 * counts_per_mm),
+        rpm=167,
+        encoder_counts_per_motor_rev=131_072,
+        configured_timeout_s=15.0,
+    )
+
+    # The previous fixed 15 s deadline expired after the first zero-speed
+    # sample.  The computed budget includes the 14 s travel plus ramp/settle.
+    assert timeout_s > 17.0
+
+
+def test_position_timeout_keeps_existing_floor_for_short_moves() -> None:
+    assert _position_timeout_budget(
+        pulses=round(5.0 * 131_072 / 5.0),
+        rpm=30,
+        encoder_counts_per_motor_rev=131_072,
+        configured_timeout_s=15.0,
+    ) == 15.0
