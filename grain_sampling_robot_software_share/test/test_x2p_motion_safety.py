@@ -3,6 +3,8 @@
 import sys
 from types import ModuleType
 
+import pytest
+
 # pyserial is a board-only dependency in this project.  The profile calculation
 # is pure, so provide an import stub when running the Windows unit-test suite.
 try:  # pragma: no cover - depends on the developer environment
@@ -10,7 +12,30 @@ try:  # pragma: no cover - depends on the developer environment
 except ImportError:  # pragma: no cover
     sys.modules["serial"] = ModuleType("serial")
 
-from x2p.motion import _approach_profile, _position_timeout_budget
+from x2p.errors import SafetyInterlockError
+from x2p.motion import (
+    MotionController,
+    _approach_profile,
+    _position_timeout_budget,
+)
+from x2p.registers import Register
+
+
+class _StaticSetupDrive:
+    def __init__(self) -> None:
+        self.registers: dict[int, int] = {}
+        self.writes: list[tuple[int, int]] = []
+        self.diagnostics = 0
+
+    def diagnostic(self) -> None:
+        self.diagnostics += 1
+
+    def write_register(self, address: int, value: int) -> None:
+        self.registers[int(address)] = value
+        self.writes.append((int(address), value))
+
+    def read_registers(self, address: int) -> list[int]:
+        return [self.registers.get(int(address), 0)]
 
 
 def test_approach_profile_accounts_for_modbus_latency() -> None:
@@ -68,3 +93,47 @@ def test_position_timeout_keeps_existing_floor_for_short_moves() -> None:
         encoder_counts_per_motor_rev=131_072,
         configured_timeout_s=15.0,
     ) == 15.0
+
+
+def test_position_setup_reuses_verified_static_parameters(monkeypatch) -> None:
+    drive = _StaticSetupDrive()
+    controller = MotionController(drive, output=None)
+    monkeypatch.setattr(controller, "prepare_off", lambda: None)
+    monkeypatch.setattr(
+        controller, "_verify_position_configuration", lambda: None
+    )
+    monkeypatch.setattr(
+        controller, "_select_control_path", lambda *, position: 0
+    )
+    monkeypatch.setattr(
+        controller, "_is_disabled_and_stopped", lambda: True
+    )
+
+    assert controller._prepare_position_move(167) == 0
+    assert drive.diagnostics == 1
+    assert (int(Register.POSITION_SOURCE), 1) in drive.writes
+
+    drive.writes.clear()
+    assert controller._prepare_position_move(167) == 0
+
+    # The fast leg retains an explicit Pn701 reset/readback, but does not
+    # rewrite Pn321/Pn700/Pn703-705/Pn708 or rerun the full diagnostic.
+    assert drive.diagnostics == 1
+    assert drive.writes == [(int(Register.POSITION_SEGMENT), 0)]
+
+
+def test_position_fast_setup_invalidates_cache_if_axis_is_not_off(
+    monkeypatch,
+) -> None:
+    drive = _StaticSetupDrive()
+    controller = MotionController(drive, output=None)
+    controller._position_static_ready = True
+    controller._position_static_rpm = 167
+    monkeypatch.setattr(
+        controller, "_is_disabled_and_stopped", lambda: False
+    )
+
+    with pytest.raises(SafetyInterlockError, match="OFF"):
+        controller._prepare_position_move(167)
+
+    assert controller._position_static_ready is False

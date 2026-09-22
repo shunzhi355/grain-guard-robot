@@ -56,8 +56,23 @@ def test_read_retries_transient_x2p_exception_03():
     assert len(port.writes) == 2
 
 
-def test_write_does_not_retry_modbus_exception():
-    port = _ScriptedSerial([add_crc(bytes((2, 0x86, 0x03)))])
+def test_safe_config_write_retries_transient_x2p_exception_03():
+    port = _ScriptedSerial(
+        [
+            add_crc(bytes((2, 0x86, 0x03))),
+            add_crc(bytes((2, 0x06, 0x04, 0x0F, 0x00, 0x00))),
+        ]
+    )
+    client = ModbusRTUClient(
+        slave=2, serial_port=port, min_request_interval_s=0
+    )
+
+    client.write_register(0x040F, 0)
+    assert len(port.writes) == 2
+
+
+def test_write_does_not_retry_non_transient_modbus_exception():
+    port = _ScriptedSerial([add_crc(bytes((2, 0x86, 0x02)))])
     client = ModbusRTUClient(
         slave=2, serial_port=port, min_request_interval_s=0
     )
@@ -65,7 +80,7 @@ def test_write_does_not_retry_modbus_exception():
     try:
         client.write_register(0x0600, 1)
     except CommunicationError as exc:
-        assert "0x03" in str(exc)
+        assert "0x02" in str(exc)
     else:  # pragma: no cover - assertion branch
         raise AssertionError("写异常不应被吞掉")
     assert len(port.writes) == 1
@@ -85,4 +100,19 @@ def test_position_execute_write_is_never_replayed_after_bad_response():
         pass
     else:  # pragma: no cover - assertion branch
         raise AssertionError("损坏应答必须报错")
+    assert len(port.writes) == 1
+
+
+def test_position_execute_write_is_not_replayed_after_exception_03():
+    port = _ScriptedSerial([add_crc(bytes((2, 0x86, 0x03)))])
+    client = ModbusRTUClient(
+        slave=2, serial_port=port, min_request_interval_s=0
+    )
+
+    try:
+        client.write_register(0x0701, 1)
+    except CommunicationError as exc:
+        assert "0x03" in str(exc)
+    else:  # pragma: no cover - assertion branch
+        raise AssertionError("位置执行命令异常必须报错")
     assert len(port.writes) == 1

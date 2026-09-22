@@ -159,21 +159,22 @@ class ModbusRTUClient:
                 response.hex(" "),
                 crc_ok,
             )
-            # During position motion the X2P occasionally rejects a monitor
-            # read with exception 0x03 even though the same register succeeds
-            # immediately before and after it.  Retry reads only: writes are
-            # deliberately not replayed here, so a position command can never
-            # be triggered twice by this recovery path.
-            transient_read_exception = (
+            # During sustained reciprocation the X2P occasionally returns
+            # exception 0x03 for an otherwise valid monitor read or idempotent
+            # configuration write.  Retry those transactions after a quiet
+            # interval.  Pn701=non-zero executes motion immediately and is
+            # explicitly excluded above (attempts=1), so motion is never
+            # triggered twice by this recovery path.
+            transient_busy_exception = (
                 crc_ok
-                and function == 0x03
                 and len(response) >= 5
                 and response[1] == (function | 0x80)
                 and response[2] == 0x03
+                and not position_execute_write
             )
-            if transient_read_exception and attempt + 1 < attempts:
+            if transient_busy_exception and attempt + 1 < attempts:
                 logger.warning(
-                    "X2P监控读取暂时返回0x03，延时后重试"
+                    "X2P交易暂时返回0x03，延时后重试"
                 )
                 time.sleep(0.10)
                 continue

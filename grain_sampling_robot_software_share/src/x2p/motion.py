@@ -173,6 +173,13 @@ class MotionController:
         self.monitor_interval_s = monitor_interval_s
         self.output = output
         self.state = MotionState.UNKNOWN
+        # Position-table parameters are invariant for the lifetime of this
+        # controller. A completed move already performs a verified stop, so
+        # subsequent reciprocating legs only need to prove OFF/zero-speed and
+        # refresh the dynamic target. Any failure invalidates this cache.
+        self._position_static_ready = False
+        self._position_forced_inputs = 0
+        self._position_static_rpm: int | None = None
 
     def _emit(self, message: str) -> None:
         if self.output is not None:
@@ -495,6 +502,63 @@ class MotionController:
                 "否则Pn706位置会按错误比例移动"
             )
 
+    def _invalidate_position_static_setup(self) -> None:
+        self._position_static_ready = False
+        self._position_static_rpm = None
+
+    def _prepare_position_move(self, rpm: int) -> int:
+        """Prepare Pr1, reusing only previously verified invariants.
+
+        Normal completion always calls ``stop(verify_off=True)``. On the next
+        leg we still independently read STATUS and actual speed, reset/read
+        Pn701, and later read back Pn706 and verify S-ON.
+        """
+        if self._position_static_ready:
+            if not self._is_disabled_and_stopped():
+                self._invalidate_position_static_setup()
+                self.state = MotionState.FAULT
+                raise SafetyInterlockError(
+                    "快速换向前驱动器未处于OFF且零速状态"
+                )
+            self.drive.write_register(Register.POSITION_SEGMENT, 0)
+            if self.drive.read_registers(Register.POSITION_SEGMENT)[0] != 0:
+                self._invalidate_position_static_setup()
+                raise ConfigurationError("Pn701位置段复位读回不一致")
+            if self._position_static_rpm != rpm:
+                self.drive.write_register(Register.PR1_SPEED, rpm)
+                if self.drive.read_registers(Register.PR1_SPEED)[0] != rpm:
+                    self._invalidate_position_static_setup()
+                    raise ConfigurationError("Pn708位置速度写入读回不一致")
+                self._position_static_rpm = rpm
+            self.state = MotionState.ARMED
+            return self._position_forced_inputs
+
+        self.drive.diagnostic()
+        self.prepare_off()
+        self._verify_position_configuration()
+        forced_inputs = self._select_control_path(position=True)
+        self.drive.write_register(Register.MODBUS_NO_SAVE, 0)
+        self.drive.write_register(Register.MODBUS_SAVE_POLICY, 1)
+        for label, address, value in (
+            ("Pn321位置指令来源", Register.POSITION_SOURCE, 1),
+            ("Pn700内部位置模式", Register.POSITION_MODE, 7),
+            ("Pn701当前段", Register.POSITION_SEGMENT, 0),
+            ("Pn703加速时间", Register.POSITION_ACCEL, 500),
+            ("Pn704减速时间", Register.POSITION_DECEL, 500),
+            ("Pn705S曲线时间", Register.POSITION_S_CURVE, 100),
+            ("Pn708位置速度", Register.PR1_SPEED, rpm),
+        ):
+            self.drive.write_register(address, value)
+            readback = self.drive.read_registers(address)[0]
+            if readback != value:
+                raise ConfigurationError(
+                    f"{label}写入读回不一致: {readback}!={value}"
+                )
+        self._position_forced_inputs = forced_inputs
+        self._position_static_rpm = rpm
+        self._position_static_ready = True
+        return forced_inputs
+
     def run_speed(
         self,
         direction: str | Direction,
@@ -760,32 +824,12 @@ class MotionController:
         signed_pulses = pulses * direction_sign(
             direction, self.config.forward_sign
         )
-        self.drive.diagnostic()
-        self.prepare_off()
-        self._verify_position_configuration()
         start = time.monotonic()
         peak = 0
         completed = False
         start_position = 0
         try:
-            forced_inputs = self._select_control_path(position=True)
-            self.drive.write_register(Register.MODBUS_NO_SAVE, 0)
-            self.drive.write_register(Register.MODBUS_SAVE_POLICY, 1)
-            for label, address, value in (
-                ("Pn321位置指令来源", Register.POSITION_SOURCE, 1),
-                ("Pn700内部位置模式", Register.POSITION_MODE, 7),
-                ("Pn701当前段", Register.POSITION_SEGMENT, 0),
-                ("Pn703加速时间", Register.POSITION_ACCEL, 500),
-                ("Pn704减速时间", Register.POSITION_DECEL, 500),
-                ("Pn705S曲线时间", Register.POSITION_S_CURVE, 100),
-                ("Pn708位置速度", Register.PR1_SPEED, rpm),
-            ):
-                self.drive.write_register(address, value)
-                readback = self.drive.read_registers(address)[0]
-                if readback != value:
-                    raise ConfigurationError(
-                        f"{label}写入读回不一致: {readback}!={value}"
-                    )
+            forced_inputs = self._prepare_position_move(rpm)
             self.drive.write_signed32(Register.PR1_PULSES, signed_pulses)
             if (
                 self.drive.read_signed32(Register.PR1_PULSES)
@@ -830,14 +874,22 @@ class MotionController:
                     completed = True
                     break
                 time.sleep(self.monitor_interval_s)
+        except Exception:
+            self._invalidate_position_static_setup()
+            raise
         finally:
-            self.stop(verify_off=True)
+            try:
+                self.stop(verify_off=True)
+            except Exception:
+                self._invalidate_position_static_setup()
+                raise
 
         final_position = self.drive.read_signed32(
             Register.SERVO_POSITION_ENCODER
         )
         error_pulses = target_position - final_position
         if abs(error_pulses) > tolerance:
+            self._invalidate_position_static_setup()
             raise PositionNotReachedError(
                 f"内部位置运动未到位；已执行安全停止；"
                 f"目标={target_position} pulse，最终={final_position} pulse，"
