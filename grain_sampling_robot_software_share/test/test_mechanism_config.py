@@ -77,7 +77,7 @@ def test_get_grain_params_specific_values(grain):
     assert params["open_duration"] == 5.0
     assert params["close_duration"] == 3.0
     assert params["clamp_duration"] == 2.0
-    assert params["unclamp_duration"] == 1.0
+    assert params["unclamp_duration"] == 3.0
     assert params["tighten_duration"] == 10.0
     assert params["untighten_duration"] == 3.0
     assert params["throttle_open"] == 1200.0

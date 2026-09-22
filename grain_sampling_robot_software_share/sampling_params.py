@@ -22,9 +22,9 @@ from __future__ import annotations
 
 # 正式流程及独立测试共用；修改后重启机构服务。
 PRESS_SEGMENT_CM = 20.0
-PRESS_DOWN_CM = 3.0
+PRESS_DOWN_CM = 5.0
 PRESS_UP_CM = 2.0
-PRESS_PAUSE_S = 1.0
+PRESS_PAUSE_S = 0.5
 
 # ===========================================================================
 # 1. 机制执行器 —— PCA9685 通道映射 + 脉宽 + 品种参数

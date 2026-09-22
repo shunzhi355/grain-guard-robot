@@ -299,8 +299,12 @@ def test_reciprocation_is_absolute_and_never_exceeds_endpoint(sign, distance):
     depths = [(20 - call[0]) * sign / lift.counts_per_mm for call in lift.absolute_calls]
     assert depths[-1] == pytest.approx(distance * 10, abs=0.001)
     assert all(0 <= d <= distance * 10 + 0.001 for d in depths)
-    if distance > 3:
-        assert depths[:3] == pytest.approx([30, 10, 40], abs=0.001)
+    if distance >= 8:
+        assert depths[:3] == pytest.approx([50, 30, 80], abs=0.001)
+    elif distance > 5:
+        assert depths[:3] == pytest.approx(
+            [50, 30, distance * 10], abs=0.001
+        )
     assert not lift.distance_calls
 
 
@@ -334,7 +338,7 @@ def test_emergency_after_first_leg_prevents_next_leg():
 
 
 def test_invalid_cycle_configuration_rejected_before_motion(monkeypatch):
-    monkeypatch.setattr("grain_sampling_devices.mechanism_driver.PRESS_UP_CM", 3.0)
+    monkeypatch.setattr("grain_sampling_devices.mechanism_driver.PRESS_UP_CM", 5.0)
     lift = _FakeCycleLift()
     ctrl = _cycle_controller(lift)
     with pytest.raises(ValueError):
