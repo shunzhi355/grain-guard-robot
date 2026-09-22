@@ -763,8 +763,13 @@ class MotionController:
                 signed_pulses * self.config.encoder_forward_sign
             )
             target_position = start_position + encoder_pulses
-            self.drive.write_register(Register.POSITION_SEGMENT, 1)
             self._enable_and_verify(forced_inputs)
+            # This X2P firmware only latches the selected Pr segment while
+            # the servo is already in RUN.  Selecting Pr1 before enable can
+            # leave Un042 at 0 and the following CTRG edge is ignored.
+            self.drive.write_register(Register.POSITION_SEGMENT, 1)
+            if self.drive.read_registers(Register.POSITION_SEGMENT)[0] != 1:
+                raise ConfigurationError("Pn701位置段选择写入读回不一致")
             enabled_inputs = digital_input_bit(1) | forced_inputs
             self.drive.trigger_position(enabled_inputs)
             deadline = time.monotonic() + timeout

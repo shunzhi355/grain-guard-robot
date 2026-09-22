@@ -72,10 +72,15 @@ class Direction(Enum):
 class SafetyLimits:
     max_rpm: int = 30
     max_duration_s: float | None = None
-    max_move_pulses: int = 200_000
+    # 17-bit encoder + 5 mm lead = 26,214.4 counts/mm.  Keep the pulse
+    # ceiling consistent with the 300 mm mechanical travel limit so a normal
+    # 30 mm press leg and the ~195 mm absolute return are not rejected.
+    max_move_pulses: int = 8_000_000
     max_distance_mm: float = 300.0
     stop_timeout_s: float = 2.0
-    position_timeout_s: float = 10.0
+    # A 195 mm return at 200 r/min takes about 11.7 s before settling.  The
+    # workflow budgets another 20% (~14 s), so allow up to 15 s.
+    position_timeout_s: float = 15.0
 
     def validate(self) -> None:
         _require_config_int("max_rpm", self.max_rpm, minimum=1, maximum=32767)
