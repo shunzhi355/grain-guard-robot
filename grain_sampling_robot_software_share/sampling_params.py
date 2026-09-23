@@ -83,10 +83,10 @@ CLAMP_PULSE_OPEN: float = 1200.0
 TIGHTEN_PULSE_CLOSE: float = 1300.0
 TIGHTEN_PULSE_OPEN: float = 1900.0
 
-#: 三仓（CH2/3/4）开关仓独立标定（us）：开仓门=1200，关仓门=1800
+#: 三仓（CH2/3/4）开关仓独立标定（us）：开仓门=1000，关仓门=2000
 #: （2026-08-31 用户实机标定）。与品种无关，不走 throttle_open/close。
-BIN_OPEN_PULSE: float = 1200.0
-BIN_CLOSE_PULSE: float = 1800.0
+BIN_OPEN_PULSE: float = 1000.0
+BIN_CLOSE_PULSE: float = 2000.0
 
 #: 全局脉宽合法范围（us）：写入校验用（set_pwm/actuate 时钳制到该范围）。
 PULSE_MIN_US: float = 1000.0
@@ -101,8 +101,8 @@ ENABLE_UNWIRED_CHANNELS: bool = False
 
 #: 未知品种的兜底时序参数（秒）。
 DEFAULT_GRAIN_PARAMS: dict[str, float] = {
-    "sampling_duration": 10.0,  # 扦样时长，默认 2 min
-    "convey_duration": 10.0,    # 输送时长，默认 2 min
+    "sampling_duration": 120.0,  # 扦样时长，默认 2 min
+    "convey_duration": 120.0,    # 输送时长，默认 2 min
     "open_duration": 5.0,        # 开仓保持时长（秒），之后自动关同仓（暂定 5s，以实测为准）
     "close_duration": 3.0,       # 关仓时长
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
@@ -116,8 +116,8 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
 
 #: 品种 → 机制参数（在默认参数上覆盖扦样/输送时长）。
 GRAIN_MECHANISM_CONFIG: dict[str, dict[str, float]] = {
-    "稻谷": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 120.0, "convey_duration": 120.0},
-    "玉米": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 180.0, "convey_duration": 180.0},
+    "稻谷": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 10.0, "convey_duration": 10.0},
+    "玉米": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 10.0, "convey_duration": 10.0},
     "黄豆": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 90.0, "convey_duration": 90.0},
 }
 
@@ -173,9 +173,9 @@ X2P_SLAVE: int = 2
 
 #: 升降转速（r/min）。同时作为 move-timed 距离运动的速度上限（max_rpm）。
 #: 注意：X2P 文档标称电机额定 120 r/min，超过需现场确认安全，勿长期超速。
-#: 2026-08-27 用户实机标定确认 500 r/min 可用；自动回程靠近顶端时
-#: 先使用 200 r/min 的保守速度，减小刹车惯性和冲顶风险。
-X2P_RPM: int = 200
+#: 2026-09-23 现场要求以 500 r/min 测试位置模式短行程的峰值转速。
+#: 该值同时是正式流程指令速度和软件 max_rpm 上限。
+X2P_RPM: int = 500
 
 #: 升降时长（秒）。
 X2P_DURATION_S: float = 2.0
