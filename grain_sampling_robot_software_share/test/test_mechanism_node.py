@@ -24,7 +24,12 @@ from unittest.mock import patch
 import pytest
 
 import grain_sampling_workflow.mechanism_node as mn
-from grain_sampling_devices.mechanism_driver import CHANNELS
+from grain_sampling_devices.mechanism_driver import (
+    BIN_CLOSE_PULSE,
+    BIN_OPEN_PULSE,
+    CHANNELS,
+)
+from grain_sampling_workflow.mechanism_config import GRAIN_MECHANISM_CONFIG
 
 
 def _trigger_req():
@@ -111,9 +116,11 @@ def test_open_bin_uses_configured_depth(mock_mechanism):
     # 时长注入 open_duration 只用于 Timer 自动关同仓，不记录到 _act_pulse。
     open_kw = next(kw for n, kw in mock_mechanism.action_history if n == "open_bin")
     assert open_kw["channel"] == CHANNELS["bin_deep"]
-    assert open_kw["pulse_us"] == 1200
+    assert open_kw["pulse_us"] == BIN_OPEN_PULSE
     assert open_kw["duration"] is None
-    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [1200]
+    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [
+        BIN_OPEN_PULSE
+    ]
 
 
 def test_close_bin_uses_configured_depth(mock_mechanism):
@@ -123,8 +130,10 @@ def test_close_bin_uses_configured_depth(mock_mechanism):
     # close_bin 与 open_bin 共享深度注入：deep → CH4=bin_deep，写 BIN_CLOSE_PULSE=1800
     close_kw = next(kw for n, kw in mock_mechanism.action_history if n == "close_bin")
     assert close_kw["channel"] == CHANNELS["bin_deep"]
-    assert close_kw["pulse_us"] == 1800
-    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [1800]
+    assert close_kw["pulse_us"] == BIN_CLOSE_PULSE
+    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [
+        BIN_CLOSE_PULSE
+    ]
 
 
 def test_stop_suction_writes_stop_pulse_to_fan_channel(mock_mechanism):
@@ -250,11 +259,12 @@ def test_set_grain_updates_current_grain(mock_mechanism):
     assert node._grain == "稻谷"
     assert any(n == "set_grain" for n, _ in mock_mechanism.action_history)
 
-    # 品种参数作用于后续动作（稻谷 convey_duration=120）
-    assert node._duration_for("convey") == 120.0
+    # 品种参数作用于后续动作，测试跟随现场统一参数源。
+    expected_duration = GRAIN_MECHANISM_CONFIG["稻谷"]["convey_duration"]
+    assert node._duration_for("convey") == expected_duration
     node._handle_action("convey", _trigger_req())
     convey_kw = next(kw for n, kw in mock_mechanism.action_history if n == "convey")
-    assert convey_kw["duration"] == 120.0
+    assert convey_kw["duration"] == expected_duration
 
 
 def test_set_grain_unknown_grain_returns_false(mock_mechanism):

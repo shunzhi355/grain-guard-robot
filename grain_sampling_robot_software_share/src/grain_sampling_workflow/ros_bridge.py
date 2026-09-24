@@ -93,24 +93,32 @@ try:
     from std_msgs.msg import Empty, String  # type: ignore[import-untyped]
     from std_srvs.srv import Trigger  # type: ignore[import-untyped]
 
-    # mechanism_node/SetGrain 自定义服务（请求含 string grain 字段）。
-    # 与 mechanism_node.py 保持一致：用 roslib 动态生成完整可序列化的服务类型。
-    SET_GRAIN_SRV_TEXT = "string grain\n---\nbool success\nstring message\n"
-    MOVE_LIFT_SRV_TEXT = (
-        "string direction\nfloat32 distance_cm\n---\nbool success\nstring message\n"
-    )
+    # Prefer catkin's generated Python classes.  The second argument of
+    # roslib.message.get_service_class is ``reload_on_error`` (bool), not srv
+    # source text; passing the definition there used to silently return None
+    # when the UI was launched without a sourced mechanism workspace.
     try:
-        from roslib.message import get_service_class
+        from mechanism_node.srv import MoveLift as _GeneratedMoveLift
+        from mechanism_node.srv import SetGrain as _GeneratedSetGrain
 
-        SetGrain = get_service_class("mechanism_node/SetGrain", SET_GRAIN_SRV_TEXT)
-        MoveLift = get_service_class("mechanism_node/MoveLift", MOVE_LIFT_SRV_TEXT)
+        SetGrain = _GeneratedSetGrain
+        MoveLift = _GeneratedMoveLift
     except Exception:  # noqa: BLE001 - 退化为模块内回退类
-        logger.warning(
-            "roslib.message.get_service_class failed — SetGrain/MoveLift falls back "
-            "to a local mock class (wire serialization unavailable)"
-        )
-        SetGrain = _FallbackSetGrain
-        MoveLift = _FallbackMoveLift
+        try:
+            from roslib.message import get_service_class
+
+            SetGrain = get_service_class("mechanism_node/SetGrain")
+            MoveLift = get_service_class("mechanism_node/MoveLift")
+        except Exception:  # noqa: BLE001
+            SetGrain = None
+            MoveLift = None
+        if SetGrain is None or MoveLift is None:
+            logger.warning(
+                "mechanism_node generated service classes unavailable — "
+                "SetGrain/MoveLift calls cannot use ROS wire serialization"
+            )
+            SetGrain = _FallbackSetGrain
+            MoveLift = _FallbackMoveLift
     HAS_ROS = True
 except ImportError:
     HAS_ROS = False

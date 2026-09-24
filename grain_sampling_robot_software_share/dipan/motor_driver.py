@@ -322,11 +322,25 @@ class DifferentialMotorDriver:
         boosted = min_abs + magnitude * (1.0 - min_abs)
         return (1.0 if speed > 0.0 else -1.0) * clamp(boosted, 0.0, 1.0)
 
+    def _set_motor_speed(self, speed: float, motor: PwmOutput) -> int:
+        """Write one track command, disabling PWM for a zero/deadband input.
+
+        A nominal 1500 us pulse is not a universally safe stop signal: an
+        uncalibrated bidirectional ESC can interpret it as reverse.  A stopped
+        track therefore uses PCA9685 FULL-OFF and only non-zero commands enable
+        PWM again.  ``set_pulse_us`` clears FULL-OFF on the next command.
+        """
+        speed = clamp(speed, -1.0, 1.0)
+        if abs(speed) < self.deadband:
+            motor.disable()
+            return 0
+        pulse = self._speed_to_pulse(speed, motor)
+        motor.set_pulse_us(pulse)
+        return pulse
+
     def set_left_right(self, left_speed: float, right_speed: float) -> Tuple[int, int]:
-        left_pulse = self._speed_to_pulse(left_speed, self.left)
-        right_pulse = self._speed_to_pulse(right_speed, self.right)
-        self.left.set_pulse_us(left_pulse)
-        self.right.set_pulse_us(right_pulse)
+        left_pulse = self._set_motor_speed(left_speed, self.left)
+        right_pulse = self._set_motor_speed(right_speed, self.right)
         return left_pulse, right_pulse
 
     def set_cmd_normalized(self, linear: float, angular: float) -> Tuple[float, float, int, int]:
@@ -357,6 +371,7 @@ class DifferentialMotorDriver:
         return left, right, left_pulse, right_pulse
 
     def stop(self) -> Tuple[int, int]:
+        """Hard-stop both tracks by disabling their PWM outputs."""
         return self.set_left_right(0.0, 0.0)
 
     def off(self) -> None:
@@ -436,7 +451,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         # Reserve the port before touching outputs; a duplicate daemon must not
         # change the neutral state of an already running chassis.
         sock.bind((args.host, args.port))
-        driver.stop()
+        driver.off()
         time.sleep(args.arm_seconds)
         sock.settimeout(0.05)
         # Drop commands queued during arming; require a fresh command afterward.
@@ -471,7 +486,7 @@ def run_daemon(args: argparse.Namespace) -> int:
             now = time.monotonic()
             if now - last_command > args.timeout:
                 if not stopped_by_timeout:
-                    driver.stop()
+                    driver.off()
                     stopped_by_timeout = True
                 time.sleep(0.02)
 
@@ -507,7 +522,7 @@ def run_daemon(args: argparse.Namespace) -> int:
             sock.sendto((json.dumps(reply, ensure_ascii=False) + "\n").encode("utf-8"), addr)
     finally:
         try:
-            driver.stop()
+            driver.off()
         finally:
             driver.close()
             sock.close()
@@ -518,7 +533,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Tracked chassis ESC PWM motor driver")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    p_stop = subparsers.add_parser("stop", help="1500us neutral on both motors")
+    p_stop = subparsers.add_parser("stop", help="hard-stop both motors (PWM FULL-OFF)")
     add_common_args(p_stop)
 
     p_off = subparsers.add_parser("off", help="disable both PWM outputs")
@@ -547,7 +562,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_daemon = subparsers.add_parser("daemon", help="UDP command server with timeout stop")
     p_daemon.add_argument("--host", default="127.0.0.1")
     p_daemon.add_argument("--port", type=int, default=8765)
-    p_daemon.add_argument("--timeout", type=float, default=0.3)
+    p_daemon.add_argument("--timeout", type=float, default=3.0)
     p_daemon.add_argument("--arm-seconds", type=float, default=3.0)
     add_common_args(p_daemon)
 

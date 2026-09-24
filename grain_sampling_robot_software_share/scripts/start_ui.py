@@ -19,6 +19,37 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 
 
+def add_ros_workspace_pythonpath() -> list[Path]:
+    """Expose generated ROS service modules to a UI started from a plain shell.
+
+    The hardware systemd service sources ``mechanism_ws``, but operators often
+    start the desktop UI over SSH without sourcing that workspace.  In that
+    case rospy itself imports successfully while ``mechanism_node.srv`` does
+    not, leaving the UI unable to call SetGrain/MoveLift.  Add the generated
+    Python package directories before importing the workflow modules.
+    """
+    candidates: list[Path] = []
+    setup_path = os.environ.get("MECHANISM_WS_SETUP", "").strip()
+    if setup_path:
+        setup = Path(setup_path).expanduser()
+        # .../devel/setup.bash -> .../devel/lib/pythonX/dist-packages
+        candidates.extend((setup.parent / "lib").glob("python*/dist-packages"))
+    candidates.extend(
+        (Path.home() / "mechanism_ws" / "devel" / "lib").glob(
+            "python*/dist-packages"
+        )
+    )
+
+    added: list[Path] = []
+    for directory in candidates:
+        resolved = directory.resolve()
+        if not resolved.is_dir() or str(resolved) in sys.path:
+            continue
+        sys.path.insert(0, str(resolved))
+        added.append(resolved)
+    return added
+
+
 class TeeStream:
     """Keep terminal output while preserving diagnostics on disk."""
 
@@ -144,6 +175,13 @@ def main(argv=None):
     print(f"Qt: {binding.__name__} {getattr(binding, '__version__', '')} ({binding.__file__})", flush=True)
     if args.check_qt:
         return 0
+    added_ros_paths = add_ros_workspace_pythonpath()
+    if added_ros_paths:
+        print(
+            "ROS generated services: "
+            + ", ".join(str(path) for path in added_ros_paths),
+            flush=True,
+        )
     sys.path[:0] = [str(SRC_DIR), str(PROJECT_ROOT)]
     if not args.preview_descent:
         from grain_sampling_ui.main import main as run_main_ui

@@ -30,6 +30,19 @@ def test_uses_installed_qt_instead_of_circular_project_shims(qt_app):
     assert sys.modules["PySide2.QtWidgets"] is sys.modules["PySide6.QtWidgets"]
 
 
+def test_adds_generated_ros_service_path_from_configured_workspace(tmp_path, monkeypatch):
+    generated = tmp_path / "devel" / "lib" / "python3" / "dist-packages"
+    generated.mkdir(parents=True)
+    monkeypatch.setenv("MECHANISM_WS_SETUP", str(tmp_path / "devel" / "setup.bash"))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "unused-home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    added = launcher.add_ros_workspace_pythonpath()
+
+    assert added == [generated.resolve()]
+    assert sys.path[0] == str(generated.resolve())
+
+
 def test_descent_preview_never_constructs_bridge_or_orchestrator(qt_app, monkeypatch):
     app, _ = qt_app
     from grain_sampling_ui.pages import guidance_page
