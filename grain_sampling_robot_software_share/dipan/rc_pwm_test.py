@@ -19,7 +19,7 @@ for path in (str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from dipan.motor_driver import DifferentialMotorDriver  # noqa: E402
+from dipan.motor_driver import DifferentialMotorDriver, NEUTRAL_US  # noqa: E402
 from grain_sampling_devices.ibus_receiver import IBusRCReceiver  # noqa: E402
 from grain_sampling_workflow.rc_control import RCControl  # noqa: E402
 from utils.sampling_params import RC_MAX_ANGULAR_RPS, RC_MAX_LINEAR_MPS  # noqa: E402
@@ -84,7 +84,11 @@ def run(args: argparse.Namespace) -> int:
         driver = DifferentialMotorDriver(backend="pca9685", max_offset_us=args.max_offset_us)
         bridge = DirectMotorBridge(driver)
         bridge.stop()
-        LOG.info("PCA9685 initialized; CH10/CH9 neutral at 1500 us for %.1f s", args.arm_seconds)
+        LOG.info(
+            "PCA9685 initialized; CH10/CH9 neutral at %d us for %.1f s",
+            NEUTRAL_US,
+            args.arm_seconds,
+        )
         deadline = time.monotonic() + args.arm_seconds
         while running and time.monotonic() < deadline:
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
@@ -116,7 +120,7 @@ def run(args: argparse.Namespace) -> int:
             now = time.monotonic()
             if now >= next_report:
                 values = receiver.read()
-                result = bridge.last_result or (0.0, 0.0, 1500, 1500)
+                result = bridge.last_result or (0.0, 0.0, NEUTRAL_US, NEUTRAL_US)
                 LOG.info(
                     "mode=%s CH1=%s CH3=%s CH8=%s tracks=(%.3f,%.3f) PWM=(%d,%d)us",
                     mode or "waiting",
@@ -140,7 +144,9 @@ def run(args: argparse.Namespace) -> int:
         if driver is not None:
             try:
                 driver.stop()
-                LOG.info("service stopped; CH10/CH9 returned to 1500 us")
+                LOG.info(
+                    "service stopped; CH10/CH9 returned to %d us", NEUTRAL_US
+                )
             finally:
                 driver.close()
 

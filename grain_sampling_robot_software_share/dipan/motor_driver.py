@@ -51,9 +51,9 @@ except ImportError:  # direct script execution before PYTHONPATH is set
 
 
 PERIOD_NS = 20_000_000  # 50 Hz
-# LPB3588 chassis ESCs measured on 2026-09-24: 1500 us creeps backward;
-# 1480 us is the physical stationary point for both tracks.
-NEUTRAL_US = 1480
+# Standard bidirectional ESC neutral pulse.  The PCA9685 timing conversion uses
+# the configured oscillator frequency, so this value is the requested pulse in us.
+NEUTRAL_US = 1500
 MIN_US = 1000
 MAX_US = 2000
 # 2026-08-26 用户要求默认半速（满速 1750us），原 500 全速 2000us 过快.
