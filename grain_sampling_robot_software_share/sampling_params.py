@@ -51,16 +51,10 @@ PCA9685_I2C_DEVICE: str = ""  # 由 config/industrial_pc.env 设置为 /dev/i2c-
 PCA9685_CHASSIS_LEFT: int = 10  # CH8 实机异常，左侧信号改接 CH10（2026-09-16）
 PCA9685_CHASSIS_RIGHT: int = 9
 
-#: PCA9685 内部振荡器实际频率（Hz）。标称 25MHz，但实机示波器校准
-#: 2026-08-23：PRESCALE=121 时实测 55.25Hz → 振荡器 = 55.25×4096×122
-#: = 27,609,088 Hz（偏差 +10.4%）。用实测值计算 PRESCALE 才能得到
-#: 精确 50Hz 输出。若换 PCA9685 板需重新校准。
-#: 2026-08-31 复校（两次实测取平均）：
-#:   PRESCALE=134 → 49.75Hz → 振荡器 27,509,760
-#:   PRESCALE=133 → 50.25Hz → 振荡器 27,580,416
-#:   平均 = 27,545,088 → PRESCALE=134 得 49.82Hz(20.07ms) 最接近 50Hz。
-#: 注：PCA9685 内部 RC 振荡器会温漂，prescale 为整数，±0.5% 内已是最优。
-PCA9685_OSCILLATOR_HZ: float = 27_545_088.0
+#: PCA9685 内部 RC 振荡器频率（Hz），先采用标称 25MHz。
+#: 历史板校准值为 27,545,088Hz；当前板实际频率待示波器复核。
+#: 该参数同时用于 PWM 预分频和脉宽计数换算。
+PCA9685_OSCILLATOR_HZ: float = 25_000_000.0
 
 #: PCA9685 PWM 目标频率（Hz）。默认 50（电调/舵机标准）。
 PCA9685_FREQUENCY_HZ: float = 50.0
