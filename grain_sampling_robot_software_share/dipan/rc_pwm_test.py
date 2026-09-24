@@ -81,7 +81,10 @@ def run(args: argparse.Namespace) -> int:
     driver: Optional[DifferentialMotorDriver] = None
     receiver: Optional[IBusRCReceiver] = None
     try:
-        driver = DifferentialMotorDriver(backend="pca9685", max_offset_us=args.max_offset_us)
+        driver = DifferentialMotorDriver(
+            backend="pca9685", max_offset_us=args.max_offset_us,
+            start_boost=False, deadband=0.0,
+        )
         bridge = DirectMotorBridge(driver)
         bridge.stop()
         LOG.info(

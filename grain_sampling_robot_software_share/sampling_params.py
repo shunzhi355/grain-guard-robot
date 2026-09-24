@@ -132,12 +132,12 @@ RC_SERIAL_PORT: str = "/dev/ttyUSB0"
 RC_SERIAL_BAUDRATE: int = 115200
 
 #: 摇杆中心脉宽（us）。
-RC_STICK_CENTER: float = 1450.0
+RC_STICK_CENTER: float = 1500.0
 
 #: 摇杆死区（us）：区间内摇杆映射为 0，避免抖动误动。
-#: 死区 1350~1750us（2026-08-26 因杜邦线串扰 ~1666us 加宽，包住串扰噪声；中心对齐实测摇杆中心 1410us。）
-RC_DEADBAND_LOW: float = 1350.0
-RC_DEADBAND_HIGH: float = 1750.0
+#: i-BUS 回中观测约 1468~1539us，采用对称 ±50us 死区。
+RC_DEADBAND_LOW: float = 1450.0
+RC_DEADBAND_HIGH: float = 1550.0
 
 #: CH5 档位带（us，含端点）：manual≈700~1450us / auto≈1550~2300us。
 #: （用户 2026-09-03 重新标定：CH8→Pin40 gpio-111，manual 实测 839/1111 跳动、

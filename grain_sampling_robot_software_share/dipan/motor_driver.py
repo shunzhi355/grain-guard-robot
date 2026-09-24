@@ -51,14 +51,13 @@ except ImportError:  # direct script execution before PYTHONPATH is set
 
 
 PERIOD_NS = 20_000_000  # 50 Hz
-# Standard bidirectional ESC neutral pulse.  The PCA9685 timing conversion uses
-# the configured oscillator frequency, so this value is the requested pulse in us.
-NEUTRAL_US = 1500
+# Chassis neutral candidate under RC return-to-center testing; not yet calibrated.
+NEUTRAL_US = 1540
 MIN_US = 1000
 MAX_US = 2000
 # 2026-08-26 用户要求默认半速（满速 1750us），原 500 全速 2000us 过快.
 DEFAULT_MAX_OFFSET_US = 250
-DEFAULT_DEADBAND = 0.03
+DEFAULT_DEADBAND = 0.0  # RC input deadband is handled before differential mixing.
 DEFAULT_LEFT_FORWARD_MIN = 0.062
 DEFAULT_LEFT_REVERSE_MIN = 0.186
 DEFAULT_RIGHT_FORWARD_MIN = 0.054
@@ -256,7 +255,7 @@ class DifferentialMotorDriver:
         left_reverse_min: float = DEFAULT_LEFT_REVERSE_MIN,
         right_forward_min: float = DEFAULT_RIGHT_FORWARD_MIN,
         right_reverse_min: float = DEFAULT_RIGHT_REVERSE_MIN,
-        start_boost: bool = True,
+        start_boost: bool = False,
         forward_only: bool = False,
         invert_left: bool = False,
         invert_right: bool = False,
@@ -384,7 +383,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--left-reverse-min", type=float, default=DEFAULT_LEFT_REVERSE_MIN)
     parser.add_argument("--right-forward-min", type=float, default=DEFAULT_RIGHT_FORWARD_MIN)
     parser.add_argument("--right-reverse-min", type=float, default=DEFAULT_RIGHT_REVERSE_MIN)
-    parser.add_argument("--no-start-boost", action="store_true")
+    boost = parser.add_mutually_exclusive_group()
+    boost.add_argument("--start-boost", dest="no_start_boost", action="store_false",
+                       help="explicitly enable legacy minimum-effort boost")
+    boost.add_argument("--no-start-boost", dest="no_start_boost", action="store_true",
+                       help="linear PWM mapping (default)")
+    parser.set_defaults(no_start_boost=True)
     parser.add_argument("--forward-only", action="store_true")
     parser.add_argument("--invert-left", action="store_true")
     parser.add_argument("--invert-right", action="store_true")

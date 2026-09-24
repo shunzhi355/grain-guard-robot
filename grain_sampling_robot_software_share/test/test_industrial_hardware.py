@@ -1,5 +1,6 @@
 """Industrial PC wiring and shared-chip regressions; no physical hardware needed."""
 import os
+import argparse
 import socket
 import sys
 from pathlib import Path
@@ -15,6 +16,19 @@ from grain_sampling_devices import mechanism_driver as md
 from grain_sampling_devices import rc_receiver as rc
 from grain_sampling_devices.ibus_receiver import IBusRCReceiver, build_ibus_frame, parse_ibus_frame
 from grain_sampling_workflow.rc_control import RCControl
+
+
+def test_production_cli_matches_standalone_linear_pwm():
+    parser = argparse.ArgumentParser()
+    motor.add_common_args(parser)
+    production = motor.build_driver(parser.parse_args(["--backend", "mock"]))
+    standalone = motor.DifferentialMotorDriver(
+        backend="mock", start_boost=False, deadband=0.0
+    )
+    for linear, angular in [(0, 0), (0.01, 0), (0.1, 0), (0.5, 0),
+                            (1, 0), (-0.1, 0), (-1, 0), (0, 0.2), (0.3, -0.1)]:
+        assert production.set_cmd_normalized(linear, angular) == standalone.set_cmd_normalized(linear, angular)
+    assert production.set_left_right(0.1, 0.1) == (1515, 1515)
 
 
 @pytest.fixture
@@ -146,8 +160,8 @@ def test_linux_motor_default_requires_pca9685(monkeypatch):
 def test_motor_neutral_and_off_use_only_ch10_ch9():
     pca = MagicMock()
     driver = motor.DifferentialMotorDriver(backend="pca9685", pca9685=pca)
-    assert driver.stop() == (1480, 1480)
-    assert pca.set_pwm.call_args_list == [call(10, 1480), call(9, 1480)]
+    assert driver.stop() == (1540, 1540)
+    assert pca.set_pwm.call_args_list == [call(10, 1540), call(9, 1540)]
     driver.off()
     assert pca.channel_off.call_args_list == [call(10), call(9)]
     pca.all_off.assert_not_called()

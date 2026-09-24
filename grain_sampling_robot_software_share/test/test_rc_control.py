@@ -15,6 +15,13 @@ from grain_sampling_workflow.rc_control import RCControl
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize('pulse,effort', [(1000,-1), (1225,-0.5), (1449,-1/450),
+    (1450,0), (1500,0), (1550,0), (1551,1/450), (1775,0.5), (2000,1)])
+def test_continuous_deadband_mapping(pulse, effort):
+    control = RCControl(None, None)
+    assert control._map_linear(pulse) == pytest.approx(effort * 0.3)
+    assert control._map_angular(pulse) == pytest.approx(-effort * 0.8)
+
 
 class RecordingBridge:
     """Duck-typed SamplingBridge that records chassis actions."""
@@ -47,7 +54,7 @@ def control(receiver, bridge) -> RCControl:
     return RCControl(receiver, bridge)
 
 
-def _run(control, receiver, ch5: float, ch1: float = 1400.0, ch3: float = 1400.0,
+def _run(control, receiver, ch5: float, ch1: float = 1500.0, ch3: float = 1500.0,
          times: int = 1) -> None:
     """Inject one full sample set *times* times and tick the control."""
     for _ in range(times):
@@ -55,7 +62,7 @@ def _run(control, receiver, ch5: float, ch1: float = 1400.0, ch3: float = 1400.0
         control.tick()
 
 
-def _establish_manual(control, receiver, ch1: float = 1400.0, ch3: float = 1400.0) -> None:
+def _establish_manual(control, receiver, ch1: float = 1500.0, ch3: float = 1500.0) -> None:
     """Drive the CH5 switch to manual with ``debounce_samples`` clean ticks."""
     _run(control, receiver, ch5=1000.0, ch1=ch1, ch3=ch3, times=5)
 
@@ -71,13 +78,13 @@ def test_manual_mode_maps_sticks_and_cancels_goal(control, receiver, bridge):
     assert control.cancel_goal_calls == 1
     assert bridge.cancel_calls == 1
 
-    # CH1=1800 -> (1800-1450)/500 * 0.3 = +0.21 m/s forward
+    # CH1=1800 -> (1800-1550)/450 * 0.3 = +1/6 m/s forward
     linear, angular = control.cmd_vel_history[-1]
     assert linear > 0
-    assert linear == pytest.approx(0.21)
+    assert linear == pytest.approx(1 / 6)
     # CH3=1150 (<1350) -> LEFT -> angular.z > 0
     assert angular > 0
-    assert angular == pytest.approx(0.48)
+    assert angular == pytest.approx(0.8 * 2 / 3)
 
     # Publishing starts only once manual mode is established (5th tick).
     assert len(control.cmd_vel_history) == 1
@@ -110,7 +117,7 @@ def test_mode_switch_debounce_filters_transition_values(control, receiver):
     _establish_manual(control, receiver)
     cancels_after_entry = control.cancel_goal_calls
 
-    for transition_ch5 in (1350.0, 1400.0, 1500.0, 2000.0):
+    for transition_ch5 in (1350.0, 1500.0, 1500.0, 2000.0):
         _run(control, receiver, ch5=transition_ch5)
 
     # Still manual; no extra cancel_goal from the transient readings.
@@ -158,9 +165,9 @@ def test_centered_sticks_publish_zero(control, receiver, bridge):
     assert bridge.cmd_vels[-1] == (0.0, 0.0)
 
     # Moving one stick out then re-centring stops the chassis again.
-    _run(control, receiver, ch5=1000.0, ch1=1800.0, ch3=1400.0)
+    _run(control, receiver, ch5=1000.0, ch1=1800.0, ch3=1500.0)
     assert control.cmd_vel_history[-1][0] > 0
-    _run(control, receiver, ch5=1000.0, ch1=1400.0, ch3=1400.0)
+    _run(control, receiver, ch5=1000.0, ch1=1500.0, ch3=1500.0)
     assert control.cmd_vel_history[-1] == (0.0, 0.0)
 
 
@@ -168,14 +175,14 @@ def test_centered_sticks_publish_zero(control, receiver, bridge):
 
 
 def test_deadband_boundaries_map_to_zero(control, receiver):
-    """CH1=1400 / CH3=1400 (inside 1350~1750) -> speed 0."""
+    """CH1=1500 / CH3=1500 (inside 1450~1550) -> speed 0."""
     _establish_manual(control, receiver)
-    _run(control, receiver, ch5=1000.0, ch1=1400.0, ch3=1400.0)
+    _run(control, receiver, ch5=1000.0, ch1=1500.0, ch3=1500.0)
 
     assert control.cmd_vel_history[-1] == (0.0, 0.0)
 
-    # Inclusive boundaries: exactly 1350 / 1750 are still inside the deadband.
-    _run(control, receiver, ch5=1000.0, ch1=1350.0, ch3=1750.0)
+    # Inclusive boundaries: exactly 1450 / 1550 are still inside the deadband.
+    _run(control, receiver, ch5=1000.0, ch1=1450.0, ch3=1550.0)
     assert control.cmd_vel_history[-1] == (0.0, 0.0)
 
 
@@ -186,7 +193,7 @@ def test_ch1_reverse_is_negative(control, receiver):
     """CH1 < 1350 -> reverse (linear.x < 0)."""
     _establish_manual(control, receiver)
     _run(control, receiver, ch5=1000.0, ch1=1150.0)
-    assert control.cmd_vel_history[-1][0] == pytest.approx(-0.18)
+    assert control.cmd_vel_history[-1][0] == pytest.approx(-0.2)
 
 
 def test_ch1_full_scale_clamps_to_max(control, receiver):
@@ -200,7 +207,7 @@ def test_ch3_right_turn_is_negative(control, receiver):
     """CH3 > 1750 -> right turn (angular.z < 0)."""
     _establish_manual(control, receiver)
     _run(control, receiver, ch5=1000.0, ch3=1800.0)
-    assert control.cmd_vel_history[-1][1] == pytest.approx(-0.56)
+    assert control.cmd_vel_history[-1][1] == pytest.approx(-0.8 * 5 / 9)
 
 
 def test_ch3_full_scale_left_clamps_to_max(control, receiver):
@@ -246,7 +253,7 @@ def test_ch5_transition_value_keeps_manual_mapping(control, receiver):
     _run(control, receiver, ch5=1500.0, ch1=1800.0)
 
     assert control.mode == RCControl.MODE_MANUAL
-    assert control.cmd_vel_history[-1] == (0.21, 0.0)
+    assert control.cmd_vel_history[-1] == pytest.approx((1 / 6, 0.0))
 
 
 def test_invalid_params_rejected():
@@ -270,7 +277,7 @@ def test_manual_active_and_last_cmd_vel_properties(control, receiver):
     _establish_manual(control, receiver, ch1=1800.0, ch3=1150.0)
 
     assert control.manual_active is True
-    assert control.last_cmd_vel == (pytest.approx(0.21), pytest.approx(0.48))
+    assert control.last_cmd_vel == (pytest.approx(1 / 6), pytest.approx(0.8 * 2 / 3))
 
 
 class ScalarReadReceiver:
@@ -293,7 +300,7 @@ def test_single_channel_receiver_api_fallback():
 
     assert control.mode == RCControl.MODE_MANUAL
     assert control.cancel_goal_calls == 1
-    assert control.last_cmd_vel[0] == pytest.approx(0.21)
+    assert control.last_cmd_vel[0] == pytest.approx(1 / 6)
 
 
 class FailingPublishBridge(RecordingBridge):
@@ -307,7 +314,7 @@ def test_bridge_publish_exception_is_swallowed(control, receiver):
     _establish_manual(control, receiver, ch1=1800.0)
 
     assert control.mode == RCControl.MODE_MANUAL
-    assert control.last_cmd_vel[0] == pytest.approx(0.21)  # still recorded
+    assert control.last_cmd_vel[0] == pytest.approx(1 / 6)  # still recorded
 
 
 class FailingCancelBridge(RecordingBridge):
