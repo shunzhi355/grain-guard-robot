@@ -86,8 +86,8 @@ FULL_ON_OFF_BIT = 0x10
 
 CHANNEL_COUNT = 16
 COUNTS_PER_CYCLE = 4096
-#: 振荡器频率用实测校准值（sampling_params.PCA9685_OSCILLATOR_HZ，
-#: 标称 25MHz，实机 +10.4% 偏差）。否则输出频率偏离 50Hz。
+#: 振荡器频率统一取 sampling_params.PCA9685_OSCILLATOR_HZ，
+#: 当前使用标称 25MHz；实际输出频率和脉宽仍需实测确认。
 OSCILLATOR_HZ = PCA9685_OSCILLATOR_HZ
 DEFAULT_FREQUENCY_HZ = PCA9685_FREQUENCY_HZ
 
@@ -391,9 +391,8 @@ class _BaseMechanismController:
     def __init__(self, pca9685=None, mock_mode: bool = True) -> None:
         self.pca9685 = pca9685
         self.mock_mode = bool(mock_mode)
-        self._lock = threading.RLock()       # 保护 I2C 写 + 运行/定时状态
+        self._lock = threading.Lock()        # 保护 I2C 写 + _running
         self._running: set = set()           # 运行中通道集合
-        self._bin_timers: dict[int, threading.Timer] = {}
         self._stop_flag = threading.Event()  # 急停/关闭标志
         self._shutdown = False
         # [(action_name, kwargs), ...] 按调用顺序记录
@@ -485,34 +484,28 @@ class _BaseMechanismController:
             raise ValueError(
                 f"unknown action {action!r}; expected open/close/stop"
             )
+        if self._stop_flag.is_set():
+            raise RuntimeError(
+                "controller is in emergency-stop state; call reset() to resume"
+            )
         if action == "stop":
-            with self._lock:
-                self._write_off(channel)
-                self._running.discard(channel)
-                self.action_history.append(
-                    ("actuate", {"channel": channel, "action": action,
-                                 "off": True, "duration": duration})
-                )
-            return
-        pulse = int(getattr(self, self.ACTION_TO_ATTR[action]))
-        with self._lock:
-            if self._stop_flag.is_set() or self._shutdown:
-                raise RuntimeError(
-                    "controller is in emergency-stop state; call reset() to resume"
-                )
-            # Track every energized output, including duration=None, so an
-            # emergency stop can always force the channel to FULL-OFF.
-            self._running.add(channel)
-            try:
-                self.set_pulse(channel, pulse)
-            except Exception:
-                self._running.discard(channel)
-                raise
+            self._write_off(channel)
             self.action_history.append(
                 ("actuate", {"channel": channel, "action": action,
-                             "pulse_us": pulse, "duration": duration})
+                             "off": True, "duration": duration})
             )
+            with self._lock:
+                self._running.discard(channel)
+            return
+        pulse = int(getattr(self, self.ACTION_TO_ATTR[action]))
+        self.set_pulse(channel, pulse)
+        self.action_history.append(
+            ("actuate", {"channel": channel, "action": action,
+                         "pulse_us": pulse, "duration": duration})
+        )
         if duration is not None and duration > 0:
+            with self._lock:
+                self._running.add(channel)
             threading.Thread(
                 target=self._auto_stop, args=(channel, duration), daemon=True
             ).start()
@@ -534,18 +527,11 @@ class _BaseMechanismController:
 
     # -- 急停 / 恢复 ------------------------------------------------------
     def emergency_stop(self) -> None:
-        """急停：取消仓门定时器并对所有已输出通道执行 FULL-OFF。"""
+        """急停：置停止标志，立即对运行中通道断电释放（full-off）并清空运行集合。"""
         self._stop_flag.set()
         with self._lock:
-            timers = list(self._bin_timers.values())
-            self._bin_timers.clear()
-            # CH0-CH7 are owned by the mechanism controller.  Always force
-            # every owned channel off; this remains safe even if a future
-            # action forgets to register itself in _running.
-            running = sorted(self._running | set(CHANNELS.values()))
+            running = list(self._running)
             self._running.clear()
-        for timer in timers:
-            timer.cancel()
         self.action_history.append(("emergency_stop", {"channels": running}))
         for ch in running:
             try:
@@ -590,23 +576,13 @@ class _BaseMechanismController:
         不走品种参数 ``throttle_open/close`` —— 这些通道的标定值与
         三仓/输送不同（见 sampling_params 的 ``*_PULSE_*`` 常量）。
         """
-        with self._lock:
-            if self._stop_flag.is_set() or self._shutdown:
-                raise RuntimeError(
-                    "controller is in emergency-stop state; call reset() to resume"
-                )
-            # duration=None is still an actively driven motor output.
-            self._running.add(channel)
-            try:
-                self.set_pulse(channel, pulse_us)
-            except Exception:
-                self._running.discard(channel)
-                raise
-            self.action_history.append(
-                (name, {"channel": channel, "pulse_us": pulse_us,
-                        "duration": duration})
-            )
+        self.set_pulse(channel, pulse_us)
+        self.action_history.append(
+            (name, {"channel": channel, "pulse_us": pulse_us, "duration": duration})
+        )
         if duration is not None and duration > 0:
+            with self._lock:
+                self._running.add(channel)
             threading.Thread(
                 target=self._auto_stop, args=(channel, duration), daemon=True
             ).start()
@@ -633,47 +609,17 @@ class _BaseMechanismController:
                 f"unknown bin depth {depth!r}; expected shallow/mid/deep"
             )
         channel = CHANNELS[key]
-        self._cancel_bin_timer(channel)
         self._act_pulse("open_bin", channel, BIN_OPEN_PULSE, None)
         if duration is not None and duration > 0:
-            timer = None
-
-            def auto_close() -> None:
-                self._auto_close_bin(channel, timer)
-
-            timer = threading.Timer(duration, auto_close)
-            timer.daemon = True
-            with self._lock:
-                if self._stop_flag.is_set() or self._shutdown:
-                    return
-                self._bin_timers[channel] = timer
-                timer.start()
-
-    def _cancel_bin_timer(self, channel: int) -> None:
-        """取消指定仓门尚未触发的自动关仓。"""
-        with self._lock:
-            timer = self._bin_timers.pop(channel, None)
-        if timer is not None:
-            timer.cancel()
-
-    def _auto_close_bin(
-        self, channel: int, timer: threading.Timer | None = None
-    ) -> None:
-        """自动关同仓，并在关仓时长结束后执行 FULL-OFF。"""
-        with self._lock:
-            if timer is not None and self._bin_timers.get(channel) is not timer:
-                return
-            self._bin_timers.pop(channel, None)
-            if self._stop_flag.is_set() or self._shutdown:
-                return
-        close_duration = get_grain_params(self.current_grain or "")["close_duration"]
-        try:
-            self._act_pulse(
-                "close_bin_auto", channel, BIN_CLOSE_PULSE, close_duration
+            timer = threading.Timer(
+                duration, self._auto_close_bin, args=(channel,)
             )
-        except RuntimeError as exc:
-            if "emergency-stop" not in str(exc):
-                raise
+            timer.daemon = True
+            timer.start()
+
+    def _auto_close_bin(self, channel: int) -> None:
+        """开仓后的自动关门：对同一仓通道写 BIN_CLOSE_PULSE=2000us。"""
+        self._act_pulse("close_bin_auto", channel, BIN_CLOSE_PULSE, None)
 
     def close_bin(self, depth: str = "mid", duration=None) -> None:
         """关仓，depth 取值 shallow/mid/deep。独立标定 BIN_CLOSE_PULSE=1800us。"""
@@ -682,9 +628,7 @@ class _BaseMechanismController:
             raise ValueError(
                 f"unknown bin depth {depth!r}; expected shallow/mid/deep"
             )
-        channel = CHANNELS[key]
-        self._cancel_bin_timer(channel)
-        self._act_pulse("close_bin", channel, BIN_CLOSE_PULSE, duration)
+        self._act_pulse("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
 
     def clamp(self, duration=None) -> None:
         """夹紧（CH5 独立标定：1900us）。"""
@@ -888,23 +832,19 @@ class _BaseMechanismController:
 
     # -- 关闭 -------------------------------------------------------------
     def shutdown(self) -> None:
-        """取消仓门定时器并对所有已输出通道执行 FULL-OFF。幂等。"""
-        self._stop_flag.set()
+        """停止所有运行中通道并取消后台线程。幂等。"""
         with self._lock:
             if self._shutdown:
                 return
             self._shutdown = True
-            timers = list(self._bin_timers.values())
-            self._bin_timers.clear()
-            running = sorted(self._running | set(CHANNELS.values()))
+            running = list(self._running)
             self._running.clear()
-        for timer in timers:
-            timer.cancel()
         for ch in running:
             try:
                 self._write_off(ch)
             except Exception:  # noqa: BLE001 - 关闭写入尽力而为
                 pass
+        self._stop_flag.set()
 
 
 class MechanismController(_BaseMechanismController):

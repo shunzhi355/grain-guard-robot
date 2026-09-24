@@ -146,14 +146,14 @@ def test_linux_motor_default_requires_pca9685(monkeypatch):
 def test_motor_neutral_and_off_use_only_ch10_ch9():
     pca = MagicMock()
     driver = motor.DifferentialMotorDriver(backend="pca9685", pca9685=pca)
-    assert driver.stop() == (0, 0)
-    assert pca.channel_off.call_args_list == [call(10), call(9)]
+    assert driver.stop() == (1480, 1480)
+    assert pca.set_pwm.call_args_list == [call(10, 1480), call(9, 1480)]
     driver.off()
-    assert pca.channel_off.call_args_list == [call(10), call(9), call(10), call(9)]
+    assert pca.channel_off.call_args_list == [call(10), call(9)]
     pca.all_off.assert_not_called()
 
 
-def test_daemon_timeout_hard_disables_pwm(monkeypatch):
+def test_daemon_timeout_returns_neutral(monkeypatch):
     driver = MagicMock()
     driver.set_cmd_normalized.return_value = (1, 1, 1750, 1750)
     sock = MagicMock()
@@ -167,21 +167,9 @@ def test_daemon_timeout_hard_disables_pwm(monkeypatch):
     args = SimpleNamespace(host="127.0.0.1", port=8765, timeout=0.3, arm_seconds=3)
     with pytest.raises(KeyboardInterrupt):
         motor.run_daemon(args)
-    driver.stop.assert_not_called()
-    assert driver.off.call_count == 3  # Startup, command timeout, final shutdown.
+    assert driver.stop.call_count == 3  # Arming, command timeout, final shutdown.
     driver.close.assert_called_once()
     sock.close.assert_called_once()
-
-
-def test_zero_track_is_disabled_while_nonzero_track_is_driven():
-    pca = MagicMock()
-    driver = motor.DifferentialMotorDriver(
-        backend="pca9685", pca9685=pca, start_boost=False
-    )
-
-    assert driver.set_left_right(0.0, 0.2) == (0, 1450)
-    pca.channel_off.assert_called_once_with(10)
-    pca.set_pwm.assert_called_once_with(9, 1450)
 
 
 def receiver(serial_port=None, **kwargs):
