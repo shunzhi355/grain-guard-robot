@@ -54,11 +54,11 @@ class GoalController:
         # the chassis heading disagrees with odom yaw.
         self.heading_offset = float(rospy.get_param("~heading_offset", 0.0))
 
-        # UDP motor daemon.
+        # Transport: the production chassis uses the one-way USB serial bridge.
         self.motor_host = rospy.get_param("~motor_host", "127.0.0.1")
         self.motor_port = int(rospy.get_param("~motor_port", 8765))
         self.chassis_backend = rospy.get_param(
-            "~chassis_backend", os.getenv("CHASSIS_BACKEND", "udp")
+            "~chassis_backend", os.getenv("CHASSIS_BACKEND", "serial")
         )
         if self.chassis_backend not in ("serial", "udp"):
             raise ValueError("chassis_backend must be serial or udp")
@@ -146,11 +146,11 @@ class GoalController:
         rospy.on_shutdown(self.on_shutdown)
         self.publish_status("WAIT_ODOM")
         rospy.loginfo(
-            "goal_controller ready: odom=%s goal=%s motor=udp://%s:%d",
+            "goal_controller ready: odom=%s goal=%s backend=%s motor=%s",
             self.odom_topic,
             self.goal_topic,
-            self.motor_host,
-            self.motor_port,
+            self.chassis_backend,
+            "/chassis/effort" if self.chassis_backend == "serial" else str(self.motor_addr),
         )
         rospy.logwarn(
             "Controller outputs normalized motor effort, not physical velocity. "

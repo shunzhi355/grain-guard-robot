@@ -1,7 +1,7 @@
 """ROS1 navigation -> PC USB-TTL -> STM32 USART2, 115200 8N1.
 
-An explicit arm (normally from a new navigation goal) is required after every
-stop, link loss or mode change. Heartbeats never extend a motion command.
+One-way setpoints; MCU enforces RC ownership and the command watchdog.
+Local arm gates navigation commands; it is not MCU enable confirmation.
 """
 import json
 import math
@@ -71,6 +71,11 @@ class ChassisNode:
             if self.armed and not self.obstacle:
                 self.command = effort
                 self.command_time = time.monotonic()
+                if effort == (0, 0) and self.link:
+                    try:
+                        self.link.stream_control(p.AUTO_STOP)
+                    except (OSError, ChassisError):
+                        self.disconnect()
 
     def on_obstacle(self, msg):
         with self.lock:
@@ -85,7 +90,7 @@ class ChassisNode:
             self.command = None
             if self.link:
                 try:
-                    self.link.send(p.AUTO_STOP)
+                    self.link.stream_control(p.AUTO_STOP)
                 except (OSError, ChassisError):
                     self.disconnect()
 
@@ -95,32 +100,20 @@ class ChassisNode:
                 if not self.link:
                     raise ChassisError("serial link unavailable")
                 if kind == p.AUTO_ARM:
-                    status = self.link.status
-                    if (self.obstacle or not status or
-                            time.monotonic() - self.link.status_time > 0.2 or
-                            status["mode"] != 2 or status["faults"] or
-                            status["flags"] & 2 or not status["flags"] & 4):
-                        raise ChassisError("requires fresh healthy AUTO status and no obstacle")
-                    # A new goal replaces the previous enable period.
-                    self.link.renew_session()
-                    self.link.token_request(p.AUTO_ARM)
+                    if self.obstacle:
+                        raise ChassisError("obstacle blocks navigation")
+                    self.link.stream_control(p.AUTO_STOP)
                     self.armed = True
                     self.command = None
                     self.arm_time = time.monotonic()
-                    self.link.effort(0, 0)
+                    self.link.stream_effort(0, 0)
                 else:
                     self.armed = False
                     self.command = None
-                    if kind in (p.CLEAR_ESTOP, p.RECOVER):
-                        self.link.token_request(kind)
-                    elif kind == p.AUTO_STOP:
-                        self.link.send(kind)
-                    else:
-                        self.link.request(kind)
+                    self.link.stream_control(kind)
                     self.cancel_pub.publish(self.Empty())
-                return self.TriggerResponse(success=True, message=(
-                    "stop frame sent; execution not confirmed" if kind == p.AUTO_STOP
-                    else "MCU acknowledged"))
+                return self.TriggerResponse(success=True,
+                    message="local request accepted; MCU execution is unconfirmed")
             except (OSError, ChassisError) as exc:
                 self.disconnect()
                 return self.TriggerResponse(success=False, message=str(exc))
@@ -146,32 +139,27 @@ class ChassisNode:
                                      exclusive=True)
                 self.link = ChassisSerial(port)
                 port.reset_input_buffer()
-                self.link.request(p.HELLO)
                 self.armed = False
                 self.command = None
                 self.connected_time = time.monotonic()
-            self.link.receive()
             now = time.monotonic()
-            status = self.link.status
-            if now - max(self.link.status_time, self.connected_time) > 0.2:
-                raise ChassisError("MCU status timeout")
-            if status:
-                self.status_pub.publish(self.String(data=json.dumps(dict(status, connected=True))))
-                mode = {1: "manual", 2: "auto"}.get(status["mode"], "")
-                self.mode_pub.publish(self.String(data=mode if status["flags"] & 4 else ""))
+            self.status_pub.publish(self.String(data=json.dumps({
+                "port_open": True, "communication": "one_way", "execution_confirmed": False,
+                "navigation_enabled": self.armed})))
+            # No RC mode is inferred: in one-way operation only the MCU knows it.
             if self.armed:
-                if (not status or status["mode"] != 2 or status["faults"] or
-                        status["flags"] & 2 or not status["flags"] & 4):
+                if now - (self.command_time if self.command is not None else self.arm_time) > 0.2:
+                    # A completed goal already sent zero; preserve ARRIVED for
+                    # the sampling workflow instead of publishing cancellation.
+                    cancel = self.command != (0, 0)
                     self.stop()
-                    self.cancel_pub.publish(self.Empty())
-                elif now - (self.command_time if self.command is not None else self.arm_time) > 0.2:
-                    self.stop()
-                    self.cancel_pub.publish(self.Empty())
+                    if cancel:
+                        self.cancel_pub.publish(self.Empty())
                 elif self.command is not None:
-                    self.link.effort(*self.command)
-            elif now - getattr(self, "heartbeat_time", 0) > 0.1:
-                self.link.send(p.HEARTBEAT)
-                self.heartbeat_time = now
+                    if self.command == (0, 0):
+                        self.link.stream_control(p.AUTO_STOP)
+                    else:
+                        self.link.stream_effort(*self.command)
 
     def run(self):
         try:

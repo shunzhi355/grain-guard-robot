@@ -96,7 +96,7 @@ def test_handshake_arm_ack_updates_token_before_effort():
     assert link.boot == 42
     assert struct.unpack("<Ihh", mcu.sent[-1].payload) == (8, -500, 250)
     link.close()
-    assert mcu.sent[-1].kind == p.AUTO_STOP
+    assert mcu.sent[-1].kind == p.STREAM_CONTROL
     assert mcu.closed
 
 
@@ -156,27 +156,26 @@ def test_stale_navigation_stops_even_with_healthy_status(monkeypatch):
     node.command_time -= 0.21
     node.tick()
     assert not node.armed and node.command is None
-    node.link.send.assert_called_with(p.AUTO_STOP)
-    node.link.effort.assert_not_called()
+    node.link.stream_control.assert_called_with(p.AUTO_STOP)
+    node.link.stream_effort.assert_not_called()
     node.cancel_pub.publish.assert_called_once()
 
 
-def test_manual_takeover_cancels_and_drops_commands(monkeypatch):
+def test_missing_feedback_does_not_block_stream(monkeypatch):
     monkeypatch.setitem(sys.modules, "serial", SimpleNamespace())
     node = node_stub()
     node.link.status["mode"] = 1
     node.tick()
-    node.set_command(1, 0)
-    assert not node.armed and node.command is None
-    node.link.effort.assert_not_called()
+    assert node.armed
+    node.link.stream_effort.assert_called_once_with(400, 0)
 
 
 def test_arm_requires_healthy_status_and_does_not_reuse_motion():
     node = node_stub()
     result = node.service(p.AUTO_ARM)
     assert result.success and node.armed and node.command is None
-    node.link.effort.assert_called_once_with(0, 0)
-    node.link.token_request.assert_called_once_with(p.AUTO_ARM)
+    node.link.stream_effort.assert_called_once_with(0, 0)
+    node.link.request.assert_not_called()
 
 
 def test_obstacle_blocks_arm_and_does_not_resume():
@@ -202,9 +201,8 @@ def test_status_loss_detected_with_fresh_navigation(monkeypatch):
     node = node_stub()
     node.link.status_time -= 0.21
     node.connected_time -= 0.21
-    with pytest.raises(ChassisError, match="status timeout"):
-        node.tick()
-    node.link.effort.assert_not_called()
+    node.tick()
+    node.link.stream_effort.assert_called_once_with(400, 0)
 
 
 def test_mcu_reboot_detected():
@@ -283,6 +281,119 @@ def test_new_goal_renews_session_before_arm():
 def test_stop_service_reports_sent_not_acknowledged():
     node = node_stub()
     result = node.service(p.AUTO_STOP)
-    assert result.success and "not confirmed" in result.message
-    node.link.send.assert_called_once_with(p.AUTO_STOP)
+    assert result.success and "unconfirmed" in result.message
+    node.link.stream_control.assert_called_once_with(p.AUTO_STOP)
     node.link.request.assert_not_called()
+
+
+def test_one_way_frames_need_no_reads_or_handshake():
+    mcu = MCU()
+    mcu.silent = True
+    mcu.read = lambda n: (_ for _ in ()).throw(AssertionError("unexpected read"))
+    link = ChassisSerial(mcu)
+    link.stream_effort(200, -50)
+    link.close()
+    assert [f.kind for f in mcu.sent] == [p.STREAM_EFFORT, p.STREAM_CONTROL]
+    assert struct.unpack("<hh", mcu.sent[0].payload) == (200, -50)
+    assert mcu.sent[1].payload == bytes([p.AUTO_STOP])
+
+
+def test_navigation_zero_immediately_sends_stop_without_disarming_local_gate():
+    node = node_stub()
+    node.set_command(0, 0)
+    node.link.stream_control.assert_called_once_with(p.AUTO_STOP)
+    assert node.armed and node.command == (0, 0)
+
+
+def test_zero_navigation_is_not_reissued_as_arming_motion(monkeypatch):
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace())
+    node = node_stub()
+    node.command = (0, 0)
+    node.tick()
+    node.link.stream_control.assert_called_once_with(p.AUTO_STOP)
+    node.link.stream_effort.assert_not_called()
+
+
+def test_arrival_idle_preserves_workflow_status(monkeypatch):
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace())
+    node = node_stub()
+    node.command = (0, 0)
+    node.command_time -= 0.21
+    node.tick()
+    assert not node.armed
+    node.link.stream_control.assert_called_once_with(p.AUTO_STOP)
+    node.cancel_pub.publish.assert_not_called()
+
+
+@pytest.mark.parametrize("ending", ["arrived", "cancel", "odom_timeout", "obstacle"])
+def test_navigation_to_one_way_wire_and_stop(monkeypatch, ending):
+    import importlib.util
+    from pathlib import Path
+
+    class Stamp:
+        def __init__(self, value=0): self.value = value
+        @staticmethod
+        def now(): return Stamp(10)
+        def __sub__(self, other): return Stamp(self.value - other.value)
+        def __eq__(self, other): return self.value == other.value
+        def to_sec(self): return self.value
+
+    twist = lambda: SimpleNamespace(linear=SimpleNamespace(x=0.0), angular=SimpleNamespace(z=0.0))
+    ros = MagicMock()
+    ros.get_param.side_effect = lambda name, default=None: default
+    ros.Time = Stamp
+    ros.ServiceException = RuntimeError
+    monkeypatch.setenv("CHASSIS_BACKEND", "serial")
+    for name, module in {
+        "rospy": ros,
+        "geometry_msgs.msg": SimpleNamespace(Twist=twist, PoseStamped=object),
+        "nav_msgs.msg": SimpleNamespace(Odometry=object),
+        "std_msgs.msg": SimpleNamespace(Bool=object, Empty=object, String=lambda data: data),
+        "std_srvs.srv": SimpleNamespace(Trigger=object),
+        "tf.transformations": SimpleNamespace(euler_from_quaternion=lambda q: (0, 0, 0)),
+        "serial": SimpleNamespace(),
+    }.items(): monkeypatch.setitem(sys.modules, name, module)
+    path = Path(__file__).resolve().parents[1] / "dipan" / "goal_controller.py"
+    spec = importlib.util.spec_from_file_location("navigation_integration", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    goal = module.GoalController()
+    node = node_stub()
+    wire = MCU()
+    wire.silent = True
+    wire.read = lambda n: (_ for _ in ()).throw(AssertionError("one-way must not read"))
+    node.link = ChassisSerial(wire)
+    goal.effort_pub = SimpleNamespace(publish=node.on_effort)
+    goal.arm_chassis = lambda: node.service(p.AUTO_ARM)
+    goal.pose = (0, 0, 0)
+    goal.odom_frame = "map"
+    goal.last_odom_receive = Stamp(10)
+    msg = SimpleNamespace(header=SimpleNamespace(frame_id="map"), pose=SimpleNamespace(
+        position=SimpleNamespace(x=2, y=0), orientation=SimpleNamespace(x=0,y=0,z=0,w=1)))
+    try:
+        goal.goal_callback(msg)
+        goal.control_step()
+        node.tick()
+        assert wire.sent[-1].kind == p.STREAM_EFFORT
+        assert struct.unpack("<hh", wire.sent[-1].payload)[0] > 0
+        if ending == "arrived":
+            goal.pose = (2, 0, 0)
+            goal.control_step()
+            assert goal.state == "ARRIVED"
+        elif ending == "cancel":
+            goal.cancel_callback(None)
+            node.stop()  # Both nodes subscribe to /cancel_goal.
+            assert goal.goal is None
+        elif ending == "odom_timeout":
+            goal.last_odom_receive = Stamp(9)
+            goal.control_step()
+            assert goal.state == "FAULT"
+        else:
+            goal.obstacle_callback(SimpleNamespace(data=True))
+            node.on_obstacle(SimpleNamespace(data=True))
+            goal.control_step()
+        assert wire.sent[-1].kind == p.STREAM_CONTROL
+        assert wire.sent[-1].payload == bytes([p.AUTO_STOP])
+        assert all(f.kind in (p.STREAM_EFFORT, p.STREAM_CONTROL) for f in wire.sent)
+    finally:
+        goal.sock.close()

@@ -91,8 +91,18 @@ class ChassisSerial:
         self.status_time = float("-inf")
         self.request(p.HELLO)
 
+    def stream_effort(self, forward, turn):
+        if not all(isinstance(v, int) and -1000 <= v <= 1000 for v in (forward, turn)):
+            raise ValueError("effort must be an integer in [-1000, 1000]")
+        return self.send(p.STREAM_EFFORT, struct.pack("<hh", forward, turn))
+
+    def stream_control(self, kind):
+        if kind not in (p.AUTO_STOP, p.ESTOP, p.CLEAR_ESTOP, p.RECOVER):
+            raise ValueError("unsupported stream control")
+        return self.send(p.STREAM_CONTROL, bytes((kind,)))
+
     def close(self):
         try:
-            self.send(p.AUTO_STOP)
+            self.stream_control(p.AUTO_STOP)
         finally:
             self.serial.close()

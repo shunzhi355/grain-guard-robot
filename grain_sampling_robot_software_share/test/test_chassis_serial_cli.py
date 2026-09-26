@@ -41,13 +41,13 @@ class FakeLink:
         if kind == p.AUTO_STOP:
             self.status.update(state=2, flags=4, left=0, right=0, pwm_left=1500, pwm_right=1500)
 
-    send = request
+    stream_control = request
 
     def token_request(self, kind):
         self.commands.append(kind)
         self.status.update(state=3, flags=5)
 
-    def effort(self, forward, turn):
+    def stream_effort(self, forward, turn):
         self.sequence += 1
         left, right = forward - turn, forward + turn
         self.status.update(left=left, right=right, pwm_left=1500 + int(left / 4),
@@ -60,33 +60,23 @@ class FakeLink:
 def test_motion_directions_and_stop_sent(direction, expected, capsys):
     link = FakeLink()
     outputs = []
-    original = link.effort
+    original = link.stream_effort
 
     def effort(forward, turn):
         original(forward, turn)
         outputs.append((link.status["left"], link.status["right"]))
 
-    link.effort = effort
+    link.stream_effort = effort
     cli.move(link, direction, 0.2, 0.3, link.clock, link.sleep)
     assert outputs and all(output == expected for output in outputs)
-    assert link.commands == [p.AUTO_ARM, p.AUTO_STOP]
+    assert link.commands == [p.AUTO_STOP, p.AUTO_STOP]
     assert link.status["left"] == link.status["right"] == 0
     assert "发送结束" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("change", [dict(mode=1), dict(faults=1), dict(flags=6), dict(ch1=1600)])
-def test_unsafe_initial_state_never_arms(change):
-    link = FakeLink()
-    link.status.update(change)
-    with pytest.raises(ChassisError):
-        cli.move(link, "forward", 0.2, 0.3, link.clock, link.sleep)
-    assert p.AUTO_ARM not in link.commands
-    assert link.sequence == 0
-
-
 def test_missing_motion_feedback_does_not_block_stream(capsys):
     link = FakeLink()
-    link.effort = lambda *args: None
+    link.stream_effort = lambda *args: None
     cli.move(link, "forward", 0.2, 0.3, link.clock, link.sleep)
     assert "不代表单片机执行或实际运动已验证" in capsys.readouterr().out
     assert link.commands[-1] == p.AUTO_STOP

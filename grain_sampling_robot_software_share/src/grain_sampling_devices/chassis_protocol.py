@@ -4,6 +4,7 @@ import struct
 from dataclasses import dataclass
 
 HELLO, HELLO_ACK, AUTO_ARM, AUTO_DISARM, SET_EFFORT, AUTO_STOP, ESTOP, CLEAR_ESTOP, HEARTBEAT, STATUS, ACK, NACK, RECOVER = range(1, 14)
+STREAM_EFFORT, STREAM_CONTROL = 14, 15
 STATUS_STRUCT = struct.Struct("<IIIBBBBIIIHHHhhHHIIBB")
 STATUS_KEYS = ("boot", "uptime_ms", "epoch", "state", "mode", "flags", "faults",
                "motion_sequence", "rc_age_ms", "motion_age_ms", "ch1", "ch3", "ch8",
