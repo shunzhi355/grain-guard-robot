@@ -77,10 +77,10 @@ CLAMP_PULSE_OPEN: float = 1200.0
 TIGHTEN_PULSE_CLOSE: float = 1300.0
 TIGHTEN_PULSE_OPEN: float = 1900.0
 
-#: 三仓（CH2/3/4）开关仓独立标定（us）：开仓门=1000，关仓门=2000
+#: 三仓（CH2/3/4）开关仓独立标定（us）：开仓门=1200，关仓门=1800
 #: （2026-08-31 用户实机标定）。与品种无关，不走 throttle_open/close。
-BIN_OPEN_PULSE: float = 1000.0
-BIN_CLOSE_PULSE: float = 2000.0
+BIN_OPEN_PULSE: float = 1200.0
+BIN_CLOSE_PULSE: float = 1800.0
 
 #: 全局脉宽合法范围（us）：写入校验用（set_pwm/actuate 时钳制到该范围）。
 PULSE_MIN_US: float = 1000.0
