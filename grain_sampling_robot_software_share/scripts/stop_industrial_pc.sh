@@ -11,6 +11,8 @@ stop_pattern() {
 }
 
 # RC and cmd_vel bridges send a final stop while the motor daemon is alive.
+stop_pattern 'goal_controller.p[y]'
+stop_pattern 'grain_sampling_workflow.chassis_nod[e]'
 stop_pattern 'grain_sampling_workflow.rc_nod[e]'
 stop_pattern 'cmd_vel_to_moto[r]'
 stop_pattern 'grain_sampling_workflow.mechanism_nod[e]'

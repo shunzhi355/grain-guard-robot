@@ -2,13 +2,14 @@
 """Point-goal controller for the encoderless differential tracked chassis.
 
 The node closes the position loop with FAST-LIO odometry and sends normalized
-forward/turn efforts to motor_driver.py's UDP daemon.  The values sent to the
-daemon are dimensionless; they are deliberately not advertised as m/s or rad/s.
+forward/turn efforts through /chassis/effort (serial backend) or the legacy UDP
+daemon. These efforts are dimensionless, not m/s or rad/s.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import socket
 from typing import Optional, Tuple
 
@@ -56,6 +57,11 @@ class GoalController:
         # UDP motor daemon.
         self.motor_host = rospy.get_param("~motor_host", "127.0.0.1")
         self.motor_port = int(rospy.get_param("~motor_port", 8765))
+        self.chassis_backend = rospy.get_param(
+            "~chassis_backend", os.getenv("CHASSIS_BACKEND", "udp")
+        )
+        if self.chassis_backend not in ("serial", "udp"):
+            raise ValueError("chassis_backend must be serial or udp")
 
         # Point controller. All efforts below are normalized, not physical speed.
         self.arrival_distance = float(rospy.get_param("~arrival_distance", 0.12))
@@ -124,6 +130,11 @@ class GoalController:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.motor_addr = (self.motor_host, self.motor_port)
+        self.effort_pub = None
+        if self.chassis_backend == "serial":
+            from std_srvs.srv import Trigger
+            self.effort_pub = rospy.Publisher("/chassis/effort", Twist, queue_size=1)
+            self.arm_chassis = rospy.ServiceProxy("/chassis/arm", Trigger)
 
         self.status_pub = rospy.Publisher("~status", String, queue_size=10, latch=True)
         self.cmd_debug_pub = rospy.Publisher("~normalized_cmd", Twist, queue_size=10)
@@ -243,6 +254,16 @@ class GoalController:
                 self.odom_frame,
             )
             return
+
+        if self.chassis_backend == "serial":
+            try:
+                result = self.arm_chassis()
+                if not result.success:
+                    self.enter_fault("chassis_arm: " + result.message)
+                    return
+            except rospy.ServiceException as exc:
+                self.enter_fault("chassis_arm: " + str(exc))
+                return
 
         self.goal = (gx, gy)
         self.goal_yaw = float(goal_yaw)
@@ -406,7 +427,12 @@ class GoalController:
         self._stop_state = None  # 一旦再次驱动, 下次进入停状态需重新发 stop
         payload = f"cmd {forward:.4f} {turn:.4f}"
         try:
-            self.sock.sendto(payload.encode("utf-8"), self.motor_addr)
+            if self.effort_pub is None:
+                self.sock.sendto(payload.encode("utf-8"), self.motor_addr)
+            else:
+                command = Twist()
+                command.linear.x, command.angular.z = forward, turn
+                self.effort_pub.publish(command)
         except OSError as exc:
             rospy.logerr_throttle(1.0, "Failed to send motor command: %s", exc)
 
@@ -419,7 +445,10 @@ class GoalController:
 
     def send_stop(self) -> None:
         try:
-            self.sock.sendto(b"stop", self.motor_addr)
+            if self.effort_pub is None:
+                self.sock.sendto(b"stop", self.motor_addr)
+            else:
+                self.effort_pub.publish(Twist())
         except OSError:
             pass
         self.last_forward = 0.0

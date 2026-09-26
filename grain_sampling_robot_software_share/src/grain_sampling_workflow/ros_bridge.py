@@ -512,6 +512,8 @@ class SamplingBridge:
             logger.info("Emergency stop: chassis halted (cmd_vel=0, cancel_goal)")
 
         # Also try mechanism emergency stop
+        if os.environ.get("CHASSIS_BACKEND", "udp") == "serial":
+            self._call_trigger("/chassis/estop")
         mech_stopped = self._call_trigger("/mechanism/emergency_stop")
         return HAS_ROS or mech_stopped  # stub mode returns True
 

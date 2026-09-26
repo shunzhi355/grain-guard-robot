@@ -437,7 +437,7 @@ class MainWindow(QMainWindow):
             "GRAIN_SAMPLING_UI_RC_PUBLISH", "1"
         ).strip().lower() in ("0", "false", "no", "off")
         external_rc = self._has_external_rc_node()
-        if single_controller or external_rc:
+        if single_controller or external_rc or os.getenv("CHASSIS_BACKEND") == "serial":
             logger.info(
                 "独立 rc_node 模式 (env=%s external_rc=%s): UI 不建本地 RC 控制器, 仅镜像 /rc_mode",
                 single_controller,

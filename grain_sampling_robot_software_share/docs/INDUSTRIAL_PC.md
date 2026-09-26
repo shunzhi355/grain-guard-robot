@@ -1,6 +1,8 @@
 # ARM Linux 工控机硬件适配
 
-当前接线以本文件和根目录 WIRING.md 为准。工控机使用 `scripts/start_industrial_pc.sh`，旧 Orange Pi / Jetson 启动脚本仍供历史部署使用。
+底盘已改为工控机 USB1 经 USB-TTL 连接 STM32 USART2，当前接线及部署见
+[串口底盘说明](CHASSIS_SERIAL.md)。下文为旧工控机直接驱动底盘的历史方案。
+工控机使用 `scripts/start_industrial_pc.sh`，旧 Orange Pi / Jetson 启动脚本仍供历史部署使用。
 
 ## 默认映射
 
