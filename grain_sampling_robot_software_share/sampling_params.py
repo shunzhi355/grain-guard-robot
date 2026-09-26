@@ -49,10 +49,10 @@ PCA9685_I2C_BUS: int = 2
 PCA9685_I2C_ADDRESS: int = 0x40
 PCA9685_I2C_DEVICE: str = ""  # 本机断电/上电对照确认 PCA9685 位于 I2C2
 
-#: PCA9685 内部 RC 振荡器频率（Hz），先采用标称 25MHz。
-#: 当前 CH0–7 已实测有正常波形，沿用该次测试的25MHz换算；不套用旧板校准值。
+#: 恢复最早版本的实测校准值（2026-08-31两次示波器测量取平均）。
+#: PRESCALE=134 -> 49.75Hz；PRESCALE=133 -> 50.25Hz。
 #: 该参数同时用于 PWM 预分频和脉宽计数换算。
-PCA9685_OSCILLATOR_HZ: float = 25_000_000.0
+PCA9685_OSCILLATOR_HZ: float = 27_545_088.0
 
 #: PCA9685 PWM 目标频率（Hz）。默认 50（电调/舵机标准）。
 PCA9685_FREQUENCY_HZ: float = 50.0
@@ -94,9 +94,9 @@ ENABLE_UNWIRED_CHANNELS: bool = False
 #: 未知品种的兜底时序参数（秒）。
 DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "sampling_duration": 120.0,  # 扦样时长，默认 2 min
-    "convey_duration": 120.0,    # 正式流程：开始输粮到发出关仓命令的时长
-    "open_duration": 5.0,       # 正式流程开仓等待；旧 open_bin 服务仍用作自动关仓延时
-    "close_duration": 3.0,      # 发出关仓后等待此时长 + 0.5s，再停止输粮（无到位反馈）
+    "convey_duration": 120.0,    # 正式流程：输粮运行时长，停止输粮后关闭三仓
+    "open_duration": 5.0,       # 目标仓开门动作时长；旧 open_bin 服务用于自动关仓延时
+    "close_duration": 3.0,      # 非目标仓/收尾三仓关门时长；动作后回中位（无到位反馈）
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
     "unclamp_duration": 5.0,     # 松开时长（实机确认 5s）
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）

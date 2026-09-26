@@ -87,7 +87,7 @@ MODE2_OUTDRV = 0x04
 
 CHANNEL_COUNT = 16
 COUNTS_PER_CYCLE = 4096
-#: 与现场 CH0–7 波形测试共用唯一时钟参数，禁止另写旧板校准值。
+#: 按用户要求恢复最早版本的旧板实测校准值，统一从参数文件读取。
 OSCILLATOR_HZ = PCA9685_OSCILLATOR_HZ
 DEFAULT_FREQUENCY_HZ = PCA9685_FREQUENCY_HZ
 
@@ -153,7 +153,7 @@ def _serialized_i2c(method):
 class PCA9685:
     """PCA9685 16 通道 PWM 驱动（Linux i2c-dev 直连，无 adafruit）。
 
-    默认硬件：本机已验证 /dev/i2c-2, 0x40, 内部25MHz、50Hz。
+    默认硬件：本机已验证 /dev/i2c-2, 0x40, 旧板校准27.545088MHz、目标50Hz。
     注意：模块顶层不打开设备；``open()`` 是显式的（Windows 上会抛 RuntimeError）。
 
     高层接口 ``set_pwm(channel, pulse_us)`` 直接写脉宽(us)——
@@ -201,8 +201,9 @@ class PCA9685:
             ) from exc
         try:
             fcntl.ioctl(self.fd, I2C_SLAVE, self.address)
-            # Opening another user of the shared chip must not reset outputs.
+            # Restore first-revision oscillator initialization on every open.
             self.set_frequency(DEFAULT_FREQUENCY_HZ)
+            self.all_stop()  # 保留用户要求：初始化为持续中位，不恢复FULL_OFF。
         except Exception:
             self.close()
             raise
@@ -273,25 +274,6 @@ class PCA9685:
         """写入 PRESCALE 设置 PWM 频率（默认 50Hz），返回实际频率。"""
         prescale = frequency_to_prescale(frequency_hz)
         old_mode = self.read_register(MODE1)
-        if old_mode & MODE1_EXTCLK:
-            raise RuntimeError('PCA9685 EXTCLK is enabled; power-cycle logic supply before using the internal oscillator')
-        current_prescale = self.read_register(PRESCALE)
-        mode2 = self.read_register(MODE2)
-        if (not old_mode & MODE1_SLEEP and current_prescale == prescale
-                and old_mode & MODE1_AUTO_INCREMENT
-                and mode2 == MODE2_OUTDRV):
-            self.frequency_hz = prescale_to_frequency(prescale)
-            return self.frequency_hz
-
-        # Reject retiming active channels; all 16 outputs share one oscillator.
-        if not old_mode & MODE1_SLEEP:
-            for channel in range(CHANNEL_COUNT):
-                base = self._channel_base(channel)
-                on = self.read_register(base) | (self.read_register(base + 1) << 8)
-                off = self.read_register(base + 2) | (self.read_register(base + 3) << 8)
-                if not off & 0x1000 and (on & 0x1000 or (on & 0xFFF) != (off & 0xFFF)):
-                    raise RuntimeError("PCA9685 configuration differs while outputs are active; "
-                                       "stop all PWM users before changing frequency")
         sleep_mode = (old_mode & ~MODE1_RESTART) | MODE1_SLEEP
         awake_mode = (
             (old_mode & ~MODE1_SLEEP) | MODE1_AUTO_INCREMENT | MODE1_ALLCALL
@@ -302,16 +284,9 @@ class PCA9685:
         self.write_register(MODE1, awake_mode)
         time.sleep(0.005)
         self.write_register(MODE1, awake_mode | MODE1_RESTART)
-        # OCH=0 updates channel registers together on the transaction STOP.
-        self.write_register(MODE2, MODE2_OUTDRV)
-        actual = (self.read_register(MODE1), self.read_register(MODE2),
-                  self.read_register(PRESCALE))
-        if (actual[0] & (MODE1_SLEEP | MODE1_EXTCLK)
-                or not actual[0] & MODE1_AUTO_INCREMENT
-                or actual[1:] != (MODE2_OUTDRV, prescale)):
-            raise RuntimeError(f'PCA9685 configuration readback mismatch: {actual}')
-        self.frequency_hz = prescale_to_frequency(prescale)
-        return self.frequency_hz
+        self.write_register(MODE2, self.read_register(MODE2) | MODE2_OUTDRV)
+        self.frequency_hz = frequency_hz
+        return prescale_to_frequency(prescale)
 
     # -- 通道 PWM ---------------------------------------------------------
     @staticmethod
@@ -332,15 +307,10 @@ class PCA9685:
         """
         counts = pulse_us_to_counts(clamp_pulse_us(pulse_us), self.frequency_hz)
         base = self._channel_base(channel)
-        try:
-            self._write_channel(base, 0, 0, counts & 0xFF, (counts >> 8) & 0x0F)
-        except Exception:
-            # A failed readback must not leave a possibly wrong pulse running.
-            try:
-                self.channel_stop(channel)
-            except Exception:
-                logger.exception('PCA9685 CH%d failed to return to neutral after write failure', channel)
-            raise
+        self.write_register(base, 0)
+        self.write_register(base + 1, 0)
+        self.write_register(base + 2, counts & 0xFF)
+        self.write_register(base + 3, (counts >> 8) & 0x0F)
         return counts
 
     @_serialized_i2c
@@ -348,7 +318,7 @@ class PCA9685:
         """停止电机而不停止信号：持续输出固定 1500us 中位。"""
         base = self._channel_base(channel)
         counts = pulse_us_to_counts(PULSE_STOP, self.frequency_hz)
-        # Do not call set_pwm here: its error fallback calls channel_stop.
+        # 与原始逐寄存器写入逻辑一致；停止时不写FULL_OFF。
         self._write_channel(base, 0, 0, counts & 255, (counts >> 8) & 15)
 
     def channel_off(self, channel: int) -> None:
@@ -356,13 +326,9 @@ class PCA9685:
         self.channel_stop(channel)
 
     def _write_channel(self, base: int, *values: int) -> None:
-        payload = bytes((base, *values))
-        written = os.write(self._require_open(), payload)
-        if written != len(payload):
-            raise RuntimeError(f"short I2C channel write: expected {len(payload)}, wrote {written}")
-        actual = tuple(self.read_register(base + offset) for offset in range(4))
-        if actual != values:
-            raise RuntimeError(f'PCA9685 CH{(base - LED0_ON_L) // 4} readback mismatch: expected {values}, got {actual}')
+        # Restore the first revision's separate register transactions.
+        for offset, value in enumerate(values):
+            self.write_register(base + offset, value)
 
     @_serialized_i2c
     def all_stop(self) -> None:
@@ -666,12 +632,62 @@ class _BaseMechanismController:
             timer.cancel()
 
     def hold_bin_open(self, depth: str) -> None:
-        """正式流程：开门动作到时回1500us，保持开仓，不自动关门。"""
-        channel = CHANNELS[f"bin_{depth}"]
+        """正式流程：目标仓开门、其他两仓同时关门，到时各自回1500us。"""
+        if depth not in ("shallow", "mid", "deep"):
+            raise ValueError(f"unknown bin depth {depth!r}; expected shallow/mid/deep")
+        params = get_grain_params(self.current_grain or "")
+        with self._lock:
+            try:
+                for name in ("shallow", "mid", "deep"):
+                    selected = name == depth
+                    self._move_bin(
+                        "hold_bin_open" if selected else "close_bin",
+                        CHANNELS[f"bin_{name}"],
+                        BIN_OPEN_PULSE if selected else BIN_CLOSE_PULSE,
+                        float(params["open_duration" if selected else "close_duration"]),
+                    )
+            except Exception:
+                self.emergency_stop()
+                raise
+
+    def _move_bin(self, action: str, channel: int, pulse: float, duration) -> None:
+        """仓门定时回中位；新动作取消旧回调，避免重试/换仓被旧定时器截断。"""
         with self._lock:
             self._cancel_bin_timer(channel)
-            duration = float(get_grain_params(self.current_grain or "")["open_duration"])
-            self._act_pulse("hold_bin_open", channel, BIN_OPEN_PULSE, duration)
+            self.set_pulse(channel, pulse)
+            self.action_history.append(
+                (action, {"channel": channel, "pulse_us": pulse, "duration": duration})
+            )
+            if duration is not None and duration > 0:
+                timer = threading.Timer(
+                    duration, lambda: self._finish_bin_move(channel, timer)
+                )
+                timer.daemon = True
+                self._bin_timers[channel] = timer
+                timer.start()
+
+    def _finish_bin_move(self, channel: int, timer) -> None:
+        with self._lock:
+            if self._stop_flag.is_set() or self._bin_timers.get(channel) is not timer:
+                return
+            self._bin_timers.pop(channel, None)
+            try:
+                self.set_stop(channel)
+            except Exception:
+                logger.exception("Failed to return bin channel %s to neutral", channel)
+                self.emergency_stop()
+
+    def close_all_bins(self, duration=None) -> None:
+        """三仓同时按关门方向运行，动作到时保持1500us中位。"""
+        if duration is None:
+            duration = float(get_grain_params(self.current_grain or "")["close_duration"])
+        with self._lock:
+            try:
+                for depth in ("shallow", "mid", "deep"):
+                    self.close_bin(depth, duration=duration)
+            except Exception:
+                self.emergency_stop()
+                raise
 
     def _auto_close_bin(self, channel: int, timer=None) -> None:
         """旧服务自动关仓；过期或急停后的回调不再输出。"""
@@ -680,7 +696,7 @@ class _BaseMechanismController:
                 return
             self._bin_timers.pop(channel, None)
             duration = float(get_grain_params(self.current_grain or "")["close_duration"])
-            self._act_pulse("close_bin_auto", channel, BIN_CLOSE_PULSE, duration)
+            self._move_bin("close_bin_auto", channel, BIN_CLOSE_PULSE, duration)
 
     def close_bin(self, depth: str = "mid", duration=None) -> None:
         """关仓，depth 取值 shallow/mid/deep。独立标定 BIN_CLOSE_PULSE=1800us。"""
@@ -693,7 +709,7 @@ class _BaseMechanismController:
             self._cancel_bin_timer(CHANNELS[key])
             if duration is None:
                 duration = float(get_grain_params(self.current_grain or "")["close_duration"])
-            self._act_pulse("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
+            self._move_bin("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
 
     def clamp(self, duration=None) -> None:
         """夹紧（CH5 独立标定：1900us）。"""

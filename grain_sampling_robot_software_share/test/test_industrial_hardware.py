@@ -64,26 +64,26 @@ def chip(monkeypatch):
                            fcntl=fake_fcntl, os=fake_os)
 
 
-def test_second_open_preserves_every_output_and_frequency(chip):
+def test_open_reinitializes_clock_and_neutral_like_original(chip):
     first = md.PCA9685().open()
     first.set_pwm(0, 1200)
     first.set_pwm(8, 1750)
-    before = bytes(chip.registers)
+    unused = bytes(chip.registers[38:70])
     chip.writes.clear()
     second = md.PCA9685().open()
-    assert bytes(chip.registers) == before
-    assert chip.writes == []  # No oscillator sleep/restart and no all-off.
-    assert second.frequency_hz == md.prescale_to_frequency(chip.registers[md.PRESCALE])
+    assert bytes([md.PRESCALE, 133]) in chip.writes
+    assert list(chip.registers[6:10]) == [0, 0, 51, 1]
+    assert bytes(chip.registers[38:70]) == unused
+    assert second.frequency_hz == 50.0
     first.close()
     second.close()
 
 
-def test_commissioned_pwm_matches_confirmed_ch0_7_test(chip):
-    assert md.OSCILLATOR_HZ == 25_000_000
+def test_original_calibration_and_target_frequency_counts(chip):
+    assert md.OSCILLATOR_HZ == 27_545_088
     driver = md.PCA9685().open()
-    assert driver.device == '/dev/i2c-2'
-    assert driver.address == 0x40
-    assert chip.registers[md.PRESCALE] == 121
+    assert (driver.device, driver.address) == ('/dev/i2c-2', 0x40)
+    assert chip.registers[md.PRESCALE] == 133
     assert chip.registers[md.MODE1] & 0x7f == 0x21
     assert chip.registers[md.MODE2] == 0x04
     for ch in range(8):
@@ -92,32 +92,30 @@ def test_commissioned_pwm_matches_confirmed_ch0_7_test(chip):
         assert list(chip.registers[base:base + 4]) == [0, 0, 51, 1]
 
 
-def test_external_clock_rejected_before_any_writes(chip):
-    chip.registers[md.MODE1] |= md.MODE1_EXTCLK
-    with pytest.raises(RuntimeError, match='EXTCLK'):
-        md.PCA9685().open()
-    assert chip.writes == []
-
-
-def test_inverted_output_mode_is_corrected_when_inactive(chip):
-    chip.registers[md.MODE2] = 0x14
+def test_original_initialization_always_wakes_oscillator(chip):
     driver = md.PCA9685().open()
-    assert chip.registers[md.MODE2] == 0x04
+    chip.writes.clear()
+    driver.set_frequency(50)
+    assert chip.writes == [
+        bytes([md.MODE1, 0x31]), bytes([md.PRESCALE, 133]),
+        bytes([md.MODE1, 0xa1]), bytes([md.MODE1, 0xa1]),
+        bytes([md.MODE2, 4]),
+    ]
+
+
+def test_original_mode2_preserves_bits_and_sets_outdrv(chip):
+    chip.registers[md.MODE2] = 0
+    driver = md.PCA9685().open()
+    assert chip.registers[md.MODE2] == 4
     driver.close()
 
 
-def test_corrupt_channel_write_fails_and_returns_to_neutral(chip):
+def test_original_write_uses_four_register_transactions(chip):
     driver = md.PCA9685().open()
-    original_write = chip.os.write
-    def corrupt(fd, payload):
-        size = original_write(fd, payload)
-        if len(payload) == 5 and payload[1:] != bytes([0, 0, 51, 1]):
-            chip.registers[payload[0] + 2] ^= 1
-        return size
-    chip.os.write = corrupt
-    with pytest.raises(RuntimeError, match='readback mismatch'):
-        driver.set_pwm(0, 1900)
-    assert list(chip.registers[6:10]) == [0, 0, 51, 1]
+    chip.writes.clear()
+    driver.set_pwm(0, 1900)
+    assert chip.writes == [bytes([6, 0]), bytes([7, 0]),
+                           bytes([8, 133]), bytes([9, 1])]
 
 
 def test_init_failure_returns_all_channels_to_neutral(chip):
@@ -177,22 +175,19 @@ def test_stop_ignores_grain_specific_stop_override(chip):
     assert list(chip.registers[6:10]) == [0, 0, 51, 1]
 
 
-def test_neutral_fallback_failure_does_not_recurse(chip):
+def test_original_write_failure_propagates(chip):
     driver = md.PCA9685().open()
     chip.os.write = lambda fd, payload: 0
-    with pytest.raises(RuntimeError, match='short I2C channel write'):
+    with pytest.raises(RuntimeError, match='short I2C write'):
         driver.set_pwm(0, 1900)
     assert driver._io_depth == 0
 
 
-def test_frequency_change_rejected_while_esc_active(chip):
+def test_original_frequency_change_reprograms_prescaler(chip):
     driver = md.PCA9685().open()
-    driver.set_pwm(6, 1500)
-    before = bytes(chip.registers)
-    with pytest.raises(RuntimeError, match="outputs are active"):
-        driver.set_frequency(100)
-    assert bytes(chip.registers) == before
-    driver.close()
+    driver.set_frequency(100)
+    assert driver.frequency_hz == 100
+    assert chip.registers[md.PRESCALE] == md.frequency_to_prescale(100)
 
 
 def test_failed_initialization_releases_descriptor(chip):
@@ -204,22 +199,21 @@ def test_failed_initialization_releases_descriptor(chip):
     assert chip.closed == [100]
 
 
-def test_pwm_is_one_transaction_using_actual_frequency(chip):
+def test_pwm_register_writes_share_transaction_lock(chip):
     driver = md.PCA9685().open()
     chip.writes.clear()
     chip.fcntl.flock.reset_mock()
-    counts = driver.set_pwm(8, 1500)
-    expected = round(1500 * driver.frequency_hz * 4096 / 1e6)
-    assert counts == expected
-    assert chip.writes == [bytes((md.LED0_ON_L + 4 * 8, 0, 0, expected & 255, expected >> 8))]
+    assert driver.set_pwm(8, 1500) == 307
+    assert chip.writes == [bytes([38, 0]), bytes([39, 0]),
+                           bytes([40, 51]), bytes([41, 1])]
     assert chip.fcntl.flock.call_args_list == [call(driver.fd, 2), call(driver.fd, 8)]
     driver.close()
 
 
 def test_short_write_releases_transaction_lock(chip):
     driver = md.PCA9685().open()
-    chip.os.write = lambda fd, payload: 2
-    with pytest.raises(RuntimeError, match="short I2C channel write"):
+    chip.os.write = lambda fd, payload: 1
+    with pytest.raises(RuntimeError, match="short I2C write"):
         driver.set_pwm(8, 1500)
     assert driver._io_depth == 0
     assert chip.fcntl.flock.call_args == call(driver.fd, chip.fcntl.LOCK_UN)

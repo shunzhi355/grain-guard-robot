@@ -483,22 +483,21 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
 
     def _handle_convey(self) -> None:
-        """Convey into the open bin, close it, then stop both conveyors."""
+        """Convey into the selected bin, stop conveyors, then close all bins."""
         if self._mechanism_connected:
             try:
                 if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
                     return
                 if not self._wait_interruptible(self.convey_duration_sec):
                     return
-                depth = self._fsm.current_depth_index
+                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
+                    return
                 if not self._call_mechanism(
-                    "close_bin", lambda: self._bridge.call_close_bin(depth)
+                    "close_all_bins", self._bridge.call_close_all_bins
                 ):
                     return
                 close_sec = float(get_grain_params(self._grain)["close_duration"])
                 if not self._wait_interruptible(close_sec + MECHANISM_SETTLE_MARGIN):
-                    return
-                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
                     return
             except Exception:
                 self._stop_fsm("bin/conveyor sequence failed")
@@ -519,15 +518,16 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def _handle_open_bin(self) -> None:
-        """After waste discharge, open the selected bin before sampling/conveying."""
+        """After waste discharge, open the selected bin and close the others."""
         depth = self._fsm.current_depth_index
         if self._mechanism_connected:
             if not self._call_mechanism(
                 "hold_bin_open", lambda: self._bridge.call_hold_bin_open(depth)
             ):
                 return  # final failure already stopped the FSM
-            open_sec = float(get_grain_params(self._grain)["open_duration"])
-            if not self._wait_interruptible(open_sec + MECHANISM_SETTLE_MARGIN):
+            params = get_grain_params(self._grain)
+            doors_sec = max(float(params["open_duration"]), float(params["close_duration"]))
+            if not self._wait_interruptible(doors_sec + MECHANISM_SETTLE_MARGIN):
                 self._bridge.call_emergency_stop()
                 return
             logger.info("Open bin depth=%d (mechanism connected)", depth)

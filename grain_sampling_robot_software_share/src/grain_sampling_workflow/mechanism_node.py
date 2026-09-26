@@ -244,6 +244,7 @@ ACTION_SERVICES: tuple[str, ...] = (
     "stop_convey",
     "open_bin",
     "close_bin",
+    "close_all_bins",
     "emergency_stop",
 )
 
@@ -267,6 +268,7 @@ ACTION_FUNCS: dict[str, Callable] = {
     "hold_bin_open": lambda c, **kw: c.hold_bin_open(depth=kw["depth"]),
     "open_bin": lambda c, **kw: c.open_bin(**kw),
     "close_bin": lambda c, **kw: c.close_bin(**kw),
+    "close_all_bins": lambda c, **kw: c.close_all_bins(**kw),
 }
 
 #: 动作名 -> 品种参数键（提供自动回停时长；None = 不注入时长）
@@ -285,6 +287,7 @@ ACTION_DURATION_PARAM: dict[str, Optional[str]] = {
     "hold_bin_open": None,
     "open_bin": "open_duration",
     "close_bin": None,
+    "close_all_bins": None,
 }
 
 DEFAULT_RETRY_ATTEMPTS = 2   # 额外重试次数（共 1 + 2 = 3 次尝试）

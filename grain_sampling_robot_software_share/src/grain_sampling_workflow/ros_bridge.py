@@ -301,11 +301,15 @@ class SamplingBridge:
         return self._call_trigger("/mechanism/start_convey")
 
     def call_stop_convey(self) -> bool:
-        """Release both conveyor outputs after closing the bin."""
+        """Return both conveyors to continuous neutral PWM."""
         return self._call_trigger("/mechanism/stop_convey")
 
+    def call_close_all_bins(self) -> bool:
+        """Close all three bins concurrently, then return each motor to neutral."""
+        return self._call_trigger("/mechanism/close_all_bins")
+
     def call_hold_bin_open(self, depth_level: int) -> bool:
-        """Open then release PWM; the workflow decides when to close the bin."""
+        """Open the selected bin and close the other two, then hold neutral PWM."""
         depth_name = {0: "shallow", 1: "mid", 2: "deep"}[int(depth_level)]
         return self._call_trigger(f"/mechanism/hold_bin_open/{depth_name}")
 
