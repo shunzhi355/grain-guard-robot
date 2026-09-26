@@ -14,13 +14,13 @@
 | 螺旋输送1/2 | CH0/CH1 |
 | 浅仓/中仓/深仓 | CH2/CH3/CH4 |
 | 夹紧/拧紧 | CH5/CH6 |
-| 左/右底盘电调 | CH10/CH9（CH8 实机异常后改线） |
+| 底盘 | STM32 串口控制，不占用 PCA9685 |
 
-USB 物理位置不对应 ttyUSB 编号；I²C 总线和设备名均为待现场核实的默认值。CH7 仍为未接线占位，CH10–15 未使用。
+USB 物理位置不对应 ttyUSB 编号；I²C 总线和设备名均为待现场核实的默认值。CH7 为负压风机，PCA9685 仅使用 CH0–7。
 
 接收机沿用项目已有 FS-iA10B i-BUS 协议：CH1 前后、CH3 转向、CH8 模式开关（软件内部仍叫 CH5）。USB-TTL 只负责串口传输；若现场测试使用其他协议，需要相应更换解析器。
 
-PCA9685 振荡器校准、各机构动作脉宽、底盘方向、遥控死区与速度标定沿用原值。机构初始化只写 CH0–6，底盘由独立驱动写左 CH10、右 CH9。
+PCA9685 振荡器校准、各机构动作脉宽、底盘方向、遥控死区与速度标定沿用原值。机构初始化只写 CH0–7，底盘由 STM32 控制。
 
 ## 启动与配置
 
@@ -47,8 +47,8 @@ PCA9685_I2C_DEVICE=/dev/i2c-4 bash scripts/start_industrial_pc.sh
 
 ## 输出与失联行为
 
-- Linux 默认使用 PCA9685 和 USB i-BUS，设备缺失会报错；Windows 开发默认仍为模拟。历史 GPIO/sysfs 后端需显式选择。
-- 底盘 daemon 在 CH10/CH9 输出 1500us 中位并保持 3 秒，再接受新运动命令；命令超过 0.3 秒未更新时回中位。
+- 正式底盘只使用 STM32 串口；历史 sysfs 驱动须显式选择，不支持 PCA9685 底盘后端。
+- 底盘串口协议及失联行为见 [串口底盘说明](CHASSIS_SERIAL.md)。
 - 打开共用 PCA9685 不再全通道关闭；相同频率不会重新设置振荡器。有活动输出时，拒绝改变不一致的频率配置。
 - 驱动用线程锁和 Linux flock 协调项目运行进程；单通道四个寄存器以一次 I²C 写入更新。
 - USB 串口断开会立即清除旧指令；无有效帧超过原有 0.5 秒阈值后，手动控制输出零速度。串口重新接入后需重启遥控节点。接收机若在无线失联后继续发送保持值，仍需现场设置接收机自身的 failsafe。
@@ -212,4 +212,4 @@ rosservice call /mechanism/emergency_stop
 sudo systemctl stop grain-sampling
 ```
 
-示波器台架测试保持电机主电源断开，仅启动 roscore、rc_node、cmd_vel_to_motor 和 motor_driver。底盘驱动可使用 --max-offset-us 100 --no-start-boost 限制 CH8/CH9 为约1400–1600us，目标频率50Hz，回中约1500us。不启动机构节点、目标导航或旧独立 PWM 工具。示波器探头测 CH8/CH9 Signal，参考地接 PCA9685 GND。
+机构示波器测试仅使用 CH0–7，信号参考地接 PCA9685 GND。底盘测试使用 STM32 串口工具，不再使用 PCA9685 PWM。

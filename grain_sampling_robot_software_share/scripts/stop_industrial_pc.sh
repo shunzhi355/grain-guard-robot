@@ -18,7 +18,7 @@ stop_pattern 'cmd_vel_to_moto[r]'
 stop_pattern 'grain_sampling_workflow.mechanism_nod[e]'
 sleep 1
 
-# The daemon's SIGTERM handler writes 1500 us to CH10/CH9 before closing I2C.
+# Clean up any historical motor daemon left running before migration.
 stop_pattern 'motor_driver.py daemo[n]'
 sleep 1
 

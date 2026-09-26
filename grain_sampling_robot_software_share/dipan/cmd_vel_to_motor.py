@@ -6,8 +6,8 @@ Subscribes:
   /cmd_vel  geometry_msgs/Twist
 
 Sends UDP commands to the local ``dipan/motor_driver.py`` daemon.  The
-daemon can drive the legacy Orange Pi sysfs PWM or the industrial-PC
-PCA9685 backend (left CH10 / right CH9), selected with ``MOTOR_DRIVER_BACKEND``.
+daemon supports legacy Orange Pi sysfs PWM only. Production industrial-PC
+control uses the STM32 serial bridge instead.
 
 The motor daemon expects normalized commands:
   cmd LINEAR ANGULAR

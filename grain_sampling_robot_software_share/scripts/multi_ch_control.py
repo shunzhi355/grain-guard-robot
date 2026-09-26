@@ -9,9 +9,9 @@
     例:
     python3 multi_ch_control.py 2,3,4 1500       # CH2/3/4 同时输出 1500us（持续）
     python3 multi_ch_control.py 2,3,4 1300       # CH2/3/4 同时输出 1300us
-    python3 multi_ch_control.py 2,3,4 1300 60    # 同上，60 秒后自动 full-off
+    python3 multi_ch_control.py 2,3,4 1300 60    # 同上，60 秒后回1500us
     python3 multi_ch_control.py 2,3,4 init       # CH2/3/4 1500us 中位初始化
-    python3 multi_ch_control.py 2,3,4 off        # CH2/3/4 断电释放
+    python3 multi_ch_control.py 2,3,4 off        # CH2/3/4 回1500us保持PWM
     python3 multi_ch_control.py 2,3,4 read       # 读 CH2/3/4 状态
 """
 import sys
@@ -19,9 +19,9 @@ import os
 import time
 import fcntl
 
-# TP I2C4，Linux 设备映射待现场核实；支持环境变量覆盖。
+# 本机已确认I2C2；支持环境变量覆盖。
 I2C_BUS = (os.environ.get("PCA9685_I2C_DEVICE", "").strip()
-           or f"/dev/i2c-{os.environ.get('PCA9685_I2C_BUS', '4')}")
+           or f"/dev/i2c-{os.environ.get('PCA9685_I2C_BUS', '2')}")
 I2C_ADDR = 0x40
 LED0_ON_L = 0x06
 
@@ -48,11 +48,7 @@ def set_pulse_us(ch, us):
 
 
 def channel_off(ch):
-    base = LED0_ON_L + 4 * ch
-    write_reg(base + 0, 0x00)
-    write_reg(base + 1, 0x00)
-    write_reg(base + 2, 0x00)
-    write_reg(base + 3, 0x10)  # FULL_OFF bit
+    set_pulse_us(ch, 1500)
 
 
 def read_state(ch):
@@ -103,7 +99,7 @@ if __name__ == "__main__":
     if cmd == "off":
         for ch in channels:
             channel_off(ch)
-        print(f"CH{channels} -> 断电释放 (full-off)")
+        print(f"CH{channels} -> 1500us中位，保持PWM")
     elif cmd == "init":
         for ch in channels:
             set_pulse_us(ch, 1500)
@@ -121,11 +117,11 @@ if __name__ == "__main__":
                 set_pulse_us(ch, us)
             print(f"CH{channels} -> {us}us（持续输出）")
             if hold_s > 0:
-                print(f"保持 {hold_s}s 后自动 full-off...")
+                print(f"保持 {hold_s}s 后自动回1500us...")
                 time.sleep(hold_s)
                 for ch in channels:
                     channel_off(ch)
-                print(f"CH{channels} -> 已断电释放")
+                print(f"CH{channels} -> 已回1500us，保持PWM")
         except ValueError:
             print(__doc__)
 

@@ -10,9 +10,8 @@ Jetson Orin NX 40-pin PWM (verified on board):
   left  motor ESC signal: physical pin 15 -> PWM1 -> pwmchip0 -> 3280000.pwm
   right motor ESC signal: physical pin 33 -> PWM5 -> pwmchip2 -> 32c0000.pwm
 
-On the industrial PC the default backend is PCA9685 over Linux i2c-dev
-(chassis outputs are left CH10 / right CH9).  The historical sysfs PWM backend remains
-available for Orange Pi/Jetson deployments.
+Legacy sysfs PWM driver for Orange Pi/Jetson and mock tests only.
+Production industrial-PC chassis control uses the STM32 serial bridge.
 """
 
 from __future__ import annotations
@@ -36,19 +35,6 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-
-try:
-    from utils.sampling_params import (
-        PCA9685_CHASSIS_LEFT,
-        PCA9685_CHASSIS_RIGHT,
-        PCA9685_I2C_ADDRESS,
-        PCA9685_I2C_BUS,
-        PCA9685_I2C_DEVICE,
-    )
-except ImportError:  # direct script execution before PYTHONPATH is set
-    PCA9685_CHASSIS_LEFT, PCA9685_CHASSIS_RIGHT = 10, 9
-    PCA9685_I2C_ADDRESS, PCA9685_I2C_BUS, PCA9685_I2C_DEVICE = 0x40, 4, ""
-
 
 PERIOD_NS = 20_000_000  # 50 Hz
 # Chassis neutral candidate under RC return-to-center testing; not yet calibrated.
@@ -132,12 +118,9 @@ def write_text(path: Path, value: str) -> None:
 
 
 class PwmOutput:
-    def __init__(self, config: MotorConfig, *, backend: str = "sysfs",
-                 pca9685: object = None, channel: Optional[int] = None) -> None:
+    def __init__(self, config: MotorConfig, *, backend: str = "sysfs") -> None:
         self.config = config
         self.backend = backend
-        self._pca9685 = pca9685
-        self.channel = channel
         self._mock_pulse: Optional[int] = None
         self.base: Optional[Path] = None
         if backend == "sysfs":
@@ -191,8 +174,6 @@ class PwmOutput:
         raise RuntimeError(f"{channel} was not created after export")
 
     def setup(self) -> None:
-        if self.backend == "pca9685":
-            return
         assert self.base is not None
         enable = self.base / "enable"
         if enable.exists():
@@ -206,11 +187,6 @@ class PwmOutput:
 
     def set_pulse_us(self, pulse_us: int) -> None:
         pulse_us = int(clamp(pulse_us, MIN_US, MAX_US))
-        if self.backend == "pca9685":
-            if self._pca9685 is None or self.channel is None:
-                raise RuntimeError("PCA9685 output is not initialized")
-            self._pca9685.set_pwm(self.channel, pulse_us)
-            return
         if self.backend == "mock":
             self._mock_pulse = pulse_us
             return
@@ -220,10 +196,6 @@ class PwmOutput:
         write_text(self.base / "enable", "1")
 
     def disable(self) -> None:
-        if self.backend == "pca9685":
-            if self._pca9685 is not None and self.channel is not None:
-                self._pca9685.channel_off(self.channel)
-            return
         if self.backend == "mock":
             self._mock_pulse = None
             return
@@ -233,8 +205,6 @@ class PwmOutput:
             write_text(enable, "0")
 
     def status(self) -> str:
-        if self.backend == "pca9685":
-            return f"{self.config.name}: PCA9685 CH{self.channel}"
         if self.backend == "mock":
             return f"{self.config.name}: mock pulse={self._mock_pulse}"
         assert self.base is not None
@@ -260,36 +230,21 @@ class DifferentialMotorDriver:
         invert_left: bool = False,
         invert_right: bool = False,
         backend: Optional[str] = None,
-        pca9685: object = None,
     ) -> None:
-        default_backend = "pca9685" if os.name == "posix" else "mock"
+        default_backend = "" if os.name == "posix" else "mock"
         selected = (backend or os.environ.get("MOTOR_DRIVER_BACKEND", default_backend)).strip().lower()
-        if selected not in {"auto", "pca9685", "sysfs", "mock"}:
-            raise ValueError("MOTOR_DRIVER_BACKEND must be auto, pca9685, sysfs or mock")
-        if selected == "auto":
-            # Missing I2C must not silently redirect this wiring to sysfs PWM.
-            selected = default_backend
+        if selected not in {"sysfs", "mock"}:
+            raise ValueError("Legacy motor driver requires explicit sysfs or mock backend; "
+                             "production chassis uses STM32 serial")
         self.backend = selected
-        self._pca9685 = pca9685
-        if selected == "pca9685" and self._pca9685 is None:
-            from grain_sampling_devices.mechanism_driver import PCA9685
-            self._pca9685 = PCA9685(
-                bus=PCA9685_I2C_BUS,
-                address=PCA9685_I2C_ADDRESS,
-                device=PCA9685_I2C_DEVICE,
-            ).open()
         left_cfg = MotorConfig(
-            f"left CH{PCA9685_CHASSIS_LEFT}" if selected == "pca9685" else LEFT_MOTOR.name,
-            LEFT_MOTOR.node, LEFT_MOTOR.invert_direction ^ invert_left
+            LEFT_MOTOR.name, LEFT_MOTOR.node, LEFT_MOTOR.invert_direction ^ invert_left
         )
         right_cfg = MotorConfig(
-            f"right CH{PCA9685_CHASSIS_RIGHT}" if selected == "pca9685" else RIGHT_MOTOR.name,
-            RIGHT_MOTOR.node, RIGHT_MOTOR.invert_direction ^ invert_right
+            RIGHT_MOTOR.name, RIGHT_MOTOR.node, RIGHT_MOTOR.invert_direction ^ invert_right
         )
-        self.left = PwmOutput(left_cfg, backend=selected, pca9685=self._pca9685,
-                              channel=PCA9685_CHASSIS_LEFT)
-        self.right = PwmOutput(right_cfg, backend=selected, pca9685=self._pca9685,
-                               channel=PCA9685_CHASSIS_RIGHT)
+        self.left = PwmOutput(left_cfg, backend=selected)
+        self.right = PwmOutput(right_cfg, backend=selected)
         self.max_offset_us = int(clamp(max_offset_us, 1, 500))
         self.deadband = float(clamp(deadband, 0.0, 0.5))
         self.left_forward_min = float(clamp(left_forward_min, 0.0, 1.0))
@@ -365,18 +320,15 @@ class DifferentialMotorDriver:
         self.right.disable()
 
     def close(self) -> None:
-        """Release the PCA9685 descriptor (sysfs/mock are no-ops)."""
-        if self._pca9685 is not None:
-            closer = getattr(self._pca9685, "close", None)
-            if closer is not None:
-                closer()
+        """sysfs/mock do not own persistent file descriptors."""
+        pass
 
     def status(self) -> str:
         return self.left.status() + "\n" + self.right.status()
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--backend", choices=("pca9685", "sysfs", "mock", "auto"), default=None)
+    parser.add_argument("--backend", choices=("sysfs", "mock"), default=None)
     parser.add_argument("--max-offset-us", type=int, default=DEFAULT_MAX_OFFSET_US)
     parser.add_argument("--deadband", type=float, default=DEFAULT_DEADBAND)
     parser.add_argument("--left-forward-min", type=float, default=DEFAULT_LEFT_FORWARD_MIN)
@@ -559,13 +511,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # PCA9685 uses /dev/i2c-* and works for users in the ``i2c`` group.  Only
-    # the legacy sysfs backend requires root; keep that check for Orange Pi
-    # while allowing an industrial-PC deployment to run unprivileged.
+    # Only explicitly selected legacy sysfs operation requires root.
     if args.command == "daemon" and (args.arm_seconds < 0 or args.timeout <= 0):
         parser.error("--arm-seconds must be >= 0 and --timeout must be > 0")
     requested_backend = (args.backend or os.environ.get(
-        "MOTOR_DRIVER_BACKEND", "pca9685" if os.name == "posix" else "mock")).strip().lower()
+        "MOTOR_DRIVER_BACKEND", "" if os.name == "posix" else "mock")).strip().lower()
     sysfs_backend = requested_backend == "sysfs"
     geteuid = getattr(os, "geteuid", None)
     if sysfs_backend and geteuid is not None and geteuid() != 0:

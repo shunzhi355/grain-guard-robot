@@ -34,7 +34,7 @@ Service                  Action
   ``MechanismController.emergency_stop()``（对运行中通道写停止脉宽）。
   急停后节点拒绝新动作，直到 ``/mechanism/set_grain`` 重新使能
   （调用 ``controller.reset()``，作为自然的重置入口）。
-* **未接通道占位**：press/lift/start_suction 为占位动作——驱动层记录而不写
+* **未接通道占位**：press/lift 为占位动作——驱动层记录而不写
   I2C（除非 ``mechanism_driver.ENABLE_UNWIRED_CHANNELS`` 为 True）。节点默认
   返回占位成功；``placeholder_success=False`` 时返回失败。
 * **HAS_ROS 判断**：无 rospy 环境（Windows 开发机）下模块可正常 import——
@@ -247,9 +247,9 @@ ACTION_SERVICES: tuple[str, ...] = (
     "emergency_stop",
 )
 
-#: 占位动作（未接通道：伺服升降 / CH7 风机）。驱动层已按 ENABLE_UNWIRED_CHANNELS
+#: 占位动作（未接通道：伺服升降）。驱动层已按 ENABLE_UNWIRED_CHANNELS
 #: 决定是否真实写 I2C；这里决定节点向调用方返回成功还是失败。
-PLACEHOLDER_ACTIONS: frozenset[str] = frozenset({"press", "lift", "start_suction"})
+PLACEHOLDER_ACTIONS: frozenset[str] = frozenset({"press", "lift"})
 
 #: 动作名 -> MechanismController 方法（无参/带参统一走 **kwargs）
 ACTION_FUNCS: dict[str, Callable] = {
@@ -797,9 +797,11 @@ def main() -> None:
         # 响应控制；full-off/无信号上电后直接给动作脉宽不响应）。
         try:
             controller.init_escs(hold_s=3.0)
-            logger.info("机构 CH0–6 电调 1500us 中位初始化完成")
-        except Exception as exc:  # noqa: BLE001 - 初始化失败不阻塞服务
-            logger.warning("电调初始化失败: %s", exc)
+            logger.info("机构 CH0–7 电调 1500us 中位初始化完成")
+        except Exception:  # 不对外发布一个电调尚未初始化成功的机构服务
+            controller.close()
+            logger.exception("电调初始化失败，停止机构节点启动")
+            raise
         # 尝试接入 X2P 伺服升降（失败仅告警，退回占位）
         def _build_lift() -> object:
             from grain_sampling_devices.x2p_lift import build_x2p_lift_drive

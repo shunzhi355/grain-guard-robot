@@ -203,8 +203,8 @@ def test_emergency_stop_stops_running_channels_and_locks(mock_mechanism):
 
     # 运行中通道被立即断电释放
     assert mock_mechanism._running == set()
-    assert mock_mechanism.pca9685.register_history[0] == [1200, "OFF"]
-    assert mock_mechanism.pca9685.register_history[2] == [1900, "OFF"]
+    assert mock_mechanism.pca9685.register_history[0] == [1200, 1500.0]
+    assert mock_mechanism.pca9685.register_history[2] == [1900, 1500.0]
     assert node._stop_flag.is_set()
 
     # 急停后拒绝新动作
@@ -295,13 +295,21 @@ def test_set_grain_rearms_after_emergency_stop(mock_mechanism):
 
 def test_placeholder_actions_success_by_default(mock_mechanism):
     node = mn.MechanismNode(controller=mock_mechanism)
-    for action in ("press", "lift", "start_suction"):
+    for action in ("press", "lift"):
         ok, msg = node.run_action(action)
         assert ok is True, msg
         assert "placeholder" in msg
     # 占位动作仍派发到控制器（驱动层记录/按 ENABLE_UNWIRED_CHANNELS 决定写 I2C）
     names = [n for n, _ in mock_mechanism.action_history]
-    assert {"press", "lift", "fan"}.issubset(set(names))
+    assert {"press", "lift"}.issubset(set(names))
+
+
+def test_start_suction_is_not_a_placeholder(mock_mechanism):
+    node = mn.MechanismNode(controller=mock_mechanism)
+    ok, msg = node.run_action('start_suction')
+    assert ok is True
+    assert 'placeholder' not in msg
+    assert any(name == 'fan' for name, _ in mock_mechanism.action_history)
 
 
 def test_placeholder_actions_fail_when_disabled(mock_mechanism):

@@ -32,7 +32,7 @@ PRESS_PAUSE_S = 0.5
 
 #: 执行器 → PCA9685 通道映射（物理接线确认 2026-08，用户已确认）。
 #: CH0=螺旋输送1、CH1=螺旋输送2、CH2=开仓(浅)、CH3=开仓(中)、CH4=开仓(深)、
-#: CH5=夹紧、CH6=拧紧、CH7=负压风机（未接线，占位）。
+#: CH5=夹紧、CH6=拧紧、CH7=负压风机。
 CHANNELS: dict[str, int] = {
     "convey_1": 0,      # 螺旋输送 1
     "convey_2": 1,      # 螺旋输送 2
@@ -41,18 +41,16 @@ CHANNELS: dict[str, int] = {
     "bin_deep": 4,      # 开仓(深)
     "clamp": 5,         # 夹紧
     "tighten": 6,       # 拧紧
-    "fan": 7,           # 负压风机（未接线，占位）
+    "fan": 7,           # 负压风机
 }
 
 # LPB3588 实机确认 PCA9685 映射到 Linux I2C2，可用环境变量覆盖。
 PCA9685_I2C_BUS: int = 2
 PCA9685_I2C_ADDRESS: int = 0x40
-PCA9685_I2C_DEVICE: str = ""  # 由 config/industrial_pc.env 设置为 /dev/i2c-2
-PCA9685_CHASSIS_LEFT: int = 10  # CH8 实机异常，左侧信号改接 CH10（2026-09-16）
-PCA9685_CHASSIS_RIGHT: int = 9
+PCA9685_I2C_DEVICE: str = ""  # 本机断电/上电对照确认 PCA9685 位于 I2C2
 
 #: PCA9685 内部 RC 振荡器频率（Hz），先采用标称 25MHz。
-#: 历史板校准值为 27,545,088Hz；当前板实际频率待示波器复核。
+#: 当前 CH0–7 已实测有正常波形，沿用该次测试的25MHz换算；不套用旧板校准值。
 #: 该参数同时用于 PWM 预分频和脉宽计数换算。
 PCA9685_OSCILLATOR_HZ: float = 25_000_000.0
 
@@ -64,10 +62,10 @@ PCA9685_FREQUENCY_HZ: float = 50.0
 #: 三仓（CH2/3/4）为独立标定（见 BIN_OPEN_PULSE/BIN_CLOSE_PULSE，与品种无关）。
 #: CH5 夹紧、CH6 拧紧为独立标定（见下），不走全局 open/close。
 #: 电调需先收到中位信号初始化（1500us）才能正常响应控制。
-#: 注意：停止语义已改为"断电释放"（channel_off），PULSE_STOP 仅作参考保留。
+#: 停止/待机/动作结束统一保持中位PWM，不再使用FULL_OFF。
 PULSE_OPEN: float = 1200.0    # 开（输送 throttle 默认值，实机标定 1200us）
-PULSE_CLOSE: float = 1900.0   # 关（已改用断电释放 channel_off，此默认值保留占位）
-PULSE_STOP: float = 1500.0    # 停（初始化中位参考值，实际停止走 channel_off）
+PULSE_CLOSE: float = 1900.0   # 动作脉宽，非停止命令
+PULSE_STOP: float = 1500.0    # 停止及初始化中位，持续输出
 
 #: CH5 夹紧独立标定（us）：夹紧=1900，松开=1200（实测确认）。
 CLAMP_PULSE_CLOSE: float = 1900.0
@@ -89,7 +87,7 @@ PULSE_MAX_US: float = 2300.0
 #: 支持的品种（与 GRAIN_MECHANISM_CONFIG 键一致，可扩展）。
 SUPPORTED_GRAINS: tuple[str, ...] = ("稻谷", "玉米", "黄豆")
 
-#: 未接线通道（press/lift/fan 等）是否真实写 I2C。
+#: 未接线动作（press/lift）是否真实写 I2C；CH7 风机始终真实输出。
 #: False=占位 no-op（当前未接线状态）；接好线后改 True 才会真实写。
 ENABLE_UNWIRED_CHANNELS: bool = False
 
@@ -104,7 +102,7 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）
     "untighten_duration": 3.0,   # 旋松时长
     "throttle_open": 1200.0,     # 输送/节流开（实机标定：开=1200us）
-    "throttle_close": 1400.0,    # 输送/节流关：已改用断电释放(channel_off)，此脉宽值保留占位
+    "throttle_close": 1400.0,    # 动作参数；输送停料使用固定PULSE_STOP
     "stop_value": 1500.0,        # 油门/节流停（初始化中位参考值）
 }
 

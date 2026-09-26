@@ -78,31 +78,116 @@ def test_second_open_preserves_every_output_and_frequency(chip):
     second.close()
 
 
-def test_chassis_and_mechanism_initialization_are_isolated(chip):
-    chassis = motor.DifferentialMotorDriver(backend="pca9685", pca9685=md.PCA9685().open())
-    chassis.set_left_right(0.5, -0.5)
-    chassis_before = {
-        channel: bytes(chip.registers[md.LED0_ON_L + 4 * channel:md.LED0_ON_L + 4 * channel + 4])
-        for channel in (9, 10)
-    }
+def test_commissioned_pwm_matches_confirmed_ch0_7_test(chip):
+    assert md.OSCILLATOR_HZ == 25_000_000
+    driver = md.PCA9685().open()
+    assert driver.device == '/dev/i2c-2'
+    assert driver.address == 0x40
+    assert chip.registers[md.PRESCALE] == 121
+    assert chip.registers[md.MODE1] & 0x7f == 0x21
+    assert chip.registers[md.MODE2] == 0x04
+    for ch in range(8):
+        assert driver.set_pwm(ch, 1500) == 307
+        base = md.LED0_ON_L + ch * 4
+        assert list(chip.registers[base:base + 4]) == [0, 0, 51, 1]
+
+
+def test_external_clock_rejected_before_any_writes(chip):
+    chip.registers[md.MODE1] |= md.MODE1_EXTCLK
+    with pytest.raises(RuntimeError, match='EXTCLK'):
+        md.PCA9685().open()
+    assert chip.writes == []
+
+
+def test_inverted_output_mode_is_corrected_when_inactive(chip):
+    chip.registers[md.MODE2] = 0x14
+    driver = md.PCA9685().open()
+    assert chip.registers[md.MODE2] == 0x04
+    driver.close()
+
+
+def test_corrupt_channel_write_fails_and_returns_to_neutral(chip):
+    driver = md.PCA9685().open()
+    original_write = chip.os.write
+    def corrupt(fd, payload):
+        size = original_write(fd, payload)
+        if len(payload) == 5 and payload[1:] != bytes([0, 0, 51, 1]):
+            chip.registers[payload[0] + 2] ^= 1
+        return size
+    chip.os.write = corrupt
+    with pytest.raises(RuntimeError, match='readback mismatch'):
+        driver.set_pwm(0, 1900)
+    assert list(chip.registers[6:10]) == [0, 0, 51, 1]
+
+
+def test_init_failure_returns_all_channels_to_neutral(chip):
+    controller = md.MechanismController(pca9685=md.PCA9685().open())
+    original_set = controller.pca9685.set_pwm
+    def fail_ch3(channel, pulse):
+        if channel == 3:
+            raise OSError('simulated NACK')
+        return original_set(channel, pulse)
+    controller.pca9685.set_pwm = fail_ch3
+    with pytest.raises(RuntimeError, match='failed to write pulse'):
+        controller.init_escs(hold_s=0)
+    assert controller._stop_flag.is_set()
+    for ch in range(8):
+        assert list(chip.registers[6 + ch * 4:10 + ch * 4]) == [0, 0, 51, 1]
+
+
+def test_real_fan_uses_ch7_and_stop_keeps_neutral_pwm(chip):
+    controller = md.MechanismController(pca9685=md.PCA9685().open())
+    controller.fan()
+    assert not chip.registers[9 + 7 * 4] & 16
+    controller.set_stop(7)
+    assert list(chip.registers[34:38]) == [0, 0, 51, 1]
+
+
+def test_mechanism_init_and_shutdown_only_touch_configured_channels(chip):
     mechanism = md.MechanismController(pca9685=md.PCA9685().open())
+    unused_start = md.LED0_ON_L + 4 * 8
+    unused_before = bytes(chip.registers[unused_start:md.LED0_ON_L + 4 * 16])
     mechanism.init_escs(hold_s=0)
-    assert {
-        channel: bytes(chip.registers[md.LED0_ON_L + 4 * channel:md.LED0_ON_L + 4 * channel + 4])
-        for channel in (9, 10)
-    } == chassis_before
-    assert mechanism.action_history[-1][1]["channels"] == list(range(7))
-    mechanism_before = bytes(chip.registers[md.LED0_ON_L:md.LED0_ON_L + 4 * 7])
-    chassis.stop()
-    chassis.off()
-    assert bytes(chip.registers[md.LED0_ON_L:md.LED0_ON_L + 4 * 7]) == mechanism_before
+    assert mechanism.action_history[-1][1]["channels"] == list(range(8))
+    mechanism.pca9685.all_off()
+    for channel in range(8):
+        base = md.LED0_ON_L + 4 * channel
+        assert list(chip.registers[base:base + 4]) == [0, 0, 51, 1]
+    assert bytes(chip.registers[unused_start:md.LED0_ON_L + 4 * 16]) == unused_before
     mechanism.close()
-    chassis.close()
+
+
+def test_shutdown_and_close_keep_every_channel_neutral(chip):
+    controller = md.MechanismController(pca9685=md.PCA9685().open())
+    controller.init_escs(hold_s=0)
+    controller.set_pulse(5, 1900)
+    controller.set_stop(2)
+    chip.writes.clear()
+    controller.close()
+    assert controller.pca9685.fd is None
+    for ch in range(8):
+        assert list(chip.registers[6 + ch * 4:10 + ch * 4]) == [0, 0, 51, 1]
+    assert not any(len(p) == 5 and p[4] & 16 for p in chip.writes)
+
+
+def test_stop_ignores_grain_specific_stop_override(chip):
+    controller = md.MechanismController(pca9685=md.PCA9685().open())
+    controller.stop_value = 1400
+    controller.actuate(0, 'stop')
+    assert list(chip.registers[6:10]) == [0, 0, 51, 1]
+
+
+def test_neutral_fallback_failure_does_not_recurse(chip):
+    driver = md.PCA9685().open()
+    chip.os.write = lambda fd, payload: 0
+    with pytest.raises(RuntimeError, match='short I2C channel write'):
+        driver.set_pwm(0, 1900)
+    assert driver._io_depth == 0
 
 
 def test_frequency_change_rejected_while_esc_active(chip):
     driver = md.PCA9685().open()
-    driver.set_pwm(9, 1500)
+    driver.set_pwm(6, 1500)
     before = bytes(chip.registers)
     with pytest.raises(RuntimeError, match="outputs are active"):
         driver.set_frequency(100)
@@ -148,23 +233,18 @@ def test_i2c_environment_overrides(chip):
     assert (driver.bus, driver.address, driver.device) == (3, 0x41, "/dev/i2c-lvds")
 
 
-def test_linux_motor_default_requires_pca9685(monkeypatch):
+def test_linux_motor_requires_explicit_legacy_backend(monkeypatch):
     monkeypatch.setattr(motor, "os", SimpleNamespace(name="posix", environ={}))
-    factory = MagicMock(side_effect=RuntimeError("I2C unavailable"))
-    monkeypatch.setattr(md, "PCA9685", factory)
-    with pytest.raises(RuntimeError, match="I2C unavailable"):
+    with pytest.raises(ValueError, match="explicit sysfs or mock"):
         motor.DifferentialMotorDriver()
-    factory.assert_called_once()
 
 
-def test_motor_neutral_and_off_use_only_ch10_ch9():
-    pca = MagicMock()
-    driver = motor.DifferentialMotorDriver(backend="pca9685", pca9685=pca)
-    assert driver.stop() == (1540, 1540)
-    assert pca.set_pwm.call_args_list == [call(10, 1540), call(9, 1540)]
-    driver.off()
-    assert pca.channel_off.call_args_list == [call(10), call(9)]
-    pca.all_off.assert_not_called()
+def test_removed_backend_cannot_open_i2c(monkeypatch):
+    factory = MagicMock()
+    monkeypatch.setattr(md, "PCA9685", factory)
+    with pytest.raises(ValueError, match="STM32 serial"):
+        motor.DifferentialMotorDriver(backend="pca9685")
+    factory.assert_not_called()
 
 
 def test_daemon_timeout_returns_neutral(monkeypatch):
