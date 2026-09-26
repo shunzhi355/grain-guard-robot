@@ -240,6 +240,8 @@ ACTION_SERVICES: tuple[str, ...] = (
     "start_suction",
     "stop_suction",
     "convey",
+    "start_convey",
+    "stop_convey",
     "open_bin",
     "close_bin",
     "emergency_stop",
@@ -260,6 +262,9 @@ ACTION_FUNCS: dict[str, Callable] = {
     "start_suction": lambda c, **kw: c.fan(**kw),
     "stop_suction": lambda c, **kw: c.actuate(CHANNELS["fan"], "stop"),
     "convey": lambda c, **kw: c.convey(**kw),
+    "start_convey": lambda c, **kw: c.convey(duration=None),
+    "stop_convey": lambda c, **kw: c.convey(duration=None, direction=0),
+    "hold_bin_open": lambda c, **kw: c.hold_bin_open(depth=kw["depth"]),
     "open_bin": lambda c, **kw: c.open_bin(**kw),
     "close_bin": lambda c, **kw: c.close_bin(**kw),
 }
@@ -275,6 +280,9 @@ ACTION_DURATION_PARAM: dict[str, Optional[str]] = {
     "start_suction": None,
     "stop_suction": None,
     "convey": "convey_duration",
+    "start_convey": None,
+    "stop_convey": None,
+    "hold_bin_open": None,
     "open_bin": "open_duration",
     "close_bin": None,
 }
@@ -435,7 +443,7 @@ class MechanismNode:
             )
         # open_bin/close_bin 深度变体：/mechanism/{action}/{shallow|mid|deep}
         # （ros_bridge 按 depth_level 索引调用；固定深度，不依赖节点默认）。
-        for action in ("open_bin", "close_bin"):
+        for action in ("open_bin", "close_bin", "hold_bin_open"):
             for depth in OPEN_BIN_DEPTHS:
                 self._services.append(
                     rospy.Service(

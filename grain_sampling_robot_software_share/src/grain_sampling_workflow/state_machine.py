@@ -27,8 +27,8 @@ class SamplingState(Enum):
     REPEAT_UNTIL_DEPTH = auto() # 7: 重复步骤5-6直到累计深度达到工单要求
     DISCHARGE_WASTE = auto()    # 8: 排出废粮
     FORMAL_SAMPLING = auto()    # 9: 开始正式采样（吸粮2分钟）
-    CONVEY_1 = auto()           # 10: 启动螺旋杆1和2输送约2分钟
-    OPEN_BIN = auto()           # 11: 根据当前深度自动开启对应仓口
+    CONVEY_1 = auto()           # 输粮计时 → 关仓 → 等待关仓完成 → 停止输粮
+    OPEN_BIN = auto()           # 废粮排完后按当前深度开仓，随后正式吸粮
     CONVEY_DONE = auto()        # 12: 输送完成，提示取粮完成
     NEXT_CHECK = auto()         # 13: 自动判断下一步
     ALL_DONE_PROMPT = auto()    # 14: 所有点位完成，提示确认返航
@@ -153,9 +153,9 @@ class SamplingStateMachine:
             # Step 7 -> 8: Target depth reached
             (SamplingState.REPEAT_UNTIL_DEPTH, SamplingAction.SYSTEM_DEPTH_REACHED):
                 SamplingState.DISCHARGE_WASTE,
-            # Step 8 -> 9: User confirms waste discharged
+            # Waste discharged -> open the current depth's bin first
             (SamplingState.DISCHARGE_WASTE, SamplingAction.CONFIRM_WASTE_DISCHARGED):
-                SamplingState.FORMAL_SAMPLING,
+                SamplingState.OPEN_BIN,
             # Step 9 -> 10: System completes formal sampling (2 min suction)
             (SamplingState.FORMAL_SAMPLING, SamplingAction.SYSTEM_SUCTION_COMPLETE):
                 SamplingState.CONVEY_1,
@@ -163,12 +163,12 @@ class SamplingStateMachine:
             # PAUSE/RESUME handled specially (stay in FORMAL_SAMPLING);
             # STOP handled specially (→ STOPPED).
             # These are NOT in the table — handled before lookup.
-            # Step 10 -> 11: System finishes conveying (~2 min)
+            # Completion only after bin closing and conveyor shutdown
             (SamplingState.CONVEY_1, SamplingAction.SYSTEM_CONVEY_COMPLETE):
-                SamplingState.OPEN_BIN,
-            # Step 11 -> 12: Bin opened for current depth
-            (SamplingState.OPEN_BIN, SamplingAction.SYSTEM_BIN_OPENED):
                 SamplingState.CONVEY_DONE,
+            # Bin opened -> retain the formal suction stage
+            (SamplingState.OPEN_BIN, SamplingAction.SYSTEM_BIN_OPENED):
+                SamplingState.FORMAL_SAMPLING,
             # Step 12 -> 13: User confirms grain collection done
             (SamplingState.CONVEY_DONE, SamplingAction.CONFIRM_DONE):
                 SamplingState.NEXT_CHECK,

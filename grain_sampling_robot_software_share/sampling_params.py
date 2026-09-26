@@ -96,9 +96,9 @@ ENABLE_UNWIRED_CHANNELS: bool = False
 #: 未知品种的兜底时序参数（秒）。
 DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "sampling_duration": 120.0,  # 扦样时长，默认 2 min
-    "convey_duration": 120.0,    # 输送时长，默认 2 min
-    "open_duration": 5.0,        # 开仓保持时长（秒），之后自动关同仓（暂定 5s，以实测为准）
-    "close_duration": 3.0,       # 关仓时长
+    "convey_duration": 120.0,    # 正式流程：开始输粮到发出关仓命令的时长
+    "open_duration": 5.0,       # 正式流程开仓等待；旧 open_bin 服务仍用作自动关仓延时
+    "close_duration": 3.0,      # 发出关仓后等待此时长 + 0.5s，再停止输粮（无到位反馈）
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
     "unclamp_duration": 5.0,     # 松开时长（实机确认 5s）
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）

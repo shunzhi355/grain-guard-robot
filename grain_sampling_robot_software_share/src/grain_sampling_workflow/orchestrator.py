@@ -262,12 +262,6 @@ class WorkflowOrchestrator:
         elif current == SamplingState.REPEAT_UNTIL_DEPTH:
             self._run_async(self._handle_repeat_until_depth)
 
-        # ── Close bin as soon as grain collection is confirmed ──
-        # CONVEY_DONE → NEXT_CHECK: close the storage bin before the next
-        # depth/point check proceeds (fire-and-forget mechanism action).
-        if prev == SamplingState.CONVEY_DONE and action == SamplingAction.CONFIRM_DONE:
-            self._run_async(self._handle_close_bin)
-
         if current == SamplingState.NEXT_CHECK:
             self._run_async(self._handle_next_check)
 
@@ -489,19 +483,30 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
 
     def _handle_convey(self) -> None:
-        """Step 10: conveyors, auto-advance after configurable delay.
-
-        With the mechanism connected: start the screw conveyors, wait for
-        the configured duration (interruptible), then let the mechanism
-        auto-stop.  The placeholder path keeps the short ``time.sleep``
-        mock behaviour.
-        """
+        """Convey into the open bin, close it, then stop both conveyors."""
         if self._mechanism_connected:
-            if not self._call_mechanism("convey", self._bridge.call_convey):
-                return  # final failure already stopped the FSM
-            if not self._wait_interruptible(self.convey_duration_sec):
-                logger.warning("Convey interrupted — conveyors may still run")
+            try:
+                if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
+                    return
+                if not self._wait_interruptible(self.convey_duration_sec):
+                    return
+                depth = self._fsm.current_depth_index
+                if not self._call_mechanism(
+                    "close_bin", lambda: self._bridge.call_close_bin(depth)
+                ):
+                    return
+                close_sec = float(get_grain_params(self._grain)["close_duration"])
+                if not self._wait_interruptible(close_sec + MECHANISM_SETTLE_MARGIN):
+                    return
+                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
+                    return
+            except Exception:
+                self._stop_fsm("bin/conveyor sequence failed")
+                logger.exception("Bin/conveyor sequence failed")
                 return
+            finally:
+                if not self._fsm.is_running:
+                    self._bridge.call_emergency_stop()
             logger.info("Convey complete: ran %.1f sec", self.convey_duration_sec)
             self._fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
         else:
@@ -514,26 +519,24 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def _handle_open_bin(self) -> None:
-        """Step 11: open bin for current depth, auto-advance."""
+        """After waste discharge, open the selected bin before sampling/conveying."""
         depth = self._fsm.current_depth_index
         if self._mechanism_connected:
             if not self._call_mechanism(
-                "open_bin", lambda: self._bridge.call_open_bin(depth)
+                "hold_bin_open", lambda: self._bridge.call_hold_bin_open(depth)
             ):
                 return  # final failure already stopped the FSM
+            open_sec = float(get_grain_params(self._grain)["open_duration"])
+            if not self._wait_interruptible(open_sec + MECHANISM_SETTLE_MARGIN):
+                self._bridge.call_emergency_stop()
+                return
             logger.info("Open bin depth=%d (mechanism connected)", depth)
         else:
             logger.info("Open bin depth=%d (mechanism placeholder)", depth)
         self._fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
 
     def _handle_close_bin(self) -> None:
-        """Close the storage bin after grain collection is confirmed.
-
-        Triggered on the CONVEY_DONE → NEXT_CHECK transition (right after
-        the user confirms grain collection done), so the bin is closed
-        before the next depth/point check starts.  Closes the bin matching
-        the currently-open depth (``current_depth_index``), not a fixed bin.
-        """
+        """Manual helper; production closing is serialized in _handle_convey."""
         depth = self._fsm.current_depth_index
         if self._mechanism_connected:
             self._bridge.call_close_bin(depth)

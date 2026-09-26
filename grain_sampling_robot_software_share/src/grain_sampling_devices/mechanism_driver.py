@@ -391,7 +391,8 @@ class _BaseMechanismController:
     def __init__(self, pca9685=None, mock_mode: bool = True) -> None:
         self.pca9685 = pca9685
         self.mock_mode = bool(mock_mode)
-        self._lock = threading.Lock()        # 保护 I2C 写 + _running
+        self._lock = threading.RLock()       # 保护 I2C 写 + _running + 仓门定时器
+        self._bin_timers: dict[int, threading.Timer] = {}
         self._running: set = set()           # 运行中通道集合
         self._stop_flag = threading.Event()  # 急停/关闭标志
         self._shutdown = False
@@ -430,7 +431,10 @@ class _BaseMechanismController:
         for attempt in range(self.WRITE_ATTEMPTS):
             try:
                 with self._lock:
+                    if self._stop_flag.is_set():
+                        raise RuntimeError("controller is in emergency-stop state")
                     self._write_hw(channel, pulse_us)
+                    self._running.add(channel)
                 return
             except Exception as exc:  # noqa: BLE001 - 重试语义捕获一切 I2C 错误
                 last_error = exc
@@ -448,6 +452,7 @@ class _BaseMechanismController:
             try:
                 with self._lock:
                     self._write_hw_off(channel)
+                    self._running.discard(channel)
                 return
             except Exception as exc:  # noqa: BLE001 - 重试语义捕获一切 I2C 错误
                 last_error = exc
@@ -530,7 +535,10 @@ class _BaseMechanismController:
         """急停：置停止标志，立即对运行中通道断电释放（full-off）并清空运行集合。"""
         self._stop_flag.set()
         with self._lock:
-            running = list(self._running)
+            for timer in self._bin_timers.values():
+                timer.cancel()
+            self._bin_timers.clear()
+            running = sorted(set(self._running) | set(CHANNELS.values()))
             self._running.clear()
         self.action_history.append(("emergency_stop", {"channels": running}))
         for ch in running:
@@ -609,17 +617,38 @@ class _BaseMechanismController:
                 f"unknown bin depth {depth!r}; expected shallow/mid/deep"
             )
         channel = CHANNELS[key]
-        self._act_pulse("open_bin", channel, BIN_OPEN_PULSE, None)
-        if duration is not None and duration > 0:
-            timer = threading.Timer(
-                duration, self._auto_close_bin, args=(channel,)
-            )
-            timer.daemon = True
-            timer.start()
+        with self._lock:
+            self._cancel_bin_timer(channel)
+            self._act_pulse("open_bin", channel, BIN_OPEN_PULSE, None)
+            if duration is not None and duration > 0:
+                timer = threading.Timer(
+                    duration, lambda: self._auto_close_bin(channel, timer)
+                )
+                timer.daemon = True
+                self._bin_timers[channel] = timer
+                timer.start()
 
-    def _auto_close_bin(self, channel: int) -> None:
-        """开仓后的自动关门：对同一仓通道写 BIN_CLOSE_PULSE=2000us。"""
-        self._act_pulse("close_bin_auto", channel, BIN_CLOSE_PULSE, None)
+    def _cancel_bin_timer(self, channel: int) -> None:
+        timer = self._bin_timers.pop(channel, None)
+        if timer is not None:
+            timer.cancel()
+
+    def hold_bin_open(self, depth: str) -> None:
+        """正式流程：开门动作到时释放 PWM，保持开仓，不自动关门。"""
+        channel = CHANNELS[f"bin_{depth}"]
+        with self._lock:
+            self._cancel_bin_timer(channel)
+            duration = float(get_grain_params(self.current_grain or "")["open_duration"])
+            self._act_pulse("hold_bin_open", channel, BIN_OPEN_PULSE, duration)
+
+    def _auto_close_bin(self, channel: int, timer=None) -> None:
+        """旧服务自动关仓；过期或急停后的回调不再输出。"""
+        with self._lock:
+            if self._stop_flag.is_set() or self._bin_timers.get(channel) is not timer:
+                return
+            self._bin_timers.pop(channel, None)
+            duration = float(get_grain_params(self.current_grain or "")["close_duration"])
+            self._act_pulse("close_bin_auto", channel, BIN_CLOSE_PULSE, duration)
 
     def close_bin(self, depth: str = "mid", duration=None) -> None:
         """关仓，depth 取值 shallow/mid/deep。独立标定 BIN_CLOSE_PULSE=1800us。"""
@@ -628,7 +657,11 @@ class _BaseMechanismController:
             raise ValueError(
                 f"unknown bin depth {depth!r}; expected shallow/mid/deep"
             )
-        self._act_pulse("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
+        with self._lock:
+            self._cancel_bin_timer(CHANNELS[key])
+            if duration is None:
+                duration = float(get_grain_params(self.current_grain or "")["close_duration"])
+            self._act_pulse("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
 
     def clamp(self, duration=None) -> None:
         """夹紧（CH5 独立标定：1900us）。"""

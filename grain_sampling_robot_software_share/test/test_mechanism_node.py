@@ -63,12 +63,13 @@ def test_registers_services(mock_mechanism):
     # HAS_ROS=False（本机无 rospy）：SetGrain/MoveLift 为回退类（无 ROS 序列化），
     # set_grain/move_lift 服务跳过注册：12 个 Trigger 动作服务
     # + 3 个 open_bin + 3 个 close_bin 深度变体。
-    assert len(calls) == 19
+    assert len(calls) == 24
     names = [c.args[0] for c in calls]
     expected = [f"/mechanism/{a}" for a in mn.ACTION_SERVICES]
     expected += ["/mechanism/lift_health"]
     expected += [f"/mechanism/open_bin/{d}" for d in mn.OPEN_BIN_DEPTHS]
     expected += [f"/mechanism/close_bin/{d}" for d in mn.OPEN_BIN_DEPTHS]
+    expected += [f"/mechanism/hold_bin_open/{d}" for d in mn.OPEN_BIN_DEPTHS]
     assert sorted(names) == sorted(expected)
     # 全部用 std_srvs/Trigger
     for c in calls:
@@ -462,4 +463,4 @@ def test_start_is_idempotent(mock_mechanism):
     with patch("grain_sampling_workflow.mechanism_node.rospy") as mock_rospy:
         node.start()
         node.start()
-    assert mock_rospy.Service.call_count == 19  # 只注册一次（含 lift_health）
+    assert mock_rospy.Service.call_count == 24  # 只注册一次（含正式输粮服务）

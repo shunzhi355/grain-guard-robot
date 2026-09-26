@@ -296,6 +296,19 @@ class SamplingBridge:
         """
         return self._call_trigger("/mechanism/convey")
 
+    def call_start_convey(self) -> bool:
+        """Run both conveyors until the workflow explicitly stops them."""
+        return self._call_trigger("/mechanism/start_convey")
+
+    def call_stop_convey(self) -> bool:
+        """Release both conveyor outputs after closing the bin."""
+        return self._call_trigger("/mechanism/stop_convey")
+
+    def call_hold_bin_open(self, depth_level: int) -> bool:
+        """Open then release PWM; the workflow decides when to close the bin."""
+        depth_name = {0: "shallow", 1: "mid", 2: "deep"}[int(depth_level)]
+        return self._call_trigger(f"/mechanism/hold_bin_open/{depth_name}")
+
     def call_open_bin(self, depth_level: int) -> bool:
         """Open the storage bin for the given *depth_level*.
 
