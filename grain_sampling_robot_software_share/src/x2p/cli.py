@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--interval", type=float, default=0.2)
 
     speed = commands.add_parser(
-        "speed", help="已验证：按方向、转速和时间运行"
+        "speed", help="兼容旧命令：按转速和时间换算为位置段运行"
     )
     speed.add_argument("--direction", required=True, choices=["forward", "reverse"])
     speed.add_argument("--rpm", type=int, required=True)
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     timed = commands.add_parser(
         "move-timed",
-        help="速度模式加编码器反馈：按厘米距离和时间移动",
+        help="内部位置模式：按厘米距离和时间移动",
     )
     timed.add_argument(
         "--direction", required=True, choices=["forward", "reverse"]
@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pulses = commands.add_parser(
         "experimental-move-pulses",
-        help="未通过实机验证：内部位置段按脉冲移动",
+        help="兼容旧命令：按脉冲执行内部位置段",
     )
     pulses.add_argument("--direction", required=True, choices=["forward", "reverse"])
     pulses.add_argument("--pulses", type=int, required=True)
@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     distance = commands.add_parser(
         "experimental-move-distance",
-        help="未通过实机验证：内部位置段按毫米移动",
+        help="兼容旧命令：按毫米执行内部位置段",
     )
     distance.add_argument("--direction", required=True, choices=["forward", "reverse"])
     distance.add_argument("--distance-mm", type=float, required=True)
@@ -89,17 +89,20 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "hybrid-status", help="只读检查Pn001=3及C-MODE端子配置"
     )
-    commands.add_parser("stop", help="速度归零、取消软件使能并确认OFF")
+    commands.add_parser("stop", help="取消位置段、停止并确认OFF")
     return parser
 
 
 def _status(drive: X2PDrive) -> dict[str, int]:
+    encoder_resolution = drive.read_signed32(Register.ENCODER_RESOLUTION)
+    status = drive.read_registers(Register.STATUS)[0]
     return {
-        "status": drive.read_registers(Register.STATUS)[0],
+        "status": status,
         "speed_rpm": signed16(drive.read_registers(Register.ACTUAL_SPEED)[0]),
-        "servo_enabled": drive.read_registers(Register.SERVO_ENABLE_STATUS)[0],
+        "servo_enabled": int(status == 2),
         "control_mode_pn001": drive.read_registers(Register.CONTROL_MODE)[0],
         "speed_source_pn300": drive.read_registers(Register.SPEED_SOURCE)[0],
+        "encoder_resolution_un024": encoder_resolution,
     }
 
 
@@ -217,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "stop":
             controller.stop(verify_off=True)
-            print("已发送速度0、取消软件使能并确认OFF。")
+            print("已取消位置段、停止并确认OFF。")
         return 0
     except KeyboardInterrupt:
         print("已中断，并尝试安全停机。", file=sys.stderr)

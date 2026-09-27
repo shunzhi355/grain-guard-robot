@@ -1,0 +1,25 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -13,7 +13,7 @@ IF (CMAKE_COMPILER_IS_GNUCXX )
+    SET(CMAKE_CXX_FLAGS_DEBUG  "-O0 -g")
+    SET(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG ")
+ 
+-  ADD_DEFINITIONS("-Wall -Werror -Wno-unused-variable
++  ADD_DEFINITIONS("-Wall -Werror -Wno-error=class-memaccess -Wno-unused-variable
+                    -Wno-unused-but-set-variable -Wno-unknown-pragmas ")
+ ENDIF()
+ 
+diff --git a/sophus/so2.cpp b/sophus/so2.cpp
+--- a/sophus/so2.cpp
++++ b/sophus/so2.cpp
+@@ -29,8 +29,7 @@ namespace Sophus
+ 
+ SO2::SO2()
+ {
+-  unit_complex_.real() = 1.;
+-  unit_complex_.imag() = 0.;
++  unit_complex_ = Complexd(1., 0.);
+ }
+ 
+ SO2

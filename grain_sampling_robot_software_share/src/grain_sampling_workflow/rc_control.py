@@ -210,15 +210,19 @@ class RCControl:
 
     # ── Stick mapping ─────────────────────────────────────────────────
 
-    def _map_linear(self, pulse: Optional[float]) -> float:
-        """CH1 -> ``linear.x`` (m/s): deadband 0, large=forward."""
+    def _map_stick(self, pulse: Optional[float]) -> float:
+        """Continuous signed effort measured from the deadband edge."""
         if pulse is None or self._deadband_low <= pulse <= self._deadband_high:
             return 0.0
-        magnitude = (
-            min(1.0, abs(pulse - self._stick_center) / STICK_FULL_SCALE_US)
-            * self._max_linear_mps
-        )
-        return magnitude if pulse > self._stick_center else -magnitude
+        if pulse > self._deadband_high:
+            span = self._stick_center + STICK_FULL_SCALE_US - self._deadband_high
+            return min(1.0, (pulse - self._deadband_high) / span)
+        span = self._deadband_low - (self._stick_center - STICK_FULL_SCALE_US)
+        return -min(1.0, (self._deadband_low - pulse) / span)
+
+    def _map_linear(self, pulse: Optional[float]) -> float:
+        """CH1 -> ``linear.x`` (m/s): deadband 0, large=forward."""
+        return self._map_stick(pulse) * self._max_linear_mps
 
     def _map_angular(self, pulse: Optional[float]) -> float:
         """CH3 -> ``angular.z`` (rad/s): deadband 0, small=LEFT, large=RIGHT.
@@ -227,13 +231,7 @@ class RCControl:
         (left turn) corresponds to a small pulse, ``angular.z < 0`` (right
         turn) to a large pulse — confirmed on the board on 2026-08-16.
         """
-        if pulse is None or self._deadband_low <= pulse <= self._deadband_high:
-            return 0.0
-        magnitude = (
-            min(1.0, abs(pulse - self._stick_center) / STICK_FULL_SCALE_US)
-            * self._max_angular_rps
-        )
-        return magnitude if pulse < self._stick_center else -magnitude
+        return -self._map_stick(pulse) * self._max_angular_rps
 
 
 __all__ = ["RCControl"]

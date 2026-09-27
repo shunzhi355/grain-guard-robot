@@ -58,10 +58,13 @@ def resource_image(blob, hash_size=32):
     return result
 
 
-def fixture_image(signed=False, wrong_pin=False, resource_hash_size=32):
+def fixture_image(signed=False, wrong_pin=False, resource_hash_size=32, ethernet=False):
     blob = fdt(({"compatible": b"neardi,lpb3588-linux-f0,\0rockchip,rk3588\0"}, {
         "aliases": ({"i2c4": b"/i2c@feac0000\0"}, {}),
         "i2c@feac0000": ({"status": b"disabled\0", "pinctrl-0": cells(409)}, {}),
+        **({'ethernet@fe1c0000': ({'status': b'okay\0', 'pinctrl-0': cells(410)}, {}),
+            'eth-pins': ({'phandle': cells(410), 'rockchip,pins': cells(3, 5, 1, 500)}, {})}
+           if ethernet else {}),
         "pinctrl": ({}, {"i2c4": ({}, {"i2c4m0-xfer": ({
             "phandle": cells(409),
             "rockchip,pins": cells(3, 7 if wrong_pin else 6, 9, 500, 3, 5, 9, 500)
@@ -86,6 +89,38 @@ def fixture_image(signed=False, wrong_pin=False, resource_hash_size=32):
     for _, offset, data in payloads:
         result[offset:offset + len(data)] = data
     return result
+
+
+def test_rejects_enabled_ethernet_pin_conflict():
+    tree = fdt(({}, {
+        'i2c': ({'status': b'disabled\0', 'pinctrl-0': cells(1)}, {}),
+        'ethernet': ({'status': b'okay\0', 'pinctrl-0': cells(2)}, {}),
+        'tp': ({'phandle': cells(1), 'rockchip,pins': cells(3, 5, 9, 0)}, {}),
+        'eth': ({'phandle': cells(2), 'rockchip,pins': cells(3, 5, 1, 0)}, {})
+    }))
+    with pytest.raises(ValueError, match='pin conflict.*ethernet'):
+        patcher.reject_pin_conflicts(patcher.FDT(tree), '/i2c', '/tp')
+
+
+def test_explicit_disable_ethernet_updates_both_dtbs_preserving_other_properties():
+    original = fixture_image(ethernet=True)
+    with pytest.raises(ValueError, match='pin conflict'):
+        patcher.prepare(original)
+    result = patcher.prepare(original, disable_gmac1=True)
+    assert len(result) == len(original)
+    fit = patcher.FDT(result)
+    for image in ('fdt', 'resource'):
+        node = '/images/' + image
+        start, size = fit.number(node, 'data-position'), fit.number(node, 'data-size')
+        data = result[start:start + size]
+        assert hashlib.sha256(data).digest() == fit.get(node + '/hash', 'value')
+        if image == 'resource':
+            entry = patcher.resource_entries(data)[0]
+            data = data[entry[1]:entry[1] + entry[2]]
+        dt = patcher.FDT(data)
+        assert dt.string('/ethernet@fe1c0000', 'status') == 'disabled'
+        assert dt.string('/i2c@feac0000', 'status') == 'okay'
+    assert result[4096:8192] == original[4096:8192]
 
 
 @pytest.mark.parametrize("hash_size", [0, 20, 32])

@@ -1,0 +1,9 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -669 +669 @@ int main(int argc, char **argv)
+-            if (0) // If you need to see map point, change to "if(1)"
++            if (1) // Publish current ikd-tree points on /Laser_map.
+@@ -700 +700 @@ int main(int argc, char **argv)
+-            // publish_map(pubLaserCloudMap);
++            publish_map(pubLaserCloudMap);

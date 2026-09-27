@@ -41,6 +41,9 @@ class RecordingBridge:
     def call_clamp(self) -> bool:
         return self._record("clamp")
 
+    def call_lift_health(self) -> bool:
+        return self._record("lift_health")
+
     def call_unclamp(self) -> bool:
         return self._record("unclamp")
 
@@ -124,7 +127,7 @@ def test_press_cycle_full_call_order():
     orch._handle_press_and_suction()
 
     assert bridge.calls == [
-        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
+        "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
     # 2.0m 需要 2 节管：第 1 节压完 → 等待加管（ADD_PIPE_PROMPT）
@@ -139,7 +142,7 @@ def test_press_cycle_reattaches_clamp_when_depth_reached():
     orch._handle_press_and_suction()
 
     assert bridge.calls == [
-        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
+        "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
     assert fsm.current_state == SamplingState.DISCHARGE_WASTE
@@ -208,7 +211,7 @@ def test_press_cycle_durations_from_grain_config(monkeypatch):
     # 每步 = 动作时长 + 停稳余量 0.5s
     assert durations == [3.0, 2.5, 2.0, 2.5, 3.0]
     assert bridge.calls == [
-        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
+        "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
 
@@ -243,7 +246,7 @@ def test_add_pipe_durations_from_grain_config(monkeypatch):
 
 
 def test_unknown_grain_falls_back_to_defaults(monkeypatch):
-    """未设置品种时回退默认时长（clamp=2s, unclamp=1s, press/lift 跟 clamp），时序仍完整。"""
+    """未设置品种时回退默认时长（clamp=2s, unclamp=5s, press/lift 跟 clamp），时序仍完整。"""
     bridge = RecordingBridge()
     orch, fsm, durations = _make_orch(bridge, depth_target=1.0)
     orch._grain = ""  # 品种未知 → DEFAULT_GRAIN_PARAMS
@@ -251,10 +254,10 @@ def test_unknown_grain_falls_back_to_defaults(monkeypatch):
     orch._handle_press_and_suction()
 
     # clamp 2.0 + 停稳余量 0.5 = 2.5；servo(press/lift) 回退 clamp=2.0 → 2.5；
-    # unclamp 1.0 + 0.5 = 1.5
-    assert durations == [2.5, 2.5, 1.5, 2.5, 2.5]
+    # unclamp 5.0 + 0.5 = 5.5
+    assert durations == [2.5, 2.5, 5.5, 2.5, 2.5]
     assert bridge.calls == [
-        "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
+        "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
     ]
 

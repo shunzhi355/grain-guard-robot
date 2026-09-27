@@ -12,6 +12,8 @@ import time
 import pytest
 
 from grain_sampling_devices.mechanism_driver import (
+    BIN_CLOSE_PULSE,
+    BIN_OPEN_PULSE,
     CHANNELS,
     PULSE_CLOSE,
     PULSE_OPEN,
@@ -70,7 +72,7 @@ def test_actuate_open_close_stop_writes_pulse(mock_mechanism):
     mock_mechanism.actuate(0, "close")
     mock_mechanism.actuate(0, "stop")
 
-    assert mock_mechanism.pca9685.register_history[0] == [1200, 1900, "OFF"]
+    assert mock_mechanism.pca9685.register_history[0] == [1200, 1900, 1500.0]
     actions = [name for name, _ in mock_mechanism.action_history]
     assert actions == [
         "set_pulse", "actuate",
@@ -95,8 +97,10 @@ def test_emergency_stop_stops_running_channels(mock_mechanism):
     mock_mechanism.emergency_stop()
 
     assert mock_mechanism._running == set()
-    assert mock_mechanism.pca9685.register_history[0] == [1200, "OFF"]
-    assert mock_mechanism.pca9685.register_history[2] == [1900, "OFF"]
+    assert mock_mechanism.pca9685.register_history[0] == [1200, 1500.0]
+    assert mock_mechanism.pca9685.register_history[2] == [1900, 1500.0]
+    for channel in CHANNELS.values():
+        assert mock_mechanism.pca9685.register_history[channel][-1] == 1500.0
     # 急停后拒绝新动作
     with pytest.raises(RuntimeError, match="emergency-stop"):
         mock_mechanism.actuate(0, "open")
@@ -130,12 +134,12 @@ def test_duration_auto_stop(mock_mechanism):
     # 轮询等待后台线程断电释放（避免固定 sleep 的时序抖动）
     deadline = time.monotonic() + 3.0
     while (
-        mock_mechanism.pca9685.register_history.get(0) != [1200, "OFF"]
+        mock_mechanism.pca9685.register_history.get(0) != [1200, 1500.0]
         and time.monotonic() < deadline
     ):
         time.sleep(0.02)
 
-    assert mock_mechanism.pca9685.register_history[0] == [1200, "OFF"]
+    assert mock_mechanism.pca9685.register_history[0] == [1200, 1500.0]
     assert 0 not in mock_mechanism._running
 
 
@@ -184,7 +188,7 @@ def test_semantic_actions_write_expected_channels(mock_mechanism):
     mock_mechanism.fan()
 
     assert mock_mechanism.pca9685.register_history[0] == [1200]         # convey → CH0 开
-    assert mock_mechanism.pca9685.register_history[4] == [1200, 1800]   # open_bin(deep) 开 + close_bin(deep) 关 → CH4
+    assert mock_mechanism.pca9685.register_history[4] == [BIN_OPEN_PULSE, BIN_CLOSE_PULSE]
     assert mock_mechanism.pca9685.register_history[5] == [1900, 1200]   # clamp 关/夹紧 / unclamp 开/松开 (CH5 独立)
     assert mock_mechanism.pca9685.register_history[6] == [1300, 1900]   # tighten 关/拧紧 / untighten 开/拧松 (CH6 独立)
     assert mock_mechanism.pca9685.register_history[2] == [1200, 1900]   # press 开 / lift 关
@@ -196,9 +200,9 @@ def test_close_bin_uses_depth_channel(mock_mechanism):
     mock_mechanism.close_bin(depth="shallow")
     mock_mechanism.close_bin(depth="mid")
     mock_mechanism.close_bin(depth="deep")
-    assert mock_mechanism.pca9685.register_history[2] == [1800]  # shallow → CH2
-    assert mock_mechanism.pca9685.register_history[3] == [1800]  # mid → CH3
-    assert mock_mechanism.pca9685.register_history[4] == [1800]  # deep → CH4
+    assert mock_mechanism.pca9685.register_history[2] == [BIN_CLOSE_PULSE]
+    assert mock_mechanism.pca9685.register_history[3] == [BIN_CLOSE_PULSE]
+    assert mock_mechanism.pca9685.register_history[4] == [BIN_CLOSE_PULSE]
 
 
 def test_close_bin_unknown_depth_raises(mock_mechanism):
@@ -207,25 +211,61 @@ def test_close_bin_unknown_depth_raises(mock_mechanism):
 
 
 def test_convey_close_uses_off(mock_mechanism):
-    """输送停料（direction<=0）走断电释放 OFF，而非写关脉宽。"""
+    """输送停料（direction<=0）回到1500us并保持PWM，而非写关脉宽。"""
     mock_mechanism.convey(direction=0)
-    assert mock_mechanism.pca9685.register_history[0] == ["OFF"]
-    assert mock_mechanism.pca9685.register_history[1] == ["OFF"]
+    assert mock_mechanism.pca9685.register_history[0] == [1500.0]
+    assert mock_mechanism.pca9685.register_history[1] == [1500.0]
 
 
-def test_open_bin_duration_auto_closes_same_bin(mock_mechanism):
-    """开仓带 duration 时，duration 秒后自动关同一个仓（写 BIN_CLOSE_PULSE）。"""
+def test_open_bin_duration_auto_closes_then_turns_output_off(
+    mock_mechanism, monkeypatch
+):
+    """自动关仓在关仓时长结束后回1500us，持续输出PWM。"""
+    monkeypatch.setattr(
+        "grain_sampling_devices.mechanism_driver.get_grain_params",
+        lambda _grain: {"close_duration": 0.05},
+    )
     mock_mechanism.open_bin(depth="deep", duration=0.05)
-    assert mock_mechanism.pca9685.register_history[4] == [1200]
+    assert mock_mechanism.pca9685.register_history[4] == [BIN_OPEN_PULSE]
 
     deadline = time.monotonic() + 3.0
     while (
-        mock_mechanism.pca9685.register_history.get(4) != [1200, 1800]
+        mock_mechanism.pca9685.register_history.get(4)
+        != [BIN_OPEN_PULSE, BIN_CLOSE_PULSE, 1500.0]
         and time.monotonic() < deadline
     ):
         time.sleep(0.02)
 
-    assert mock_mechanism.pca9685.register_history[4] == [1200, 1800]
+    assert mock_mechanism.pca9685.register_history[4] == [
+        BIN_OPEN_PULSE,
+        BIN_CLOSE_PULSE,
+        1500.0,
+    ]
+    assert 4 not in mock_mechanism._running
+    assert 4 not in mock_mechanism._bin_timers
+
+
+def test_emergency_stop_cancels_pending_bin_timer(mock_mechanism):
+    """急停后旧定时器不得再次写关仓 PWM。"""
+    mock_mechanism.open_bin(depth="deep", duration=0.05)
+    mock_mechanism.emergency_stop()
+    time.sleep(0.1)
+
+    assert mock_mechanism.pca9685.register_history[4] == [BIN_OPEN_PULSE, 1500.0]
+    assert mock_mechanism._bin_timers == {}
+
+
+def test_explicit_close_cancels_pending_auto_close(mock_mechanism):
+    """显式关仓取消旧定时器，避免稍后重复上电。"""
+    mock_mechanism.open_bin(depth="deep", duration=0.05)
+    mock_mechanism.close_bin(depth="deep", duration=0.02)
+    time.sleep(0.1)
+
+    assert mock_mechanism.pca9685.register_history[4] == [
+        BIN_OPEN_PULSE,
+        BIN_CLOSE_PULSE,
+        1500.0,
+    ]
 
 
 def test_shutdown_stops_running_channels(mock_mechanism):
@@ -235,4 +275,4 @@ def test_shutdown_stops_running_channels(mock_mechanism):
     mock_mechanism.shutdown()
 
     assert mock_mechanism._running == set()
-    assert mock_mechanism.pca9685.register_history[1] == [1200, "OFF"]
+    assert mock_mechanism.pca9685.register_history[1] == [1200, 1500.0]

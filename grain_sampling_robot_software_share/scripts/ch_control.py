@@ -8,16 +8,16 @@
     python3 ch_control.py 5 1900   # CH5 输出 1900us（夹紧）
     python3 ch_control.py 5 1200   # CH5 输出 1200us（松开）
     python3 ch_control.py 5 init   # CH5 1500us 中位初始化
-    python3 ch_control.py 5 off    # CH5 断电释放（停止）
+    python3 ch_control.py 5 off    # CH5 回1500us（保持PWM）
     python3 ch_control.py 5 read   # 读 CH5 当前状态
 """
 import sys
 import os
 import fcntl
 
-# TP I2C4，Linux 设备映射待现场核实；支持环境变量覆盖。
+# 本机已确认I2C2；支持环境变量覆盖。
 I2C_BUS = (os.environ.get("PCA9685_I2C_DEVICE", "").strip()
-           or f"/dev/i2c-{os.environ.get('PCA9685_I2C_BUS', '4')}")
+           or f"/dev/i2c-{os.environ.get('PCA9685_I2C_BUS', '2')}")
 I2C_ADDR = 0x40
 LED0_ON_L = 0x06
 
@@ -46,12 +46,8 @@ def set_pulse_us(ch, us):
 
 
 def channel_off(ch):
-    base = LED0_ON_L + 4 * ch
-    write_reg(base + 0, 0x00)
-    write_reg(base + 1, 0x00)
-    write_reg(base + 2, 0x00)
-    write_reg(base + 3, 0x10)  # FULL_OFF bit
-    print(f"CH{ch} -> 断电释放 (full-off)")
+    set_pulse_us(ch, 1500)
+    print(f"CH{ch} -> 1500us 中位停止，保持PWM")
 
 
 def read_state(ch):

@@ -1,3 +1,4 @@
-# Stable name for the USB FTDI remote-control receiver.  The X2P servo uses
+# Stable name for the USB FTDI chassis link (formerly the RC receiver adapter).
+# RC now connects to STM32 USART1. The X2P servo uses
 # the LPB3588 onboard RS485 port (/dev/ttyS0), so it needs no udev USB alias.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="AB3N91KX", SYMLINK+="rc_receiver", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="AB3N91KX", SYMLINK+="chassis_serial", GROUP="dialout", MODE="0660"

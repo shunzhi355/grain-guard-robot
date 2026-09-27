@@ -89,6 +89,7 @@ class TestFullWorkflow:
 
         # Step 8 → 9: waste discharged
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
         # Step 9 → 10: suction complete
@@ -97,10 +98,9 @@ class TestFullWorkflow:
 
         # Step 10 → 11: convey complete
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        assert fsm.current_state == SamplingState.OPEN_BIN
+        assert fsm.current_state == SamplingState.CONVEY_DONE
 
         # Step 11 → 12: bin opened
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         assert fsm.current_state == SamplingState.CONVEY_DONE
 
         # Step 12 → 13: user confirms done
@@ -164,9 +164,9 @@ class TestFullWorkflow:
 
         # Continue: DISCHARGE_WASTE → FORMAL_SAMPLING → CONVEY_1 → OPEN_BIN → CONVEY_DONE → NEXT_CHECK
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -184,9 +184,9 @@ class TestFullWorkflow:
 
         # Finish: DISCHARGE → FORMAL → CONVEY → BIN → DONE → NEXT_CHECK
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -213,9 +213,9 @@ class TestFullWorkflow:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
         assert fsm.current_waypoint_index == 0  # still first
@@ -234,9 +234,9 @@ class TestFullWorkflow:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -264,6 +264,7 @@ class TestSafetyControls:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
     def test_pause_and_resume(self, fsm: SamplingStateMachine) -> None:
@@ -437,9 +438,9 @@ class TestTracking:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -500,6 +501,7 @@ class TestIsRunning:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         assert fsm.current_state == SamplingState.FORMAL_SAMPLING
         assert fsm.is_running
 
@@ -517,9 +519,9 @@ class TestIsRunning:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         fsm.transition(SamplingAction.CONFIRM_RETURN)
@@ -555,6 +557,7 @@ class TestCallback:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
 
         fsm.on_state_change = recorder
         fsm.pause()
@@ -624,6 +627,7 @@ class TestIllegalTransitions:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         assert fsm.current_state == SamplingState.FORMAL_SAMPLING
         fsm.transition(SamplingAction.STOP)
         assert fsm.current_state == SamplingState.STOPPED
@@ -648,6 +652,7 @@ class TestSafetyControlsExtended:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
     def test_stop_during_convey(self) -> None:
@@ -699,7 +704,6 @@ class TestSafetyControlsExtended:
         self._reach_formal_sampling(fsm)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
         with pytest.raises(ValueError, match="only valid during FORMAL_SAMPLING"):
@@ -811,9 +815,9 @@ class TestMultiPointMultiDepth:
         assert fsm.current_depth_index == 0  # DEPTH_REACHED 不递增 depth
 
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -830,9 +834,9 @@ class TestMultiPointMultiDepth:
         assert fsm.current_depth_index == 1  # DEPTH_REACHED 不递增
 
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -854,9 +858,9 @@ class TestMultiPointMultiDepth:
         assert fsm.current_depth_index == 0
 
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -871,9 +875,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -897,9 +901,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
         assert fsm.current_waypoint_index == 0
@@ -913,9 +917,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -928,9 +932,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -960,9 +964,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         assert fsm.current_depth_index == 0
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -978,9 +982,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         assert fsm.current_depth_index == 1
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -996,9 +1000,9 @@ class TestMultiPointMultiDepth:
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         assert fsm.current_depth_index == 2
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
@@ -1030,9 +1034,9 @@ class TestCallbacksExtended:
         fsm.transition(SamplingAction.CONFIRM_PIPE_ADDED)
         fsm.transition(SamplingAction.SYSTEM_DEPTH_REACHED)
         fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
-        fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
         fsm.transition(SamplingAction.CONFIRM_DONE)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         fsm.transition(SamplingAction.CONFIRM_RETURN)

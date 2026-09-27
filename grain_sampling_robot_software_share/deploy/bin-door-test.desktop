@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=三仓开关测试
+Comment=输入1/2/3测试浅仓、中仓、深仓，q退出
+Exec=lxterminal --title=三仓开关测试 --command="bash '/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share/scripts/run_bin_door_terminal.sh'"
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;

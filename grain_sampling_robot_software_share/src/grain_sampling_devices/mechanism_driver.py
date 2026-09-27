@@ -2,8 +2,8 @@
 
 架构（三层）：
 - :class:`PCA9685`：真实硬件封装。直接通过 Linux i2c-dev（``fcntl.ioctl``
-   I2C_SLAVE=0x0703）访问 ``/dev/i2c-4``, 0x40，无 adafruit 等第三方依赖。
-   顶层不打开任何设备（Windows 开发机无 /dev/i2c-4，import 必须安全）。
+   I2C_SLAVE=0x0703）访问 ``/dev/i2c-2``, 0x40，无 adafruit 等第三方依赖。
+   顶层不打开任何设备（Windows 开发机无 I2C，import 必须安全）。
 - :class:`MechanismController`：真实控制器。I2C 写操作统一加线程锁、
   失败自动重试 2 次、duration 后台 daemon 线程自动回停、急停抢断
   （只停运行中通道）、品种参数来自 ``mechanism_config.get_grain_params``。
@@ -12,10 +12,10 @@
   记录到 ``register_history``），全部动作同时记录到 ``action_history``。
 
 设计约定（mechanism-driver 计划）：
-- PCA9685：工控机 TP I²C（Linux 总线映射待核实）（默认 /dev/i2c-4），地址 0x40，50Hz，4096 计数/周期
+- PCA9685：本机断电/上电对照确认 /dev/i2c-2，地址 0x40，50Hz，4096 计数/周期
 - 执行器映射：CH0/1=螺旋输送、CH2/3/4=开仓(浅/中/深)、CH5=夹紧、CH6=拧紧、
-  CH7=负压风机(未接)；伺服升降(未接)
-- 脉宽标定：开/松开/拧松=1000us、关=1900us、夹紧=1900us、拧紧=1300us、停=断电释放（full-off）。
+  CH7=负压风机；伺服升降独立控制
+- 脉宽标定从 sampling_params 读取；停止固定为持续1500us中位，不切断PWM。
   写入前钳制到全局合法范围 1000~2300us（sampling_params.PULSE_MIN_US/MAX_US）。
 - 接口差异说明：真实 ``PCA9685.set_pwm(channel, pulse_us)`` 直接写脉宽；
   MockMechanismController 调用注入的 mock 时用 ``set_pwm(channel, 0, pulse_us)``
@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover - Windows 开发机
     fcntl = None
 
 from grain_sampling_workflow.mechanism_config import get_grain_params
+from grain_sampling_devices.tp_i2c import validate_tp_bus
 from utils.sampling_params import (
     BIN_CLOSE_PULSE,
     BIN_OPEN_PULSE,
@@ -78,22 +79,21 @@ LED0_ON_L = 0x06
 PRESCALE = 0xFE
 
 MODE1_RESTART = 0x80
+MODE1_EXTCLK = 0x40
 MODE1_AUTO_INCREMENT = 0x20
 MODE1_SLEEP = 0x10
 MODE1_ALLCALL = 0x01
 MODE2_OUTDRV = 0x04
-FULL_ON_OFF_BIT = 0x10
 
 CHANNEL_COUNT = 16
 COUNTS_PER_CYCLE = 4096
-#: 振荡器频率用实测校准值（sampling_params.PCA9685_OSCILLATOR_HZ，
-#: 标称 25MHz，实机 +10.4% 偏差）。否则输出频率偏离 50Hz。
+#: 按用户要求恢复最早版本的旧板实测校准值，统一从参数文件读取。
 OSCILLATOR_HZ = PCA9685_OSCILLATOR_HZ
 DEFAULT_FREQUENCY_HZ = PCA9685_FREQUENCY_HZ
 
 
 def frequency_to_prescale(frequency_hz: float) -> int:
-    """频率 -> PRESCALE 寄存器值（25MHz / (4096 * hz) - 1）。"""
+    """频率 -> PRESCALE 寄存器值（校准振荡器频率 / (4096 * hz) - 1）。"""
     if frequency_hz <= 0:
         raise ValueError("frequency must be greater than zero")
     prescale = int(round(OSCILLATOR_HZ / (COUNTS_PER_CYCLE * frequency_hz) - 1.0))
@@ -153,7 +153,7 @@ def _serialized_i2c(method):
 class PCA9685:
     """PCA9685 16 通道 PWM 驱动（Linux i2c-dev 直连，无 adafruit）。
 
-    默认硬件：工控机 TP I²C（Linux 总线映射待核实），/dev/i2c-4, 0x40, 50Hz。
+    默认硬件：本机已验证 /dev/i2c-2, 0x40, 旧板校准27.545088MHz、目标50Hz。
     注意：模块顶层不打开设备；``open()`` 是显式的（Windows 上会抛 RuntimeError）。
 
     高层接口 ``set_pwm(channel, pulse_us)`` 直接写脉宽(us)——
@@ -186,6 +186,7 @@ class PCA9685:
                 f"I2C is not supported on this platform (no fcntl module); "
                 f"cannot open {self.device}"
             )
+        validate_tp_bus(self.device)
         try:
             self.fd = os.open(self.device, os.O_RDWR)
         except FileNotFoundError as exc:
@@ -200,8 +201,9 @@ class PCA9685:
             ) from exc
         try:
             fcntl.ioctl(self.fd, I2C_SLAVE, self.address)
-            # Opening another user of the shared chip must not reset outputs.
+            # Restore first-revision oscillator initialization on every open.
             self.set_frequency(DEFAULT_FREQUENCY_HZ)
+            self.all_stop()  # 保留用户要求：初始化为持续中位，不恢复FULL_OFF。
         except Exception:
             self.close()
             raise
@@ -272,23 +274,6 @@ class PCA9685:
         """写入 PRESCALE 设置 PWM 频率（默认 50Hz），返回实际频率。"""
         prescale = frequency_to_prescale(frequency_hz)
         old_mode = self.read_register(MODE1)
-        current_prescale = self.read_register(PRESCALE)
-        mode2 = self.read_register(MODE2)
-        if (not old_mode & MODE1_SLEEP and current_prescale == prescale
-                and old_mode & MODE1_AUTO_INCREMENT
-                and mode2 & MODE2_OUTDRV and not mode2 & 0x08):
-            self.frequency_hz = prescale_to_frequency(prescale)
-            return self.frequency_hz
-
-        # Reject retiming active channels; all 16 outputs share one oscillator.
-        if not old_mode & MODE1_SLEEP:
-            for channel in range(CHANNEL_COUNT):
-                base = self._channel_base(channel)
-                on = self.read_register(base) | (self.read_register(base + 1) << 8)
-                off = self.read_register(base + 2) | (self.read_register(base + 3) << 8)
-                if not off & 0x1000 and (on & 0x1000 or (on & 0xFFF) != (off & 0xFFF)):
-                    raise RuntimeError("PCA9685 configuration differs while outputs are active; "
-                                       "stop all PWM users before changing frequency")
         sleep_mode = (old_mode & ~MODE1_RESTART) | MODE1_SLEEP
         awake_mode = (
             (old_mode & ~MODE1_SLEEP) | MODE1_AUTO_INCREMENT | MODE1_ALLCALL
@@ -299,10 +284,9 @@ class PCA9685:
         self.write_register(MODE1, awake_mode)
         time.sleep(0.005)
         self.write_register(MODE1, awake_mode | MODE1_RESTART)
-        # OCH=0 updates channel registers together on the transaction STOP.
-        self.write_register(MODE2, (mode2 | MODE2_OUTDRV) & ~0x08)
-        self.frequency_hz = prescale_to_frequency(prescale)
-        return self.frequency_hz
+        self.write_register(MODE2, self.read_register(MODE2) | MODE2_OUTDRV)
+        self.frequency_hz = frequency_hz
+        return prescale_to_frequency(prescale)
 
     # -- 通道 PWM ---------------------------------------------------------
     @staticmethod
@@ -323,26 +307,38 @@ class PCA9685:
         """
         counts = pulse_us_to_counts(clamp_pulse_us(pulse_us), self.frequency_hz)
         base = self._channel_base(channel)
-        self._write_channel(base, 0, 0, counts & 0xFF, (counts >> 8) & 0x0F)
+        self.write_register(base, 0)
+        self.write_register(base + 1, 0)
+        self.write_register(base + 2, counts & 0xFF)
+        self.write_register(base + 3, (counts >> 8) & 0x0F)
         return counts
 
     @_serialized_i2c
-    def channel_off(self, channel: int) -> None:
-        """单通道输出关闭（LED full-off 位，断电释放，不发 PWM 波形）。"""
+    def channel_stop(self, channel: int) -> None:
+        """停止电机而不停止信号：持续输出固定 1500us 中位。"""
         base = self._channel_base(channel)
-        self._write_channel(base, 0, 0, 0, FULL_ON_OFF_BIT)
+        counts = pulse_us_to_counts(PULSE_STOP, self.frequency_hz)
+        # 与原始逐寄存器写入逻辑一致；停止时不写FULL_OFF。
+        self._write_channel(base, 0, 0, counts & 255, (counts >> 8) & 15)
+
+    def channel_off(self, channel: int) -> None:
+        """旧接口兼容：语义已改为1500us中位，不再设置 FULL_OFF。"""
+        self.channel_stop(channel)
 
     def _write_channel(self, base: int, *values: int) -> None:
-        payload = bytes((base, *values))
-        written = os.write(self._require_open(), payload)
-        if written != len(payload):
-            raise RuntimeError(f"short I2C channel write: expected {len(payload)}, wrote {written}")
+        # Restore the first revision's separate register transactions.
+        for offset, value in enumerate(values):
+            self.write_register(base + offset, value)
 
     @_serialized_i2c
+    def all_stop(self) -> None:
+        """所有已配置机构回到持续中位，未使用通道不参与控制。"""
+        for channel in sorted(set(CHANNELS.values())):
+            self.channel_stop(channel)
+
     def all_off(self) -> None:
-        """全部通道输出关闭（LED full-off 位）。"""
-        for channel in range(CHANNEL_COUNT):
-            self.channel_off(channel)
+        """旧接口兼容：回中位，保持PWM。"""
+        self.all_stop()
 
 
 class _RecordingPCA9685:
@@ -363,10 +359,13 @@ class _RecordingPCA9685:
         pass
 
     def channel_off(self, channel: int) -> None:
-        self.register_history.setdefault(channel, []).append("OFF")
+        self.set_pwm(channel, PULSE_STOP)
+
+    channel_stop = channel_off
 
     def all_off(self) -> None:
-        pass
+        for channel in sorted(set(CHANNELS.values())):
+            self.channel_stop(channel)
 
 
 class _BaseMechanismController:
@@ -391,7 +390,8 @@ class _BaseMechanismController:
     def __init__(self, pca9685=None, mock_mode: bool = True) -> None:
         self.pca9685 = pca9685
         self.mock_mode = bool(mock_mode)
-        self._lock = threading.Lock()        # 保护 I2C 写 + _running
+        self._lock = threading.RLock()       # 保护 I2C 写 + _running + 仓门定时器
+        self._bin_timers: dict[int, threading.Timer] = {}
         self._running: set = set()           # 运行中通道集合
         self._stop_flag = threading.Event()  # 急停/关闭标志
         self._shutdown = False
@@ -403,9 +403,9 @@ class _BaseMechanismController:
         self.throttle_close = PULSE_CLOSE
         self.stop_value = PULSE_STOP
         #: 可选 X2P 伺服升降驱动器（USB-RS485）。提供时 press/lift 走真实
-        #: 伺服（需暴露 ``run_speed(direction, rpm, duration_s)`` 与
-        #: ``stop()``，与 dais516 x2p.MotionController 接口一致）；缺省为
-        #: 占位 no-op。
+        #: 伺服（需暴露位置控制接口；兼容入口为
+        #: ``run_speed(direction, rpm, duration_s)`` 与 ``stop()``，由
+        #: dais516 x2p.MotionController 转换为内部位置段）；缺省为占位 no-op。
         self.lift_drive = None
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30
@@ -421,7 +421,7 @@ class _BaseMechanismController:
         raise NotImplementedError
 
     def _write_hw_off(self, channel: int) -> None:
-        """低层断电释放（full-off）写入，子类实现。"""
+        """低层持续1500us中位写入（历史方法名保留）。"""
         raise NotImplementedError
 
     def _write_pulse(self, channel: int, pulse_us: float) -> None:
@@ -430,7 +430,10 @@ class _BaseMechanismController:
         for attempt in range(self.WRITE_ATTEMPTS):
             try:
                 with self._lock:
+                    if self._stop_flag.is_set():
+                        raise RuntimeError("controller is in emergency-stop state")
                     self._write_hw(channel, pulse_us)
+                    self._running.add(channel)
                 return
             except Exception as exc:  # noqa: BLE001 - 重试语义捕获一切 I2C 错误
                 last_error = exc
@@ -442,19 +445,20 @@ class _BaseMechanismController:
         ) from last_error
 
     def _write_off(self, channel: int) -> None:
-        """加锁写入断电释放（full-off），失败重试后抛 RuntimeError。"""
+        """加锁回中位并保持PWM，失败重试后抛 RuntimeError。"""
         last_error = None
         for attempt in range(self.WRITE_ATTEMPTS):
             try:
                 with self._lock:
                     self._write_hw_off(channel)
+                    self._running.discard(channel)
                 return
             except Exception as exc:  # noqa: BLE001 - 重试语义捕获一切 I2C 错误
                 last_error = exc
                 if attempt < self.WRITE_ATTEMPTS - 1:
                     time.sleep(self.RETRY_INTERVAL)
         raise RuntimeError(
-            f"failed to write off to channel {channel} after "
+            f"failed to write neutral to channel {channel} after "
             f"{self.WRITE_ATTEMPTS} attempts: {last_error}"
         ) from last_error
 
@@ -466,7 +470,7 @@ class _BaseMechanismController:
         )
 
     def set_stop(self, channel: int) -> None:
-        """将通道断电释放（full-off，不发 PWM 波形）。"""
+        """停止电机，通道保持1500us中位PWM。"""
         self._write_off(channel)
         self.action_history.append(("set_stop", {"channel": channel}))
 
@@ -476,8 +480,7 @@ class _BaseMechanismController:
 
         - ``open``/``close`` 按品种油门脉宽写入；``duration>0`` 时
           duration 秒后自动回停（daemon 线程，期间通道记入 ``_running``）。
-        - ``stop`` 立即断电释放（full-off，不发 PWM 波形）并从 ``_running``
-          移除。断电释放避免非中位脉宽导致电机持续通电堵转发热。
+        - ``stop`` 立即回到1500us并持续输出PWM，从 ``_running`` 移除。
         - 急停（``emergency_stop``）后拒绝新动作，抛 RuntimeError。
         """
         if action not in self.ACTION_TO_ATTR:
@@ -492,7 +495,7 @@ class _BaseMechanismController:
             self._write_off(channel)
             self.action_history.append(
                 ("actuate", {"channel": channel, "action": action,
-                             "off": True, "duration": duration})
+                             "pulse_us": PULSE_STOP, "duration": duration})
             )
             with self._lock:
                 self._running.discard(channel)
@@ -511,7 +514,7 @@ class _BaseMechanismController:
             ).start()
 
     def _auto_stop(self, channel: int, duration: float) -> None:
-        """后台 daemon：duration 秒后断电释放（full-off）并移出运行集合。
+        """后台 daemon：duration 秒后回到1500us并移出运行集合。
 
         急停/关闭会 set ``_stop_flag``，本线程立即被唤醒并放弃
         （停止写入由 emergency_stop/shutdown 完成，避免重复写）。
@@ -527,10 +530,13 @@ class _BaseMechanismController:
 
     # -- 急停 / 恢复 ------------------------------------------------------
     def emergency_stop(self) -> None:
-        """急停：置停止标志，立即对运行中通道断电释放（full-off）并清空运行集合。"""
+        """急停：锁定新动作，所有机构回1500us；保留伺服停止命令。"""
         self._stop_flag.set()
         with self._lock:
-            running = list(self._running)
+            for timer in self._bin_timers.values():
+                timer.cancel()
+            self._bin_timers.clear()
+            running = sorted(set(self._running) | set(CHANNELS.values()))
             self._running.clear()
         self.action_history.append(("emergency_stop", {"channels": running}))
         for ch in running:
@@ -588,7 +594,7 @@ class _BaseMechanismController:
             ).start()
 
     def convey(self, duration=None, direction: int = 1) -> None:
-        """螺旋输送：direction>0 送料(开=1200us)，direction<=0 停料(断电释放 OFF)。
+        """螺旋输送：direction>0 送料(开=1200us)，direction<=0 回1500us停料。
 
         同时驱动 CH0（convey_1）与 CH1（convey_2）两个输送通道——
         实机确认两个螺旋输送需同时开启才正常出粮。
@@ -609,17 +615,88 @@ class _BaseMechanismController:
                 f"unknown bin depth {depth!r}; expected shallow/mid/deep"
             )
         channel = CHANNELS[key]
-        self._act_pulse("open_bin", channel, BIN_OPEN_PULSE, None)
-        if duration is not None and duration > 0:
-            timer = threading.Timer(
-                duration, self._auto_close_bin, args=(channel,)
-            )
-            timer.daemon = True
-            timer.start()
+        with self._lock:
+            self._cancel_bin_timer(channel)
+            self._act_pulse("open_bin", channel, BIN_OPEN_PULSE, None)
+            if duration is not None and duration > 0:
+                timer = threading.Timer(
+                    duration, lambda: self._auto_close_bin(channel, timer)
+                )
+                timer.daemon = True
+                self._bin_timers[channel] = timer
+                timer.start()
 
-    def _auto_close_bin(self, channel: int) -> None:
-        """开仓后的自动关门：对同一仓通道写 BIN_CLOSE_PULSE=1800us。"""
-        self._act_pulse("close_bin_auto", channel, BIN_CLOSE_PULSE, None)
+    def _cancel_bin_timer(self, channel: int) -> None:
+        timer = self._bin_timers.pop(channel, None)
+        if timer is not None:
+            timer.cancel()
+
+    def hold_bin_open(self, depth: str) -> None:
+        """正式流程：目标仓开门、其他两仓同时关门，到时各自回1500us。"""
+        if depth not in ("shallow", "mid", "deep"):
+            raise ValueError(f"unknown bin depth {depth!r}; expected shallow/mid/deep")
+        params = get_grain_params(self.current_grain or "")
+        with self._lock:
+            try:
+                for name in ("shallow", "mid", "deep"):
+                    selected = name == depth
+                    self._move_bin(
+                        "hold_bin_open" if selected else "close_bin",
+                        CHANNELS[f"bin_{name}"],
+                        BIN_OPEN_PULSE if selected else BIN_CLOSE_PULSE,
+                        float(params["open_duration" if selected else "close_duration"]),
+                    )
+            except Exception:
+                self.emergency_stop()
+                raise
+
+    def _move_bin(self, action: str, channel: int, pulse: float, duration) -> None:
+        """仓门定时回中位；新动作取消旧回调，避免重试/换仓被旧定时器截断。"""
+        with self._lock:
+            self._cancel_bin_timer(channel)
+            self.set_pulse(channel, pulse)
+            self.action_history.append(
+                (action, {"channel": channel, "pulse_us": pulse, "duration": duration})
+            )
+            if duration is not None and duration > 0:
+                timer = threading.Timer(
+                    duration, lambda: self._finish_bin_move(channel, timer)
+                )
+                timer.daemon = True
+                self._bin_timers[channel] = timer
+                timer.start()
+
+    def _finish_bin_move(self, channel: int, timer) -> None:
+        with self._lock:
+            if self._stop_flag.is_set() or self._bin_timers.get(channel) is not timer:
+                return
+            self._bin_timers.pop(channel, None)
+            try:
+                self.set_stop(channel)
+            except Exception:
+                logger.exception("Failed to return bin channel %s to neutral", channel)
+                self.emergency_stop()
+
+    def close_all_bins(self, duration=None) -> None:
+        """三仓同时按关门方向运行，动作到时保持1500us中位。"""
+        if duration is None:
+            duration = float(get_grain_params(self.current_grain or "")["close_duration"])
+        with self._lock:
+            try:
+                for depth in ("shallow", "mid", "deep"):
+                    self.close_bin(depth, duration=duration)
+            except Exception:
+                self.emergency_stop()
+                raise
+
+    def _auto_close_bin(self, channel: int, timer=None) -> None:
+        """旧服务自动关仓；过期或急停后的回调不再输出。"""
+        with self._lock:
+            if self._stop_flag.is_set() or self._bin_timers.get(channel) is not timer:
+                return
+            self._bin_timers.pop(channel, None)
+            duration = float(get_grain_params(self.current_grain or "")["close_duration"])
+            self._move_bin("close_bin_auto", channel, BIN_CLOSE_PULSE, duration)
 
     def close_bin(self, depth: str = "mid", duration=None) -> None:
         """关仓，depth 取值 shallow/mid/deep。独立标定 BIN_CLOSE_PULSE=1800us。"""
@@ -628,7 +705,11 @@ class _BaseMechanismController:
             raise ValueError(
                 f"unknown bin depth {depth!r}; expected shallow/mid/deep"
             )
-        self._act_pulse("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
+        with self._lock:
+            self._cancel_bin_timer(CHANNELS[key])
+            if duration is None:
+                duration = float(get_grain_params(self.current_grain or "")["close_duration"])
+            self._move_bin("close_bin", CHANNELS[key], BIN_CLOSE_PULSE, duration)
 
     def clamp(self, duration=None) -> None:
         """夹紧（CH5 独立标定：1900us）。"""
@@ -700,7 +781,7 @@ class _BaseMechanismController:
         ----------
         direction : str
             ``up``/``down`` 为单程；``down_cycle`` 保存原点并往复下压，
-            ``return`` 回到保存原点下方的安全余量位置。
+            ``return`` 回到本轮保存的编码器原点。
         distance_cm : float
             移动距离（厘米），必须 > 0。
         duration_s : float | None
@@ -827,23 +908,27 @@ class _BaseMechanismController:
             )
 
     def fan(self, duration=None) -> None:
-        """负压风机（未接线占位；真实控制器中为占位 no-op）。"""
+        """负压风机 CH7。"""
         self._act("fan", CHANNELS["fan"], "open", duration=duration)
 
     # -- 关闭 -------------------------------------------------------------
     def shutdown(self) -> None:
-        """停止所有运行中通道并取消后台线程。幂等。"""
+        """取消后台任务，所有机构保持1500us。幂等。"""
         with self._lock:
             if self._shutdown:
                 return
             self._shutdown = True
-            running = list(self._running)
+            self._stop_flag.set()
+            for timer in self._bin_timers.values():
+                timer.cancel()
+            self._bin_timers.clear()
+            running = sorted(set(self._running) | set(CHANNELS.values()))
             self._running.clear()
         for ch in running:
             try:
                 self._write_off(ch)
-            except Exception:  # noqa: BLE001 - 关闭写入尽力而为
-                pass
+            except Exception:  # noqa: BLE001 - 通信故障不能保证物理停机
+                logger.exception('Failed to hold CH%d neutral during shutdown', ch)
         self._stop_flag.set()
 
 
@@ -851,7 +936,7 @@ class MechanismController(_BaseMechanismController):
     """真实机构控制器：PCA9685 + I2C 锁 + 失败重试 + 急停 + 品种参数。
 
     ``pca9685`` 缺省时：mock_mode=True 用内部记录件，mock_mode=False 用真实
-    :class:`PCA9685`（此时需先调用 ``open()`` 打开 /dev/i2c-4）。
+    :class:`PCA9685`（此时需先调用 ``open()`` 打开 /dev/i2c-2）。
     """
 
     def __init__(self, pca9685=None, mock_mode: bool = False, lift_drive=None) -> None:
@@ -860,8 +945,9 @@ class MechanismController(_BaseMechanismController):
         super().__init__(pca9685=pca9685, mock_mode=mock_mode)
         #: 可选 X2P 伺服升降驱动器（USB-RS485）。提供时 press/lift 走
         #: 真实伺服；缺省为占位 no-op。调用方负责构造并注入：
-        #: ``lift_drive`` 需暴露 ``run_speed(direction, rpm, duration_s)``
-        #: 与 ``stop()``（与 dais516 x2p.MotionController 接口一致）。
+        #: ``lift_drive`` 需暴露位置控制接口；兼容入口
+        #: ``run_speed(direction, rpm, duration_s)`` 与 ``stop()`` 由
+        #: dais516 x2p.MotionController 提供。
         self.lift_drive = lift_drive
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30
@@ -874,12 +960,16 @@ class MechanismController(_BaseMechanismController):
             open_()
 
     def init_escs(self, hold_s: float = 3.0) -> None:
-        """仅初始化机构 CH0–6；底盘 CH10/CH9 由 motor_driver 独立初始化。"""
-        channels = tuple(sorted(set(CHANNELS.values()) - {CHANNELS.get("fan", 7)}))
-        for ch in channels:
-            self.set_pulse(ch, PULSE_STOP)
-        if hold_s > 0:
-            time.sleep(float(hold_s))
+        """初始化机构 CH0–7 的电调中位。"""
+        channels = tuple(sorted(set(CHANNELS.values())))
+        try:
+            for ch in channels:
+                self.set_pulse(ch, PULSE_STOP)
+            if hold_s > 0:
+                time.sleep(float(hold_s))
+        except Exception:
+            self.emergency_stop()
+            raise
         self.action_history.append(
             ("init_escs", {"channels": list(channels),
                            "hold_s": hold_s})
@@ -887,6 +977,7 @@ class MechanismController(_BaseMechanismController):
 
     def close(self) -> None:
         """关闭底层 I2C 设备与 X2P 升降伺服连接。"""
+        self.shutdown()  # PCA9685在关闭文件描述符后仍自主输出中位PWM。
         close_ = getattr(self.pca9685, "close", None)
         if close_ is not None:
             close_()
@@ -904,9 +995,9 @@ class MechanismController(_BaseMechanismController):
         self.pca9685.set_pwm(channel, pulse_us)
 
     def _write_hw_off(self, channel: int) -> None:
-        self.pca9685.channel_off(channel)
+        self.pca9685.channel_stop(channel)
 
-    # -- 未接线通道占位（press/lift/fan） ---------------------------------
+    # -- 未接线通道占位（press/lift） -------------------------------------
     def _unwired(self, name: str, channel: int, action: str, duration) -> None:
         if ENABLE_UNWIRED_CHANNELS:
             self._act(name, channel, action, duration=duration)
@@ -939,8 +1030,8 @@ class MechanismController(_BaseMechanismController):
         self._unwired("lift", CHANNELS["bin_shallow"], "close", duration)
 
     def fan(self, duration=None) -> None:
-        """负压风机（未接通道占位；ENABLE_UNWIRED_CHANNELS=True 时写 I2C）。"""
-        self._unwired("fan", CHANNELS["fan"], "open", duration)
+        """负压风机 CH7，按机构脉宽输出。"""
+        self._act("fan", CHANNELS["fan"], "open", duration=duration)
 
 
 class MockMechanismController(_BaseMechanismController):
@@ -964,4 +1055,4 @@ class MockMechanismController(_BaseMechanismController):
 
     def _write_hw_off(self, channel: int) -> None:
         if self.pca9685 is not None:
-            self.pca9685.channel_off(channel)
+            self.pca9685.set_pwm(channel, 0, PULSE_STOP)

@@ -93,24 +93,32 @@ try:
     from std_msgs.msg import Empty, String  # type: ignore[import-untyped]
     from std_srvs.srv import Trigger  # type: ignore[import-untyped]
 
-    # mechanism_node/SetGrain 自定义服务（请求含 string grain 字段）。
-    # 与 mechanism_node.py 保持一致：用 roslib 动态生成完整可序列化的服务类型。
-    SET_GRAIN_SRV_TEXT = "string grain\n---\nbool success\nstring message\n"
-    MOVE_LIFT_SRV_TEXT = (
-        "string direction\nfloat32 distance_cm\n---\nbool success\nstring message\n"
-    )
+    # Prefer catkin's generated Python classes.  The second argument of
+    # roslib.message.get_service_class is ``reload_on_error`` (bool), not srv
+    # source text; passing the definition there used to silently return None
+    # when the UI was launched without a sourced mechanism workspace.
     try:
-        from roslib.message import get_service_class
+        from mechanism_node.srv import MoveLift as _GeneratedMoveLift
+        from mechanism_node.srv import SetGrain as _GeneratedSetGrain
 
-        SetGrain = get_service_class("mechanism_node/SetGrain", SET_GRAIN_SRV_TEXT)
-        MoveLift = get_service_class("mechanism_node/MoveLift", MOVE_LIFT_SRV_TEXT)
+        SetGrain = _GeneratedSetGrain
+        MoveLift = _GeneratedMoveLift
     except Exception:  # noqa: BLE001 - 退化为模块内回退类
-        logger.warning(
-            "roslib.message.get_service_class failed — SetGrain/MoveLift falls back "
-            "to a local mock class (wire serialization unavailable)"
-        )
-        SetGrain = _FallbackSetGrain
-        MoveLift = _FallbackMoveLift
+        try:
+            from roslib.message import get_service_class
+
+            SetGrain = get_service_class("mechanism_node/SetGrain")
+            MoveLift = get_service_class("mechanism_node/MoveLift")
+        except Exception:  # noqa: BLE001
+            SetGrain = None
+            MoveLift = None
+        if SetGrain is None or MoveLift is None:
+            logger.warning(
+                "mechanism_node generated service classes unavailable — "
+                "SetGrain/MoveLift calls cannot use ROS wire serialization"
+            )
+            SetGrain = _FallbackSetGrain
+            MoveLift = _FallbackMoveLift
     HAS_ROS = True
 except ImportError:
     HAS_ROS = False
@@ -137,6 +145,10 @@ class SamplingBridge:
 
     def __init__(self, node_name: str = "sampling_bridge") -> None:
         self._node_name: str = node_name
+        # Exact failure returned by the most recent service call.  The
+        # orchestrator uses it as the UI stop reason instead of discarding the
+        # actionable hardware message.
+        self.last_error: str = ""
 
         # Navigation state (updated by topic callback)
         self._nav_completed: bool = False
@@ -284,6 +296,23 @@ class SamplingBridge:
         """
         return self._call_trigger("/mechanism/convey")
 
+    def call_start_convey(self) -> bool:
+        """Run both conveyors until the workflow explicitly stops them."""
+        return self._call_trigger("/mechanism/start_convey")
+
+    def call_stop_convey(self) -> bool:
+        """Return both conveyors to continuous neutral PWM."""
+        return self._call_trigger("/mechanism/stop_convey")
+
+    def call_close_all_bins(self) -> bool:
+        """Close all three bins concurrently, then return each motor to neutral."""
+        return self._call_trigger("/mechanism/close_all_bins")
+
+    def call_hold_bin_open(self, depth_level: int) -> bool:
+        """Open the selected bin and close the other two, then hold neutral PWM."""
+        depth_name = {0: "shallow", 1: "mid", 2: "deep"}[int(depth_level)]
+        return self._call_trigger(f"/mechanism/hold_bin_open/{depth_name}")
+
     def call_open_bin(self, depth_level: int) -> bool:
         """Open the storage bin for the given *depth_level*.
 
@@ -300,6 +329,10 @@ class SamplingBridge:
         Calls ``/mechanism/clamp`` (``Trigger``).
         """
         return self._call_trigger("/mechanism/clamp")
+
+    def call_lift_health(self) -> bool:
+        """Verify X2P communication by reading the encoder without motion."""
+        return self._call_trigger("/mechanism/lift_health")
 
     def call_unclamp(self) -> bool:
         """Release the clamp of the sampling mechanism.
@@ -349,6 +382,7 @@ class SamplingBridge:
         jogs.  Stub mode (no ROS) returns True.
         """
         if not HAS_ROS:
+            self.last_error = ""
             logger.debug("[Stub] move_lift(%s, %.1fcm) -> True", direction, distance_cm)
             return True
 
@@ -364,6 +398,7 @@ class SamplingBridge:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
             logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
         except Exception:
+            self.last_error = f"{service_name}: service unavailable"
             logger.exception(
                 "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
                 service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
@@ -374,6 +409,7 @@ class SamplingBridge:
             proxy = rospy.ServiceProxy(service_name, MoveLift)
             response = proxy(direction=direction, distance_cm=float(distance_cm))
         except Exception:
+            self.last_error = f"{service_name}: service call exception"
             logger.exception(
                 "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
                 service_name, time.monotonic() - started,
@@ -386,12 +422,14 @@ class SamplingBridge:
         )
 
         if not response.success:
+            self.last_error = f"{service_name}: {response.message}"
             logger.warning(
                 "Service %s returned failure: %s",
                 service_name, response.message,
             )
             return False
 
+        self.last_error = ""
         logger.info(
             "Service %s succeeded: %s", service_name, response.message
         )
@@ -478,6 +516,8 @@ class SamplingBridge:
             logger.info("Emergency stop: chassis halted (cmd_vel=0, cancel_goal)")
 
         # Also try mechanism emergency stop
+        if os.environ.get("CHASSIS_BACKEND", "udp") == "serial":
+            self._call_trigger("/chassis/estop")
         mech_stopped = self._call_trigger("/mechanism/emergency_stop")
         return HAS_ROS or mech_stopped  # stub mode returns True
 
@@ -556,6 +596,7 @@ class SamplingBridge:
     def _call_trigger(self, service_name: str) -> bool:
         """Call a ``std_srvs/Trigger`` service, return success."""
         if not HAS_ROS:
+            self.last_error = ""
             logger.debug("[Stub] Trigger %s -> True", service_name)
             return True
 
@@ -569,6 +610,7 @@ class SamplingBridge:
             rospy.wait_for_service(service_name, timeout=self.SERVICE_TIMEOUT_SEC)
             logger.info("SERVICE_WAIT_OK service=%s elapsed=%.3fs", service_name, time.monotonic() - started)
         except Exception:
+            self.last_error = f"{service_name}: service unavailable"
             logger.exception(
                 "SERVICE_WAIT_FAILED service=%s timeout=%.1fs elapsed=%.3fs",
                 service_name, self.SERVICE_TIMEOUT_SEC, time.monotonic() - started,
@@ -579,6 +621,7 @@ class SamplingBridge:
             proxy = rospy.ServiceProxy(service_name, Trigger)
             response = proxy()
         except Exception:
+            self.last_error = f"{service_name}: service call exception"
             logger.exception(
                 "SERVICE_CALL_EXCEPTION service=%s elapsed=%.3fs",
                 service_name, time.monotonic() - started,
@@ -591,12 +634,14 @@ class SamplingBridge:
         )
 
         if not response.success:
+            self.last_error = f"{service_name}: {response.message}"
             logger.warning(
                 "Service %s returned failure: %s",
                 service_name, response.message,
             )
             return False
 
+        self.last_error = ""
         logger.info("Service %s succeeded", service_name)
         return True
 

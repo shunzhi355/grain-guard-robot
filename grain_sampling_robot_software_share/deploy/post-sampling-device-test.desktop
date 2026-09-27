@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=后半程机构专项测试
+Comment=跳过导航和插管，测试排废粮、运粮与三仓
+Terminal=false
+Exec=lxterminal --no-remote --title=后半程机构专项测试 --geometry=110x34 --command=/home/neardi/run-post-sampling-test.sh
+Icon=utilities-terminal
+Categories=Utility;

@@ -81,3 +81,11 @@ def test_ros_thread_emits_explicit_init_result():
     )
     assert "connected = self._worker.init_node()" in source
     assert "self.connection_changed.emit(connected)" in source
+
+
+def test_ros_bridge_rejects_missing_generated_service_classes():
+    source = (ROOT / "src/grain_sampling_workflow/ros_bridge.py").read_text(encoding="utf-8")
+    assert "from mechanism_node.srv import MoveLift" in source
+    assert "from mechanism_node.srv import SetGrain" in source
+    assert "if SetGrain is None or MoveLift is None" in source
+    assert 'get_service_class("mechanism_node/SetGrain", SET_GRAIN_SRV_TEXT)' not in source

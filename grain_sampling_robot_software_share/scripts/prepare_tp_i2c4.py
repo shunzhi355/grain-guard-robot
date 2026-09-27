@@ -85,7 +85,37 @@ class FDT:
                       and "/" not in n[len(prefix):])
 
 
-def enable_dtb(original):
+def reject_pin_conflicts(dt, target, group):
+    def pins(path):
+        raw = dt.props.get((path, 'rockchip,pins'), (0, 0, b''))[2]
+        if len(raw) % 16:
+            raise ValueError('Malformed pin group: ' + path)
+        return {(u32(raw, n), u32(raw, n + 4)) for n in range(0, len(raw), 16)}
+
+    handles = {dt.number(path, prop): path for path, prop in dt.props
+               if prop in ('phandle', 'linux,phandle')}
+    wanted = pins(group)
+    for (node, prop), (_, _, raw) in dt.props.items():
+        if node == target or not prop.startswith('pinctrl-') or not prop[8:].isdigit():
+            continue
+        parent = node
+        enabled = True
+        while parent:
+            value = dt.props.get((parent, 'status'), (0, 0, b'okay\0'))[2]
+            if value.rstrip(b'\0') not in (b'okay', b'ok'):
+                enabled = False
+            parent = parent.rsplit('/', 1)[0]
+        if not enabled:
+            continue
+        if len(raw) % 4:
+            raise ValueError('Malformed pinctrl reference: ' + node)
+        for offset in range(0, len(raw), 4):
+            other = handles.get(u32(raw, offset))
+            if other and wanted & pins(other):
+                raise ValueError('I2C4 pin conflict with enabled device ' + node + ' (' + other + ')')
+
+
+def enable_dtb(original, disable_gmac1=False):
     blob = bytearray(original)
     dt = FDT(blob)
     if b"neardi,lpb3588-linux-f0," not in dt.get("/", "compatible").split(b"\0"):
@@ -103,21 +133,40 @@ def enable_dtb(original):
     if old != b"disabled\0":
         raise ValueError("Expected I2C4 status disabled")
 
-    # 9-byte value occupies 12 aligned bytes. A 5-byte value occupies 8;
-    # replace the remaining word by a legal FDT_NOP, keeping ALL offsets fixed.
-    struct.pack_into(">I", blob, length_pos, 5)
-    blob[value_pos:value_pos + 12] = b"okay\0\0\0\0" + struct.pack(">I", 4)
+    expected = {(node, 'status'): b'okay\0'}
+    if disable_gmac1:
+        ethernet = '/ethernet@fe1c0000'
+        ep, ev, old_eth = dt.props[ethernet, 'status']
+        if old_eth != b'okay\0':
+            raise ValueError('Expected GMAC1 status okay before disabling it')
+        expected[ethernet, 'status'] = b'disabled\0'
+        # Exchange four bytes of aligned property space. Total structure size,
+        # string table and all external FIT payload offsets remain unchanged.
+        edits = [(length_pos, value_pos + 12,
+                  struct.pack('>I', 5) + blob[length_pos + 4:value_pos] + b'okay\0\0\0\0'),
+                 (ep, ev + 8,
+                  struct.pack('>I', 9) + blob[ep + 4:ev] + b'disabled\0\0\0\0')]
+        for start, end, data in sorted(edits, reverse=True):
+            blob[start:end] = data
+        allowed = set(range(min(length_pos, ep), max(value_pos + 12, ev + 8)))
+    else:
+        # Shorter value plus FDT_NOP keeps every offset fixed.
+        struct.pack_into('>I', blob, length_pos, 5)
+        blob[value_pos:value_pos + 12] = b'okay\0\0\0\0' + struct.pack('>I', 4)
+        allowed = set(range(length_pos, length_pos + 4))
+        allowed.update(range(value_pos, value_pos + 12))
     changed_dt = FDT(blob)
-    if changed_dt.get(node, "status") != b"okay\0":
-        raise ValueError("Patched status validation failed")
+    if len(blob) != len(original):
+        raise ValueError('DTB size changed')
+    for key, value in expected.items():
+        if changed_dt.get(*key) != value:
+            raise ValueError('Patched status validation failed')
     if dt.nodes != changed_dt.nodes or dt.props.keys() != changed_dt.props.keys():
         raise ValueError("Device tree structure changed unexpectedly")
     for key in dt.props:
-        if key != (node, "status") and dt.props[key][2] != changed_dt.props[key][2]:
+        if key not in expected and dt.props[key][2] != changed_dt.props[key][2]:
             raise ValueError("Unrelated device tree property changed")
-
-    allowed = set(range(length_pos, length_pos + 4))
-    allowed.update(range(value_pos, value_pos + 12))
+    reject_pin_conflicts(changed_dt, node, pin)
     return blob, allowed
 
 
@@ -166,7 +215,7 @@ def resource_entries(data):
     return entries
 
 
-def enable_resource(original):
+def enable_resource(original, disable_gmac1=False):
     entries = resource_entries(original)
     dtbs = [e for e in entries if e[0].endswith(".dtb")
             or original[e[1]:e[1] + 4] == b"\xd0\x0d\xfe\xed"]
@@ -177,7 +226,7 @@ def enable_resource(original):
     blob = original[start:start + size]
     if u32(blob, 4) != size:
         raise ValueError("Resource DTB size differs from FDT totalsize")
-    blob, changes = enable_dtb(blob)
+    blob, changes = enable_dtb(blob, disable_gmac1)
     result = bytearray(original)
     result[start:start + size] = blob
     allowed = {start + i for i in changes}
@@ -192,7 +241,7 @@ def enable_resource(original):
     return result, allowed
 
 
-def prepare(original):
+def prepare(original, disable_gmac1=False):
     fit = FDT(original)
     for (path, name), (_, _, value) in fit.props.items():
         if name == "value" and value and any(
@@ -229,7 +278,7 @@ def prepare(original):
     start = fit.number("/images/fdt", "data-position")
     size = fit.number("/images/fdt", "data-size")
     blob = bytearray(original[start:start + size])
-    blob, dt_changes = enable_dtb(blob)
+    blob, dt_changes = enable_dtb(blob, disable_gmac1)
 
     result = bytearray(original)
     result[start:start + size] = blob
@@ -244,7 +293,7 @@ def prepare(original):
     if fit.string("/images/resource", "compression") != "none":
         raise ValueError("Compressed resource is unsupported")
     resource, resource_changes = enable_resource(
-        original[resource_start:resource_start + resource_size])
+        original[resource_start:resource_start + resource_size], disable_gmac1)
     result[resource_start:resource_start + resource_size] = resource
     _, resource_hash_pos, _ = fit.props["/images/resource/hash", "value"]
     result[resource_hash_pos:resource_hash_pos + 32] = hashlib.sha256(resource).digest()
@@ -267,12 +316,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("backup", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument('--disable-gmac1', action='store_true',
+                        help='Explicitly disable /ethernet@fe1c0000 to release I2C4 m0 pins')
     args = parser.parse_args()
     if not args.backup.is_file():
         parser.error("Input must be a regular backup file")
     original = args.backup.read_bytes()
     try:
-        result = prepare(original)
+        result = prepare(original, args.disable_gmac1)
         # Exclusive create: refuses existing files, symlinks and block devices.
         with args.output.open("xb") as handle:
             handle.write(result)
@@ -287,7 +338,8 @@ def main():
         "original_sha256": hashlib.sha256(original).hexdigest(),
         "output_sha256": hashlib.sha256(result).hexdigest(),
         "i2c4_status": "okay", "pin_group": "i2c4m0-xfer",
-        "script_version": 2,
+        "script_version": 3,
+        "gmac1_disabled": args.disable_gmac1,
         "resource_dtb_status": "okay",
         "kernel_and_non_dtb_resources_unchanged": True,
         "notice": "Prepared copy only. Not flashed or hardware tested."

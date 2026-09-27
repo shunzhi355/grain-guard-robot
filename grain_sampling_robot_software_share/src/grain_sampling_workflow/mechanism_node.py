@@ -34,7 +34,7 @@ Service                  Action
   ``MechanismController.emergency_stop()``（对运行中通道写停止脉宽）。
   急停后节点拒绝新动作，直到 ``/mechanism/set_grain`` 重新使能
   （调用 ``controller.reset()``，作为自然的重置入口）。
-* **未接通道占位**：press/lift/start_suction 为占位动作——驱动层记录而不写
+* **未接通道占位**：press/lift 为占位动作——驱动层记录而不写
   I2C（除非 ``mechanism_driver.ENABLE_UNWIRED_CHANNELS`` 为 True）。节点默认
   返回占位成功；``placeholder_success=False`` 时返回失败。
 * **HAS_ROS 判断**：无 rospy 环境（Windows 开发机）下模块可正常 import——
@@ -240,14 +240,17 @@ ACTION_SERVICES: tuple[str, ...] = (
     "start_suction",
     "stop_suction",
     "convey",
+    "start_convey",
+    "stop_convey",
     "open_bin",
     "close_bin",
+    "close_all_bins",
     "emergency_stop",
 )
 
-#: 占位动作（未接通道：伺服升降 / CH7 风机）。驱动层已按 ENABLE_UNWIRED_CHANNELS
+#: 占位动作（未接通道：伺服升降）。驱动层已按 ENABLE_UNWIRED_CHANNELS
 #: 决定是否真实写 I2C；这里决定节点向调用方返回成功还是失败。
-PLACEHOLDER_ACTIONS: frozenset[str] = frozenset({"press", "lift", "start_suction"})
+PLACEHOLDER_ACTIONS: frozenset[str] = frozenset({"press", "lift"})
 
 #: 动作名 -> MechanismController 方法（无参/带参统一走 **kwargs）
 ACTION_FUNCS: dict[str, Callable] = {
@@ -260,8 +263,12 @@ ACTION_FUNCS: dict[str, Callable] = {
     "start_suction": lambda c, **kw: c.fan(**kw),
     "stop_suction": lambda c, **kw: c.actuate(CHANNELS["fan"], "stop"),
     "convey": lambda c, **kw: c.convey(**kw),
+    "start_convey": lambda c, **kw: c.convey(duration=None),
+    "stop_convey": lambda c, **kw: c.convey(duration=None, direction=0),
+    "hold_bin_open": lambda c, **kw: c.hold_bin_open(depth=kw["depth"]),
     "open_bin": lambda c, **kw: c.open_bin(**kw),
     "close_bin": lambda c, **kw: c.close_bin(**kw),
+    "close_all_bins": lambda c, **kw: c.close_all_bins(**kw),
 }
 
 #: 动作名 -> 品种参数键（提供自动回停时长；None = 不注入时长）
@@ -275,8 +282,12 @@ ACTION_DURATION_PARAM: dict[str, Optional[str]] = {
     "start_suction": None,
     "stop_suction": None,
     "convey": "convey_duration",
+    "start_convey": None,
+    "stop_convey": None,
+    "hold_bin_open": None,
     "open_bin": "open_duration",
     "close_bin": None,
+    "close_all_bins": None,
 }
 
 DEFAULT_RETRY_ATTEMPTS = 2   # 额外重试次数（共 1 + 2 = 3 次尝试）
@@ -410,6 +421,13 @@ class MechanismNode:
                 else self._make_action_handler(action)
             )
             self._services.append(rospy.Service(name, Trigger, handler))
+        self._services.append(
+            rospy.Service(
+                f"{self.SERVICE_PREFIX}/lift_health",
+                Trigger,
+                self._handle_lift_health,
+            )
+        )
         if SetGrain is not _FallbackSetGrain:
             self._services.append(
                 rospy.Service(f"{self.SERVICE_PREFIX}/set_grain", SetGrain, self._handle_set_grain)
@@ -428,7 +446,7 @@ class MechanismNode:
             )
         # open_bin/close_bin 深度变体：/mechanism/{action}/{shallow|mid|deep}
         # （ros_bridge 按 depth_level 索引调用；固定深度，不依赖节点默认）。
-        for action in ("open_bin", "close_bin"):
+        for action in ("open_bin", "close_bin", "hold_bin_open"):
             for depth in OPEN_BIN_DEPTHS:
                 self._services.append(
                     rospy.Service(
@@ -679,9 +697,10 @@ class MechanismNode:
             return MoveLift._response_class(
                 success=False, message="distance_cm 必须大于 0"
             )
-        # 时长按 X2P_RPM 与 5mm 导程自动计算，留 20% 余量避免接近段超 max_rpm
+        # 时长按 X2P_RPM 与 5mm 导程精确计算。X2P_RPM 已是经过
+        # SafetyLimits 校验的软件上限，不再额外乘 1.2 降速。
         rpm = max(1.0, float(self._x2p_rpm))
-        duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0) * 1.2
+        duration_s = (distance_cm * 10.0) / (5.0 * rpm / 60.0)
         request_id = uuid.uuid4().hex[:12]
         logger.info("MOVE_REQUEST id=%s direction=%s distance_cm=%s duration_s=%s",
                     request_id, direction, distance_cm, duration_s)
@@ -699,6 +718,44 @@ class MechanismNode:
         return MoveLift._response_class(
             success=True,
             message=f"move_lift {direction} {distance_cm}cm ok: {result}",
+        )
+
+    def _handle_lift_health(self, req=None) -> object:
+        """Read the lift encoder without moving it.
+
+        A serial port opening successfully does not prove that the X2P drive is
+        responding.  This service is deliberately read-only so the workflow can
+        verify the complete UART/RS485/Modbus path before operating the clamp.
+        """
+        try:
+            self._ensure_lift_connected()
+            lift = getattr(self._controller, "lift_drive", None)
+            if lift is None:
+                raise RuntimeError(
+                    f"X2P servo unavailable on {self._x2p_port}: no responding drive"
+                )
+            position = lift.read_position()
+            check = getattr(lift, "health_check", None)
+            readiness = check() if callable(check) else None
+        except Exception as exc:  # noqa: BLE001 - return the hardware cause to UI
+            logger.exception("X2P read-only health check failed")
+            lift = getattr(self._controller, "lift_drive", None)
+            if lift is not None:
+                try:
+                    lift.close()
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    pass
+                self._controller.lift_drive = None
+            return Trigger._response_class(
+                success=False,
+                message=f"X2P communication health check failed: {exc}",
+            )
+        return Trigger._response_class(
+            success=True,
+            message=(
+                "X2P communication and servo-enable healthy; "
+                f"encoder_position={position}; readiness={readiness}"
+            ),
         )
 
 
@@ -743,20 +800,36 @@ def main() -> None:
         # 响应控制；full-off/无信号上电后直接给动作脉宽不响应）。
         try:
             controller.init_escs(hold_s=3.0)
-            logger.info("机构 CH0–6 电调 1500us 中位初始化完成")
-        except Exception as exc:  # noqa: BLE001 - 初始化失败不阻塞服务
-            logger.warning("电调初始化失败: %s", exc)
+            logger.info("机构 CH0–7 电调 1500us 中位初始化完成")
+        except Exception:  # 不对外发布一个电调尚未初始化成功的机构服务
+            controller.close()
+            logger.exception("电调初始化失败，停止机构节点启动")
+            raise
         # 尝试接入 X2P 伺服升降（失败仅告警，退回占位）
         def _build_lift() -> object:
             from grain_sampling_devices.x2p_lift import build_x2p_lift_drive
 
-            return build_x2p_lift_drive(
+            drive = build_x2p_lift_drive(
                 port=x2p_port,
                 slave=runtime_x2p_slave,
                 rpm=runtime_x2p_rpm,
                 duration_s=runtime_x2p_duration,
                 forward_sign=runtime_x2p_forward_sign,
             )
+            try:
+                position = drive.read_position()
+            except Exception:
+                try:
+                    drive.close()
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    pass
+                raise
+            logger.info(
+                "X2P communication probe passed: port=%s encoder_position=%s",
+                x2p_port,
+                position,
+            )
+            return drive
 
         def _reconnect_lift() -> None:
             old_drive = getattr(controller, "lift_drive", None)

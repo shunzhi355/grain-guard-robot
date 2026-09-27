@@ -1,6 +1,6 @@
 # 粮食扦样机器人 — 技术交接说明
 
-> 更新日期：2026-09-08　|　青赋驭境科技有限公司
+> 更新日期：2026-09-20　|　青赋驭境科技有限公司
 
 ## 1. 项目概述
 
@@ -10,11 +10,11 @@
 
 | 部件 | 型号 / 说明 |
 |---|---|
-| 主控板 | Orange Pi 5 Max，IP `192.168.43.60`，账号 `orangepi` / `orangepi` |
+| 主控板 | 临滴 NEARDI LPA3588 工控机（RK3588），板型 `neardi,lpb3588-linux-f0`，账号 `neardi` |
 | 激光雷达 | Livox MID360（**网口**连接，非 USB） |
 | 底盘 | `dipan/`（motor_driver + goal_controller） |
-| 扦样升降 | X2P 伺服（USB-RS485 Modbus RTU，FTDI FT231X，`/dev/x2p_lift`，导程 5mm） |
-| 多通道执行器 | PCA9685（16 通道 PWM，TP I2C4，暂定 `/dev/i2c-4`（映射待核实），0x40，50Hz） |
+| 扦样升降 | X2P 伺服（Modbus RTU，导程 5mm）。3588 工控机走板载 RS485 `/dev/ttyS0`；早期 USB-RS485（FTDI FT231X）方案使用 `/dev/x2p_lift` |
+| 多通道执行器 | PCA9685（16 通道 PWM，TP I2C4 → LPA3588 实机确认为 `/dev/i2c-2`，0x40，50Hz） |
 | 扦样管 | 第 1 节 40cm（夹持在中间），后续每节 1m |
 
 ## 3. 软件架构（ROS Noetic）
@@ -49,11 +49,67 @@ sampling_params.py           统一标定参数（唯一数据源）
 
 | 项 | 值 |
 |---|---|
-| 端口 | `/dev/x2p_lift`（udev 稳定符号链接，会随 FTDI 重枚举变 ttyUSBx） |
+| 端口 | `/dev/ttyS0`（LPA3588 板载 RS485，实机已确认）；早期 USB-RS485 方案为 `/dev/x2p_lift`（udev 稳定符号链接，会随 FTDI 重枚举变 ttyUSBx） |
 | 协议 | Modbus RTU，从站 2，9600 波特 |
 | 导程 | 5mm |
-| 转速 | `X2P_RPM = 1000`（sampling_params.py） |
-| 位置容差 | `tolerance_mm = 15.0`（mechanism_driver.py） |
+| 转速 | `X2P_RPM = 200`（sampling_params.py） |
+| 位置容差 | `X2P_POSITION_TOLERANCE_MM = 2.0`（sampling_params.py） |
+| 方向翻转 | `X2P_FORWARD_SIGN = 1` |
+| 编码器 | 131072 计数/电机圈，**无断电保持多圈绝对编码器**：重新上电后计数从零开始，驱动器不知道机构停在哪里 |
+| OFF 判据 | 用 Un058（`Register.SERVO_ENABLE_STATUS`，0=未使能）+ 实际转速判断。本机固件在未使能且静止时上报 `status=3`，按 `status==1` 判断 OFF 会误报互锁并阻止所有移动 |
+
+### 5.1 手动调整初始位置
+
+由于断电后编码器不保持位置，如果上电时机构不在物理最高点，自动流程的相对动作起点就是错的。此时先停下机构节点、释放串口，再用手动程序把机构挪回最高点：
+
+```bash
+sudo systemctl stop grain-sampling
+cd "/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share"
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python3 scripts/manual_lift_adjust.py            # 交互模式，默认 /dev/ttyS0
+python3 scripts/manual_lift_adjust.py up 0.5     # 单次：上升 0.5 cm
+python3 scripts/manual_lift_adjust.py --status   # 只读位置
+```
+
+交互命令：`up 0.5` / `down 1.2` 移动，`s` 看位置，`m` 记物理最高点，`clear` 清除，`q` 退出。该程序直连串口，不依赖 ROS 和 `/mechanism/move_lift`，但**必须**先停掉 `grain-sampling`（串口独占）。调整完成后 `sudo systemctl start grain-sampling`。
+
+完整使用文档见 `docs/X2P手动调整初始位置使用说明.md`（命令表、参数与环境变量、真实输出示例、常见故障排查）。
+
+若手动程序报 `伺服使能超时：Un058仍为0`，先跑使能链路诊断（会真实写使能寄存器，
+需现场确认安全后加 `--confirm ENABLE`）：
+
+```bash
+python3 scripts/x2p_enable_diag.py --dry-run          # 只读快照
+python3 scripts/x2p_enable_diag.py --confirm ENABLE   # 定位使能链断点
+```
+
+它按 Pn400 → Pn415 → Un032 → Un058 的顺序回读寄存器，并分别试强制 DI1 和 Fn000=1，
+退出前自动撤销强制输入、取消使能。判读表见使用文档 §10.3.1。
+
+`--dry-run` 额外汇总 DI1–DI4 的功能分配（`Pn400..Pn403`）与 Modbus 写入策略
+（`Pn604/Pn605`），用于排除"SRV-ON 没有配在任何 DI 上"或"使能端子不是 DI1"；
+`--watch <秒>` 在强制 DI1 后按 0.5s 间隔连续打印 `Un058/Un032/Pn415`，
+用于区分"使能链断了"和"使能反应比程序等待更慢"。
+
+`--control` 额外把一个空闲 DI 强制为有效，用 `Un032` 的对应位判断 `Pn415`
+强制输入通道本身通不通：位翻转说明通道正常、是驱动器拒绝使能；位不翻转说明
+`Pn415` 可能不是本驱动器的强制输入寄存器，软件使能这条路整体可疑。
+
+板端 `src/` 版本不确定、或不方便 `git pull` 时，改用自包含的
+`scripts/x2p_enable_probe.py`：它自带最小 Modbus RTU 实现，**不 import 项目的
+`x2p` 包**，板端代码新旧都能跑，检查项与 `--control` 相同。
+
+> 注意：报错里的"使能链路快照"和本诊断脚本都是 2026-09-20 新增的。若实机报错
+> **没有**那行快照，说明板端跑的是同步前的旧 `src/x2p/`。这不影响诊断：用
+> 自包含的 `scripts/x2p_enable_probe.py` 即可（它不读板端 `x2p` 包）。
+> `x2p_enable_diag.py` 已改为不依赖 `read_enable_chain()`，旧板端也能直接跑。
+
+只读确认驱动器状态：
+
+```bash
+python3 -m x2p.cli --port /dev/ttyS0 status
+python3 -m x2p.cli --port /dev/ttyS0 hybrid-status
+```
 
 ## 6. 扦样下压流程（sampling_press.py）
 
@@ -75,27 +131,32 @@ bash scripts/start_mechanism.sh
 python3 scripts/ch_control.py <通道0-15> <脉宽us|off|init|read>
 ```
 
-## 8. 当前状态（2026-09-08）
+## 8. 当前状态（2026-09-20）
 
 | 子系统 | 状态 |
 |---|---|
 | UI + SLAM 状态机 | ✅ 完成（默认 idle，选任务才重定位，点开始才建图） |
 | 导航 | ✅ 测试通过（点1/点2 ARRIVED，误差 ~0.12m） |
 | 底盘 + 遥控 | ✅ 顺滑 |
-| 扦样机构 | ⚠️ 位置误差 -19.9mm（up 方向过冲超容差 15mm），待现场排查 |
+| 扦样机构 | ⚠️ 早期位置误差 -19.9mm 记录基于旧容差 15mm；现容差已收到 `X2P_POSITION_TOLERANCE_MM = 2.0` 并加入低速接近段，待现场复测 |
+| X2P 手动调整 | ⚠️ 程序已交付（`scripts/manual_lift_adjust.py`，交互式直连串口）；但 2026-09-20 LPA3588 实机卡在"伺服使能超时（Un058=0）"，尚未完成一次真实移动。诊断工具 `scripts/x2p_enable_diag.py` 已就绪，待现场跑通使能后复测移动 |
 | 里程计 | ❌ /Odometry 无数据（暂搁置） |
 
 ## 9. 已知问题与待办
 
 1. **位置误差 -19.9mm**：sampling_press 周期运动时 up 2cm 过冲约 20mm（down 正常）。疑似升/降负载不对称或停止刹车惯性，需现场复测调容差/减速。
-2. **USB 串口断连**：FTDI FT231X 连续快速往复时整芯片掉电重连（ttyUSB0→ttyUSB1）。已通过周期停顿 + move_lift 失败自动重连双重缓解，根因（供电/振动）未根治。
+2. **USB 串口断连（历史）**：早期 FTDI FT231X 方案连续快速往复时整芯片掉电重连（ttyUSB0→ttyUSB1）。改用 LPA3588 板载 RS485 `/dev/ttyS0` 后该问题不再适用。
 3. **扦样全流程**：1m/3m/6m 深度完整测试未完成（目前只测到 40cm 第 1 节入口）。
 4. **CH5 夹紧脉宽**：代码 1900us vs 口述 2000us 未统一。
 5. **里程计恢复**：goal_controller FAULT:odometry_timeout。
+6. **无断电保持编码器**：X2P 不记忆断电前位置，上电后若机构不在物理最高点，需先用手动程序调整（§5.1）。
+7. **无机械零点/软限位**：系统尚未实现回零，也没有全行程软限位；手动程序只做单次距离上限 + 可选的本次运行内软限位。
 
 ## 10. 板端部署要点
 
-- 代码位置：板端 `/home/orangepi/grain_sampling_robot_software`，本地 `E:\青赋驭境\项目\粮食扦样\grain_sampling_robot_software`
-- 同步：`pscp` 上传（`scripts/sync_board.bat`），板端 IP `192.168.43.60`
+- 代码位置：板端 `/home/neardi/project/grain guard robot/grain-guard-robot/grain_sampling_robot_software_share`（登录用户 `neardi`）
 - X2P 依赖：`~/mechanism_ws`（ROS 工作空间，含 MoveLift.srv/SetGrain.srv），启动前必须 `source ~/mechanism_ws/devel/setup.bash`
-- x2p 包：板端 `src/x2p`（dais516，USB-RS485 Modbus RTU），依赖 pyserial
+- ROS1 环境：**不要**写死 `/opt/ros/noetic/setup.bash`，该机没有这个路径。用 `scripts/start_industrial_pc.sh` 的探测逻辑，或直接 `source ~/mechanism_ws/devel/setup.bash`
+- x2p 包：板端 `src/x2p`（dais516，Modbus RTU），依赖 pyserial
+- 硬件配置：`config/industrial_pc.env`（`X2P_PORT=/dev/ttyS0`、`PCA9685_I2C_DEVICE=/dev/i2c-2`、`RC_SERIAL_PORT=/dev/rc_receiver`）
+- 手动调整：`scripts/manual_lift_adjust.py`（交互式直连串口），见 §5.1

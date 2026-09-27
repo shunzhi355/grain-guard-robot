@@ -29,6 +29,7 @@ def mock_bridge():
     bridge = MagicMock()
     bridge.record_start_position.return_value = (1.0, 2.0)
     bridge.call_navigate.return_value = True
+    bridge.call_lift_health.return_value = True
     return bridge
 
 
@@ -283,6 +284,7 @@ class TestMechanismIntegration:
         with patch.object(orch, "_wait_interruptible", return_value=True):
             with patch.object(orch._fsm, "transition") as mock_transition:
                 orch._handle_press_and_suction()
+        mock_bridge.call_lift_health.assert_called_once()
         assert mock_bridge.call_clamp.call_count == 2  # 夹紧 + 回顶后再夹紧
         # press/lift 走 move_lift 精确距离控制（单次 PRESS_STEP_CM=20cm）
         mock_bridge.call_move_lift.assert_any_call("down_cycle", 20.0)
@@ -309,7 +311,8 @@ class TestMechanismIntegration:
         orch.set_convey_duration(0.1)
         with patch.object(orch._fsm, "transition") as mock_transition:
             orch._handle_convey()
-        mock_bridge.call_convey.assert_called_once()
+        mock_bridge.call_start_convey.assert_called_once()
+        mock_bridge.call_stop_convey.assert_called_once()
         mock_transition.assert_called_with(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def test_open_bin_calls_bridge_with_depth(self, orch, mock_bridge):
@@ -318,7 +321,7 @@ class TestMechanismIntegration:
         orch._fsm.current_depth_index = 1
         with patch.object(orch._fsm, "transition") as mock_transition:
             orch._handle_open_bin()
-        mock_bridge.call_open_bin.assert_called_once_with(1)
+        mock_bridge.call_hold_bin_open.assert_called_once_with(1)
         mock_transition.assert_called_with(SamplingAction.SYSTEM_BIN_OPENED)
 
     def test_close_bin_calls_bridge_with_depth(self, orch, mock_bridge):
@@ -359,6 +362,26 @@ class TestMechanismIntegration:
         assert orch._fsm.current_state == SamplingState.STOPPED
         # press/suction never started, FSM never auto-advanced past STOPPED
         mock_bridge.call_press.assert_not_called()
+
+    def test_lift_health_failure_stops_before_clamp_and_shows_cause(
+        self, orch, mock_bridge
+    ):
+        orch.enable_mechanism()
+        orch._mechanism_retry_interval = 0.0
+        orch._fsm._state = SamplingState.PRESS_AND_SUCTION
+        mock_bridge.call_lift_health.return_value = False
+        mock_bridge.last_error = (
+            "/mechanism/lift_health: X2P communication health check failed: "
+            "通信超时或应答过短"
+        )
+
+        orch._handle_press_and_suction()
+
+        assert mock_bridge.call_lift_health.call_count == 3
+        mock_bridge.call_clamp.assert_not_called()
+        mock_bridge.call_move_lift.assert_not_called()
+        assert orch._fsm.current_pipe_index == 0
+        assert "通信超时或应答过短" in orch._fsm.stop_reason
 
 
 # ══════════════════════════════════════════════════════════════════════════

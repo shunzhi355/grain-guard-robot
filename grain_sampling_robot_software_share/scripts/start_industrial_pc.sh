@@ -2,9 +2,10 @@
 # 临滴科技工控机启动脚本
 #
 # 接线约定：
-#   USB-TTL  -> FS-iA10B i-BUS（通常 /dev/ttyUSB0）
+#   USB1 -> FT232 USB-TTL -> STM32 USART2（115200 8N1，CHASSIS_SERIAL_PORT）
+#   FS-iA10B i-BUS -> STM32 USART1；手动控制与底盘 PWM 由单片机负责
 #   USB-RS485 -> X2P 伺服（通常 /dev/ttyUSB1，建议改成 udev 稳定链接）
-#   LPB3588 /dev/i2c-2 -> PCA9685（机构 CH0~CH6，底盘左 CH10 / 右 CH9）
+#   本机 I2C2 -> PCA9685（已通过模块断电/上电对照确认）
 #
 # 使用：
 #   bash scripts/start_industrial_pc.sh
@@ -67,14 +68,23 @@ fi
 
 python3 -c "import rospy, serial; from mechanism_node.srv import MoveLift, SetGrain" ||
     fail "缺少 rospy、pyserial 或 mechanism_node 消息包；请安装依赖并加载 MECHANISM_WS_SETUP"
-[[ "$RC_SERIAL_PORT" != "$X2P_PORT" ]] || fail "遥控器和伺服不能使用同一串口"
-[[ ! -e "$X2P_PORT" || ! "$RC_SERIAL_PORT" -ef "$X2P_PORT" ]] ||
-    fail "遥控器和伺服路径指向同一设备"
-[[ -r "$RC_SERIAL_PORT" && -w "$RC_SERIAL_PORT" ]] ||
-    fail "遥控器串口不可读写：$RC_SERIAL_PORT（检查设备名与串口组权限）"
+if [[ "$CHASSIS_BACKEND" == serial ]]; then
+    [[ "$CHASSIS_SERIAL_PORT" != "$X2P_PORT" ]] || fail "底盘和伺服不能使用同一串口"
+    [[ ! -e "$X2P_PORT" || ! "$CHASSIS_SERIAL_PORT" -ef "$X2P_PORT" ]] || fail "底盘和伺服路径指向同一设备"
+    [[ -r "$CHASSIS_SERIAL_PORT" && -w "$CHASSIS_SERIAL_PORT" ]] || fail "底盘串口不可读写：$CHASSIS_SERIAL_PORT；请检查USB-TTL连接及/dev/serial/by-id/设备节点"
+    if pgrep -f 'motor_driver.py daemo[n]|cmd_vel_to_moto[r]|grain_sampling_workflow.rc_nod[e]' >/dev/null; then
+        fail "旧底盘/遥控节点仍在运行，请先运行 scripts/stop_industrial_pc.sh"
+    fi
+else
+    fail "本工控机只支持 CHASSIS_BACKEND=serial；底盘由 STM32 控制"
+fi
 I2C_DEVICE="${PCA9685_I2C_DEVICE:-/dev/i2c-$PCA9685_I2C_BUS}"
+if pgrep -f '^python3( -u)? /tmp/pca[^ /]*\.py($| )' >/dev/null; then
+    fail "PCA9685 独立测试仍在运行，请先停止测试并确认输出关闭"
+fi
+python3 -m grain_sampling_devices.tp_i2c "$I2C_DEVICE" || fail "PCA9685 控制器身份不符，拒绝启动机构"
 [[ -e "$I2C_DEVICE" ]] ||
-    fail "I2C 设备不存在：$I2C_DEVICE；LPB3588 实机使用 /dev/i2c-2，请核实设备树和设备节点"
+    fail "I2C 设备不存在：$I2C_DEVICE；本机实测为 I2C2，请核实设备树和设备节点"
 [[ -r "$I2C_DEVICE" && -w "$I2C_DEVICE" ]] ||
     fail "I2C 设备不可读写：$I2C_DEVICE；请核实总线号和 i2c 组权限"
 
@@ -109,12 +119,15 @@ python3 -c "import rospy; rospy.get_master().getPid()" || fail "ROS master 尚�
 
 start_once 'grain_sampling_workflow.mechanism_node' mechanism_node.log \
     python3 -m grain_sampling_workflow.mechanism_node
-start_once 'motor_driver.py daemo[n]' motor_driver.log \
-    python3 "$ROOT_DIR/dipan/motor_driver.py" daemon --host 127.0.0.1 --port 8765 --timeout 0.3
-start_once 'grain_sampling_workflow.rc_node' rc_node.log \
-    python3 -m grain_sampling_workflow.rc_node
-start_once 'cmd_vel_to_moto[r]' cmd_vel_to_motor.log \
-    python3 "$ROOT_DIR/dipan/cmd_vel_to_motor.py"
+if [[ "$CHASSIS_BACKEND" == serial ]]; then
+    start_once 'grain_sampling_workflow.chassis_nod[e]' chassis_serial.log \
+        python3 -m grain_sampling_workflow.chassis_node
+    start_once 'goal_controller.p[y]' goal_controller.log \
+        python3 "$ROOT_DIR/dipan/goal_controller.py" _chassis_backend:=serial
+
+fi
+
+say "底盘后端=$CHASSIS_BACKEND，底盘串口=$CHASSIS_SERIAL_PORT（USART2: 115200 8N1）"
 
 say "启动完成：ROS=$ROS_ENV_DESCRIPTION，RC=$RC_SERIAL_PORT，X2P=$X2P_PORT，PCA9685=${PCA9685_I2C_DEVICE:-/dev/i2c-$PCA9685_I2C_BUS} 地址=$PCA9685_I2C_ADDRESS"
 say "查看日志：$LOG_DIR；停止节点可使用 pkill 或 systemctl stop 对应服务"

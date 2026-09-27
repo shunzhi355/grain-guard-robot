@@ -2,7 +2,6 @@
 Description=Grain Sampling Robot ROS1 Hardware Stack
 After=network.target
 Wants=network.target
-Conflicts=grain-rc-pwm-test.service
 
 [Service]
 Type=oneshot

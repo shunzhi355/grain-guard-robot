@@ -1,8 +1,7 @@
 """Direct manual-RC bridge to the chassis motor daemon.
 
-The production navigation path keeps using ``/cmd_vel`` and differential
-mixing.  Manual RC uses independent track commands so physical i-BUS CH1
-controls PCA9685 CH8 and physical i-BUS CH3 controls PCA9685 CH9.
+Legacy UDP control uses independent left/right track commands. Production
+manual control now runs on STM32 and does not use PCA9685 outputs.
 """
 
 from __future__ import annotations

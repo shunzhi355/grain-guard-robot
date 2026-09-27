@@ -5,7 +5,7 @@
 
 覆盖：
 - 模块可无 rospy import（HAS_ROS=False + 回退消息类型）
-- 18 个服务注册（12 动作 Trigger + 6 个 open_bin/close_bin 深度变体）
+- 19 个服务注册（12 动作 Trigger + lift_health + 6 个深度变体）
 - 服务触发动作（线程化执行 + 品种时长注入）
 - 动作失败重试 N 次后返回 success=False
 - 急停：停运行中通道 + 锁定 + 抢断阻塞动作线程
@@ -24,7 +24,12 @@ from unittest.mock import patch
 import pytest
 
 import grain_sampling_workflow.mechanism_node as mn
-from grain_sampling_devices.mechanism_driver import CHANNELS
+from grain_sampling_devices.mechanism_driver import (
+    BIN_CLOSE_PULSE,
+    BIN_OPEN_PULSE,
+    CHANNELS,
+)
+from grain_sampling_workflow.mechanism_config import GRAIN_MECHANISM_CONFIG
 
 
 def _trigger_req():
@@ -58,11 +63,13 @@ def test_registers_services(mock_mechanism):
     # HAS_ROS=False（本机无 rospy）：SetGrain/MoveLift 为回退类（无 ROS 序列化），
     # set_grain/move_lift 服务跳过注册：12 个 Trigger 动作服务
     # + 3 个 open_bin + 3 个 close_bin 深度变体。
-    assert len(calls) == 18
+    assert len(calls) == 25  # Includes the production close_all_bins service.
     names = [c.args[0] for c in calls]
     expected = [f"/mechanism/{a}" for a in mn.ACTION_SERVICES]
+    expected += ["/mechanism/lift_health"]
     expected += [f"/mechanism/open_bin/{d}" for d in mn.OPEN_BIN_DEPTHS]
     expected += [f"/mechanism/close_bin/{d}" for d in mn.OPEN_BIN_DEPTHS]
+    expected += [f"/mechanism/hold_bin_open/{d}" for d in mn.OPEN_BIN_DEPTHS]
     assert sorted(names) == sorted(expected)
     # 全部用 std_srvs/Trigger
     for c in calls:
@@ -110,9 +117,11 @@ def test_open_bin_uses_configured_depth(mock_mechanism):
     # 时长注入 open_duration 只用于 Timer 自动关同仓，不记录到 _act_pulse。
     open_kw = next(kw for n, kw in mock_mechanism.action_history if n == "open_bin")
     assert open_kw["channel"] == CHANNELS["bin_deep"]
-    assert open_kw["pulse_us"] == 1200
+    assert open_kw["pulse_us"] == BIN_OPEN_PULSE
     assert open_kw["duration"] is None
-    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [1200]
+    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [
+        BIN_OPEN_PULSE
+    ]
 
 
 def test_close_bin_uses_configured_depth(mock_mechanism):
@@ -122,8 +131,10 @@ def test_close_bin_uses_configured_depth(mock_mechanism):
     # close_bin 与 open_bin 共享深度注入：deep → CH4=bin_deep，写 BIN_CLOSE_PULSE=1800
     close_kw = next(kw for n, kw in mock_mechanism.action_history if n == "close_bin")
     assert close_kw["channel"] == CHANNELS["bin_deep"]
-    assert close_kw["pulse_us"] == 1800
-    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [1800]
+    assert close_kw["pulse_us"] == BIN_CLOSE_PULSE
+    assert mock_mechanism.pca9685.register_history[CHANNELS["bin_deep"]] == [
+        BIN_CLOSE_PULSE
+    ]
 
 
 def test_stop_suction_writes_stop_pulse_to_fan_channel(mock_mechanism):
@@ -192,8 +203,8 @@ def test_emergency_stop_stops_running_channels_and_locks(mock_mechanism):
 
     # 运行中通道被立即断电释放
     assert mock_mechanism._running == set()
-    assert mock_mechanism.pca9685.register_history[0] == [1200, "OFF"]
-    assert mock_mechanism.pca9685.register_history[2] == [1900, "OFF"]
+    assert mock_mechanism.pca9685.register_history[0] == [1200, 1500.0]
+    assert mock_mechanism.pca9685.register_history[2] == [1900, 1500.0]
     assert node._stop_flag.is_set()
 
     # 急停后拒绝新动作
@@ -249,11 +260,12 @@ def test_set_grain_updates_current_grain(mock_mechanism):
     assert node._grain == "稻谷"
     assert any(n == "set_grain" for n, _ in mock_mechanism.action_history)
 
-    # 品种参数作用于后续动作（稻谷 convey_duration=120）
-    assert node._duration_for("convey") == 120.0
+    # 品种参数作用于后续动作，测试跟随现场统一参数源。
+    expected_duration = GRAIN_MECHANISM_CONFIG["稻谷"]["convey_duration"]
+    assert node._duration_for("convey") == expected_duration
     node._handle_action("convey", _trigger_req())
     convey_kw = next(kw for n, kw in mock_mechanism.action_history if n == "convey")
-    assert convey_kw["duration"] == 120.0
+    assert convey_kw["duration"] == expected_duration
 
 
 def test_set_grain_unknown_grain_returns_false(mock_mechanism):
@@ -283,13 +295,21 @@ def test_set_grain_rearms_after_emergency_stop(mock_mechanism):
 
 def test_placeholder_actions_success_by_default(mock_mechanism):
     node = mn.MechanismNode(controller=mock_mechanism)
-    for action in ("press", "lift", "start_suction"):
+    for action in ("press", "lift"):
         ok, msg = node.run_action(action)
         assert ok is True, msg
         assert "placeholder" in msg
     # 占位动作仍派发到控制器（驱动层记录/按 ENABLE_UNWIRED_CHANNELS 决定写 I2C）
     names = [n for n, _ in mock_mechanism.action_history]
-    assert {"press", "lift", "fan"}.issubset(set(names))
+    assert {"press", "lift"}.issubset(set(names))
+
+
+def test_start_suction_is_not_a_placeholder(mock_mechanism):
+    node = mn.MechanismNode(controller=mock_mechanism)
+    ok, msg = node.run_action('start_suction')
+    assert ok is True
+    assert 'placeholder' not in msg
+    assert any(name == 'fan' for name, _ in mock_mechanism.action_history)
 
 
 def test_placeholder_actions_fail_when_disabled(mock_mechanism):
@@ -316,6 +336,78 @@ def test_press_lift_not_placeholder_when_lift_drive_injected(mock_mechanism):
         ok, msg = node.run_action(action)
         assert ok is True, msg
         assert "placeholder" not in msg
+
+
+def test_lift_health_reads_encoder_without_motion(mock_mechanism):
+    class _FakeDrive:
+        def __init__(self):
+            self.reads = 0
+
+        def read_position(self):
+            self.reads += 1
+            return 12345
+
+    drive = _FakeDrive()
+    mock_mechanism.lift_drive = drive
+    node = mn.MechanismNode(controller=mock_mechanism)
+
+    resp = node._handle_lift_health(_trigger_req())
+
+    assert resp.success is True
+    assert "12345" in resp.message
+    assert drive.reads == 1
+    assert mock_mechanism.action_history == []
+
+
+def test_lift_health_failure_detaches_dead_drive(mock_mechanism):
+    class _DeadDrive:
+        closed = False
+
+        def read_position(self):
+            raise RuntimeError("通信超时或应答过短")
+
+        def close(self):
+            self.closed = True
+
+    drive = _DeadDrive()
+    mock_mechanism.lift_drive = drive
+    node = mn.MechanismNode(controller=mock_mechanism)
+
+    resp = node._handle_lift_health(_trigger_req())
+
+    assert resp.success is False
+    assert "通信超时或应答过短" in resp.message
+    assert drive.closed is True
+    assert mock_mechanism.lift_drive is None
+
+
+def test_move_lift_uses_full_configured_rpm(mock_mechanism):
+    """200 r/min 不再被 1.2 时长余量降成约 167 r/min。"""
+    captured = {}
+
+    def move_lift(direction, distance_cm, duration_s):
+        captured.update(
+            direction=direction,
+            distance_cm=distance_cm,
+            duration_s=duration_s,
+        )
+        return "ok"
+
+    mock_mechanism.move_lift = move_lift
+    node = mn.MechanismNode(controller=mock_mechanism)
+    node._x2p_rpm = 200.0
+    req = mn.MoveLift._request_class(
+        direction="down_cycle", distance_cm=20.0
+    )
+
+    resp = node._handle_move_lift(req)
+
+    assert resp.success is True
+    assert captured == {
+        "direction": "down_cycle",
+        "distance_cm": 20.0,
+        "duration_s": pytest.approx(12.0),
+    }
 
 
 # ── 异步模式 / 并发 ─────────────────────────────────────────────────────
@@ -379,4 +471,4 @@ def test_start_is_idempotent(mock_mechanism):
     with patch("grain_sampling_workflow.mechanism_node.rospy") as mock_rospy:
         node.start()
         node.start()
-    assert mock_rospy.Service.call_count == 18  # 只注册一次（12 Trigger + 6 open_bin/close_bin 变体）
+    assert mock_rospy.Service.call_count == 25  # 只注册一次（含三仓全关服务）

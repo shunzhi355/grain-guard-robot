@@ -4,7 +4,8 @@
 ROS 节点，使遥控底盘控制在 UI 未运行时同样可用。节点以 10 Hz 采样 RC 接收机，
 默认经 :class:`~grain_sampling_workflow.ros_bridge.SamplingBridge` 输出到
 ``/cmd_vel``；工控机设置 ``RC_OUTPUT_MODE=direct_tracks`` 后，手动模式直接
-发送左右履带 UDP 指令（CH1→CH8、CH3→CH9）。节点同时发布 ``/rc_mode``。
+发送左右履带 UDP 指令。此为历史路径，正式底盘遥控由 STM32 负责。
+节点同时发布 ``/rc_mode``。
 
 设计决策
 --------

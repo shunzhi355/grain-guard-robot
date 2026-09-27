@@ -85,17 +85,17 @@ _STATE_META: Dict[SamplingState, Tuple[str, str, Tuple[str, ...]]] = {
     ),
     SamplingState.CONVEY_1: (
         "输送粮食中",
-        "正在启动螺旋杆 1 和 2 输送粮食（约 2 分钟）…",
+        "正在向已打开的仓口输粮；计时结束后先关仓，关仓完成后停止输粮…",
         (),
     ),
     SamplingState.OPEN_BIN: (
         "开启对应仓口",
-        "正在根据当前深度开启对应的储粮仓口…",
+        "废粮已排完，正在打开当前深度对应仓口，随后正式吸粮并输粮…",
         (),
     ),
     SamplingState.CONVEY_DONE: (
         "取粮完成",
-        "输送已完成，请取走粮食，完成后点击下方按钮",
+        "关仓时序已完成，输粮已停止；取粮完成后点击下方按钮",
         ("CONFIRM_DONE",),
     ),
     SamplingState.NEXT_CHECK: (

@@ -52,3 +52,25 @@ mock_server_data/
 /tmp_edge_profile/
 /tmp_manual.txt
 /manual-page*.png
+
+# Local chassis MCU firmware project
+/dipan/
+
+# Codex working files, extracted manuals, and one-off diagnostics
+.codex/
+/tmp/
+/code_artifact.md
+/底盘解耦到STM32F103_开发提示词.md
+/X2P_manual.pdf
+/X2P_manual.txt
+/tmp_x2p_page_*.png
+/x2p_page-*.png
+/diag_ui_map.sh
+/diag_ui_wm.sh
+/qt_map_probe.py
+/qt_map_probe_runner.sh
+/restart_openbox.sh
+/grain_sampling_robot_software_share/docs/SESSION_CHANGES.md
+
+# Windows reserved-name file created by a bad ssh redirection
+NUL

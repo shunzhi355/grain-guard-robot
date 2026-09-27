@@ -76,7 +76,9 @@ def build_x2p_lift_drive(
     -------
     object
         一个 ``LiftDrive`` 适配对象，暴露：
-        ``run_speed(direction, rpm, duration_s)``、``stop()``、``close()``。
+        ``run_speed(direction, rpm, duration_s)``、``move_distance()``、
+        ``stop()``、``close()``。其中 ``run_speed`` 保留旧接口名称，底层
+        已改为内部位置控制模式。
 
     Raises
     ------
@@ -137,7 +139,7 @@ class _LiftDrive:
 
     def run_speed(self, direction: str, rpm: Optional[int] = None,
                   duration_s: Optional[float] = None) -> object:
-        """按方向运行速度模式（安全流程内置：OFF→使能→运行→停→OFF）。
+        """按方向运行位置模式（安全流程内置：OFF→使能→定位→停→OFF）。
 
         方向语义：``up``=提升（映射到驱动器 forward）、``down``=下压
         （映射到驱动器 reverse）。实机方向反了用 ``forward_sign`` 翻转，
@@ -167,8 +169,8 @@ class _LiftDrive:
         duration_s : float
             移动时长（秒）。过长/过短由 x2p 内部按 max_rpm 校验。
         tolerance_mm : float
-            位置容差（毫米），默认 2.0mm。自动回程会另外在
-            原点下方保留安全余量，因此容差必须小于该余量。
+            位置容差（毫米），默认 2.0mm。自动回程目标是
+            当轮保存的编码器原点，不另外保留下方余量。
         """
         drive_direction = _map_lift_direction(direction)
         move = getattr(self._controller, "move_timed_distance", None)
@@ -185,6 +187,13 @@ class _LiftDrive:
         if read is None:
             raise DeviceError("x2p 控制器不支持读取编码器绝对位置")
         return int(read())
+
+    def health_check(self) -> object:
+        """Prove the drive can enable without issuing a motion command."""
+        check = getattr(self._controller, "check_motion_ready", None)
+        if check is None:
+            raise DeviceError("x2p 控制器不支持无位移使能预检")
+        return check()
 
     @property
     def counts_per_mm(self) -> float:

@@ -1,0 +1,70 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index b413107..ab334ad 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -3,6 +3,7 @@
+ #include <math.h>
+ #include <thread>
+ #include <fstream>
++#include <cstdio>
+ #include <csignal>
+ #include <unistd.h>
+ #include <ros/ros.h>
+@@ -710,23 +711,48 @@ int main(int argc, char **argv)
+     /**************** save map ****************/
+     /* 1. make sure you have enough memories
+     /* 2. pcd save will largely influence the real-time performences **/
+-    if (pcl_wait_save->size() > 0 && pcd_save_en)
++    if (pcd_save_en)
+     {
+-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
++        PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
++        bool read_failed = false;
+         for (size_t i = 1; i <= pcd_index; i++)
+         {
+-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_temp(new pcl::PointCloud<pcl::PointXYZ>);
++            PointCloudXYZI::Ptr cloud_temp(new PointCloudXYZI());
+             string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(i) + string(".pcd"));
+             pcl::PCDReader reader;
+-            reader.read(all_points_dir, *cloud_temp);
++            if (reader.read(all_points_dir, *cloud_temp) < 0)
++            {
++                ROS_ERROR_STREAM("failed to read map chunk: " << all_points_dir);
++                read_failed = true;
++                break;
++            }
+             *cloud = *cloud + *cloud_temp;
+         }
+ 
+-        string file_name = string("GlobalMap.pcd");
+-        string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
+-        pcl::PCDWriter pcd_writer;
+-        cout << "current scan saved to /PCD/" << file_name << endl;
+-        pcd_writer.writeBinary(all_points_dir, *cloud);
++        // pcl_wait_save contains the registered world-frame scans that have
++        // not yet reached the periodic chunk interval.  It must be included
++        // in the final map, but an empty remainder must not suppress merging
++        // already-written scans_N.pcd chunks.
++        *cloud += *pcl_wait_save;
++
++        if (!read_failed && !cloud->empty())
++        {
++            string file_name = string("GlobalMap.pcd");
++            string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
++            string temporary_dir(string(ROOT_DIR) + "PCD/GlobalMap.pcd.tmp");
++            pcl::PCDWriter pcd_writer;
++            cout << "current scan saved to /PCD/" << file_name << endl;
++            if (pcd_writer.writeBinary(temporary_dir, *cloud) < 0 ||
++                std::rename(temporary_dir.c_str(), all_points_dir.c_str()) != 0)
++            {
++                ROS_ERROR_STREAM("failed to atomically write " << all_points_dir);
++                std::remove(temporary_dir.c_str());
++            }
++        }
++        else
++        {
++            ROS_ERROR("GlobalMap.pcd not written: no current-session points or a chunk read failed");
++        }
+ 
+         //////////////////////////////////////
+         PointVector().swap(ikdtree.PCL_Storage);

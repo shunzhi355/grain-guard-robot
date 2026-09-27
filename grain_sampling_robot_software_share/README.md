@@ -1,13 +1,14 @@
 # 粮食扦样机器人 — 软件系统
 
-> 基于 PySide6 + ROS Noetic + MQTT 的全栈工业机器人控制软件
-> 运行平台：RK3588 / Ubuntu 20.04
+> 基于 PySide6 + Debian ROS1 + MQTT 的全栈工业机器人控制软件
+> 运行平台：RK3588 / Ubuntu 22.04 aarch64
 
 ---
 
 ## 项目概述
 
-工控机最新接线与启动入口见 [ARM Linux 工控机适配](docs/INDUSTRIAL_PC.md)：全部 PWM 使用 PCA9685，底盘 CH8/CH9，遥控器使用 USB 串口。
+工控机 USB1 经 USB-TTL 连接 STM32 USART2 的导航控制见 [串口底盘说明](docs/CHASSIS_SERIAL.md)，
+启动入口为 `scripts/start_industrial_pc.sh`。底盘 PWM 和遥控由 STM32 负责，机构仍使用 PCA9685。
 
 粮食扦样机器人是一套面向粮库质量检测场景的自动化控制系统。系统通过云端工单下发扦样任务，机器人自动导航到仓库指定位置，将扦样管插入粮堆完成取样，再将样本送至化验设备。软件层面整合了触摸屏操作界面、MQTT 远程通信、ROS 运动控制、激光点云处理、视频监控、以太网设备通信七个模块，为粮库一线操作工和技术员提供完整的闭环工作流。
 
@@ -64,8 +65,8 @@ grain_sampling_robot_software/
 | 项目 | 要求 |
 |------|------|
 | 硬件平台 | RK3588（8 核 ARM，4GB+ RAM） |
-| 操作系统 | Ubuntu 20.04 LTS (arm64) |
-| ROS | Noetic Ninjemys |
+| 操作系统 | Ubuntu 22.04 LTS (aarch64) |
+| ROS | Debian packaged ROS1 1.15.x |
 | Python | 3.10 及以上 |
 | GStreamer | 1.20+（RTSP 推流，可选，无 GStreamer 时使用 MJPEG 回退） |
 
@@ -160,6 +161,7 @@ mock-robot
 | [DEPLOY_GUIDE.md](docs/DEPLOY_GUIDE.md) | 现场部署工程师 | 环境安装、系统配置、网络部署指南 |
 | [API_REFERENCE.md](docs/API_REFERENCE.md) | 开发人员 | 各模块 API 详细参考与代码示例 |
 | [ros-interfaces.md](docs/ros-interfaces.md) | 开发人员 | ROS 话题、服务、动作接口定义 |
+| [X2P手动调整初始位置使用说明.md](docs/X2P手动调整初始位置使用说明.md) | 现场操作/调试人员 | 上电后把升降机构手动挪回物理最高点的完整操作说明 |
 
 ---
 
