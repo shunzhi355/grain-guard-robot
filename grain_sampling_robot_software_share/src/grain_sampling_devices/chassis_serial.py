@@ -4,6 +4,7 @@ import struct
 import time
 
 from . import chassis_protocol as p
+from .chassis_telemetry import ModeTelemetry
 
 DEFAULT_SERIAL_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AB3N91KX-if00-port0"
 
@@ -24,6 +25,14 @@ class ChassisSerial:
         self.boot = None
         self.status = None
         self.status_time = float("-inf")
+        self.mode_telemetry = ModeTelemetry(clock)
+
+    def poll_mode(self):
+        """Read only buffered bytes, without HELLO, ACK waits or motion effects."""
+        available = min(self.serial.in_waiting, 4096)
+        if available > 0:
+            self.mode_telemetry.feed(self.serial.read(available))
+        return self.mode_telemetry.mode()
 
     def send(self, kind, payload=b""):
         self.sequence = (self.sequence + 1) & 0xffffffff

@@ -1,6 +1,6 @@
 """ROS1 navigation -> PC USB-TTL -> STM32 USART2, 115200 8N1.
 
-One-way setpoints; MCU enforces RC ownership and the command watchdog.
+One-way setpoints with passive mode feedback; MCU owns RC and command watchdog.
 Local arm gates navigation commands; it is not MCU enable confirmation.
 """
 import json
@@ -143,10 +143,13 @@ class ChassisNode:
                 self.command = None
                 self.connected_time = time.monotonic()
             now = time.monotonic()
+            mode = self.link.poll_mode()
+            self.mode_pub.publish(self.String(data=mode))
             self.status_pub.publish(self.String(data=json.dumps({
-                "port_open": True, "communication": "one_way", "execution_confirmed": False,
+                "port_open": True, "communication": "stream_with_mode_feedback",
+                "execution_confirmed": False, "rc_mode": mode,
                 "navigation_enabled": self.armed})))
-            # No RC mode is inferred: in one-way operation only the MCU knows it.
+            # Feedback is display-only. Do not reinstate handshake/ACK gating.
             if self.armed:
                 if now - (self.command_time if self.command is not None else self.arm_time) > 0.2:
                     # A completed goal already sent zero; preserve ARRIVED for
