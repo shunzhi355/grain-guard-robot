@@ -141,6 +141,7 @@ def node_stub():
     node.link = MagicMock()
     node.link.status = {"mode": 2, "faults": 0, "flags": 5}
     node.link.status_time = node.command_time
+    node.link.poll_mode.return_value = ""
     node.String = lambda **kw: kw
     node.Empty = lambda: None
     node.TriggerResponse = lambda **kw: SimpleNamespace(**kw)

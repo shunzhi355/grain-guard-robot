@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -117,6 +118,8 @@ class MainWindow(QMainWindow):
         self._rc_control: Optional[RCControl] = None
         self._rc_timer: Optional[QTimer] = None
         self._rc_mode_mirror: Optional[str] = None
+        self._rc_mode_updated_at = float("-inf")
+        self._rc_mirror_timer: Optional[QTimer] = None
         self._rc_mirror_started = False
         self._manual_btn: Optional[QPushButton] = None
         self._mode_dot: Optional[QLabel] = None
@@ -235,7 +238,7 @@ class MainWindow(QMainWindow):
         mode_label = QLabel("模式")
         mode_label.setObjectName("stat_label")
         layout.addWidget(mode_label)
-        self._mode_value = QLabel("自动")
+        self._mode_value = QLabel("未知")
         self._mode_value.setObjectName("stat_value")
         layout.addWidget(self._mode_value)
 
@@ -471,12 +474,22 @@ class MainWindow(QMainWindow):
         self._rc_mirror_started = True
         if self._ros_thread is not None:
             self._ros_thread.rc_mode_updated.connect(self._on_rc_mode_mirror)
+        self._rc_mirror_timer = QTimer(self)
+        self._rc_mirror_timer.timeout.connect(self._expire_rc_mode_mirror)
+        self._rc_mirror_timer.start(250)
         self._update_manual_mode_ui()
 
     def _on_rc_mode_mirror(self, mode: str) -> None:
         """Handle mirrored /rc_mode updates from the standalone rc_node."""
-        self._rc_mode_mirror = mode
+        self._rc_mode_mirror = mode if mode in ("manual", "auto") else None
+        self._rc_mode_updated_at = time.monotonic()
         self._update_manual_mode_ui()
+
+    def _expire_rc_mode_mirror(self) -> None:
+        """Also clear a stale display if the ROS publisher itself disappears."""
+        if self._rc_mode_mirror is not None and time.monotonic() - self._rc_mode_updated_at >= 1.5:
+            self._rc_mode_mirror = None
+            self._update_manual_mode_ui()
 
     def _has_external_rc_node(self) -> bool:
         """True when a standalone ``rc_control_node`` (rc_node.py) is running.
@@ -512,7 +525,7 @@ class MainWindow(QMainWindow):
         else:
             # 镜像模式: 由独立 rc_node 的 /rc_mode 话题驱动
             manual = self._rc_mode_mirror == "manual"
-            running = self._rc_mode_mirror is not None
+            running = self._rc_mode_mirror in ("manual", "auto")
 
         # Nav panel button reflects the debounced CH5 mode
         if self._manual_btn is not None:
@@ -531,7 +544,7 @@ class MainWindow(QMainWindow):
         if self._mode_dot is not None and self._mode_value is not None:
             if not running:
                 self._update_dot(self._mode_dot, QColor("#8B949E"))
-                self._mode_value.setText("--")
+                self._mode_value.setText("未知")
             elif manual:
                 self._update_dot(self._mode_dot, QColor("#D4A72C"))
                 self._mode_value.setText("手动")
