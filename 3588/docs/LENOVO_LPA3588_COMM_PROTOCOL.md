@@ -1,0 +1,700 @@
+# 联想主机—LPA3588 通信协议
+
+> 协议名称：Grain Robot Inter-host Control Protocol（GRICP）  
+> 协议版本：1.0  
+> 文档状态：待实现/待实机验收  
+> 适用范围：联想导航主机 ↔ LPA3588 机构与底盘安全主机
+
+## 1. 目标与边界
+
+本协议用于把当前单机系统拆分为两台主机：
+
+- **联想主机**：运行 MID360 驱动、SLAM/重定位、地图、Nav2、障碍物感知，输出物理速度指令。
+- **LPA3588**：运行 UI、任务状态机、扦样机构、PCA9685、X2P、底盘网络网关、本地超时停车和急停。
+- **STM32**：继续负责遥控优先、底盘 PWM 与 300 ms 最终运动看门狗。
+
+本协议只传递目标、速度、导航/定位状态和建图管理命令。联想主机不直接输出 PWM，不操作 PCA9685，不允许解除 LPA3588/STM32 的急停锁定。
+
+## 2. 设计原则
+
+1. **安全在接收端闭环**：LPA3588 必须不依赖联想主机的停车命令才能停车。
+2. **新指令才能续期**：心跳、TCP 活跃或重发的旧指令不得延长运动有效期。
+3. **单一自动命令源**：Nav2 投入使用后，旧 `goal_controller`、`cmd_vel_to_motor` 等不得同时向底盘发送非零自动指令。
+4. **遥控优先**：手动档、RC 失效、急停或严重故障时，任何网络指令都不能驱动底盘。
+5. **断线不自恢复**：网络、进程或会话恢复后，旧目标与旧速度指令全部作废，必须重新下发目标并获得新的运动许可。
+6. **单位唯一**：网络层使用物理速度，不传递 PWM 或归一化力度。
+
+## 3. 网络角色与端口
+
+### 3.1 角色
+
+| 角色 | 默认地址示例 | 职责 |
+|---|---|---|
+| LPA3588 | `192.168.50.1` | TCP/TLS 服务端、UDP 速度接收端、安全裁决端 |
+| 联想主机 | `192.168.50.2` | TCP/TLS 客户端、UDP 速度发送端、导航计算端 |
+
+地址可配置，但必须使用固定 IP。控制网段不得与 MID360 当前的 `192.168.1.0/24` 网段冲突。
+
+### 3.2 通道
+
+| 端口 | 传输层 | 方向 | 用途 |
+|---:|---|---|---|
+| 29100 | TCP + TLS 1.3 | 双向 | 握手、目标、取消、状态、建图与地图管理 |
+| 29101 | UDP | 联想 → 3588 | 高频速度指令和显式停车 |
+| 29102 | HTTPS | 3588 → 联想 | 可选的地图清单、缩略图和地图文件下载 |
+
+- 29100 只允许一个活动联想主机会话。
+- 新会话成功建立时，3588 必须先停车、撤销旧运动许可，再使旧会话失效。
+- 29101 只接收来自当前 TLS 会话协商 IP 和会话密钥的数据报。
+
+## 4. 通用帧格式
+
+TCP 和 UDP 共用同一层 GRICP 帧格式。UDP 的一个数据报必须恰好包含一帧；TCP 按 `header_len + payload_len + 4` 字节拆帧。
+
+### 4.1 帧头
+
+所有多字节整数均使用网络字节序（big-endian）。
+
+| 偏移 | 长度 | 字段 | 说明 |
+|---:|---:|---|---|
+| 0 | 4 | `magic` | ASCII `GLC1`，即 `47 4C 43 31` |
+| 4 | 1 | `version_major` | 主版本，固定为 1 |
+| 5 | 1 | `version_minor` | 次版本，当前为 0 |
+| 6 | 2 | `message_type` | 消息类型 |
+| 8 | 2 | `flags` | 标志位 |
+| 10 | 2 | `header_len` | V1 固定为 32 |
+| 12 | 4 | `payload_len` | 负载字节数 |
+| 16 | 4 | `session_id` | 3588 分配的非零会话 ID；`HELLO` 为 0 |
+| 20 | 4 | `sequence` | 当前方向内严格递增的序号 |
+| 24 | 8 | `timestamp_ms` | UTC Unix 时间，毫秒 |
+| 32 | N | `payload` | 消息负载 |
+| 32+N | 4 | `crc32c` | CRC-32C |
+| 36+N | 16 | `auth_tag` | 仅 UDP 必须存在，HMAC-SHA256 前 16 字节 |
+
+### 4.2 Flags
+
+| 位 | 名称 | 含义 |
+|---:|---|---|
+| 0 | `ACK_REQUIRED` | 请求对端返回显式响应 |
+| 1 | `RESPONSE` | 该帧是响应 |
+| 2 | `EVENT` | 该帧是异步事件 |
+| 3 | `ERROR` | 响应包含错误 |
+| 4 | `EMERGENCY` | 高优先级停车/安全事件 |
+| 5 | `AUTH_TAG` | 帧尾包含 16 字节 HMAC |
+| 6–15 | 保留 | 发送端必须置 0 |
+
+### 4.3 完整性与认证
+
+- CRC 算法：CRC-32C/Castagnoli，覆盖 `version_major` 至负载末字节，不覆盖 `magic`、CRC 字段和 HMAC。
+- CRC 测试向量：ASCII `123456789` 应得到 `0xE3069283`。
+- TCP 必须使用 TLS 1.3 双向证书认证。
+- UDP 使用 TLS 握手时下发的 32 字节随机 `udp_session_key`计算 HMAC-SHA256，认证范围为从 `magic` 到 `crc32c` 的全部字节，帧尾只传前 16 字节。
+- HMAC 测试向量：key 为 20 个 `0x0b`，data 为 ASCII `Hi There`，截断值应为 `b0344c61d8db38535ca8afceaf0bf12b`。
+- 生产环境禁止关闭 TLS/HMAC。开发无认证模式只能绑定回环地址或隔离的台架网络。
+
+### 4.4 长度和序号规则
+
+- TCP 负载上限：1 MiB。
+- UDP V1 只允许 `MOTION_COMMAND` 和 `MOTION_STOP`，整帧不得超过 256 字节。
+- 长度、版本、CRC 或 HMAC 错误的帧必须丢弃，不得改变运动状态。
+- 每个会话、每个方向独立维护序号。重复帧和旧序号帧直接丢弃并计数。
+- 序号接近 `0xFFFFFFFF` 时必须主动断开并建立新会话，V1 不允许在会话内回绕。
+
+## 5. 消息类型
+
+| 类型值 | 名称 | 方向 | 通道 |
+|---:|---|---|---|
+| `0x0001` | `HELLO` | 联想 → 3588 | TCP |
+| `0x0002` | `HELLO_ACK` | 3588 → 联想 | TCP |
+| `0x0003` | `HEARTBEAT` | 双向 | TCP |
+| `0x0004` | `ERROR_RESPONSE` | 双向 | TCP |
+| `0x0100` | `NAV_GOAL_REQUEST` | 3588 → 联想 | TCP |
+| `0x0101` | `NAV_GOAL_RESPONSE` | 联想 → 3588 | TCP |
+| `0x0102` | `NAV_CANCEL` | 3588 → 联想 | TCP |
+| `0x0103` | `NAV_STATUS` | 联想 → 3588 | TCP |
+| `0x0104` | `NAV_RESULT` | 联想 → 3588 | TCP |
+| `0x0110` | `MOTION_ARM_REQUEST` | 联想 → 3588 | TCP |
+| `0x0111` | `MOTION_ARM_RESPONSE` | 3588 → 联想 | TCP |
+| `0x0120` | `MOTION_COMMAND` | 联想 → 3588 | UDP |
+| `0x0121` | `MOTION_STOP` | 联想 → 3588 | UDP，可在 TCP 再发一次 |
+| `0x0122` | `MOTION_EVENT` | 3588 → 联想 | TCP |
+| `0x0200` | `SLAM_COMMAND` | 3588 → 联想 | TCP |
+| `0x0201` | `SLAM_RESPONSE` | 联想 → 3588 | TCP |
+| `0x0202` | `SLAM_STATUS` | 联想 → 3588 | TCP |
+| `0x0210` | `MAP_LIST_REQUEST` | 3588 → 联想 | TCP |
+| `0x0211` | `MAP_LIST_RESPONSE` | 联想 → 3588 | TCP |
+| `0x0300` | `ROBOT_STATUS` | 3588 → 联想 | TCP |
+| `0x0301` | `SAFETY_EVENT` | 3588 → 联想 | TCP |
+| `0x0310` | `POSE_STATUS` | 联想 → 3588 | TCP |
+| `0x0320` | `OBSTACLE_STATUS` | 联想 → 3588 | TCP |
+
+TCP 消息默认使用 UTF-8 JSON 负载。JSON 中的速度、坐标和角度使用 SI 单位；UDP 运动负载使用固定二进制结构。
+
+## 6. 会话与心跳
+
+### 6.1 HELLO
+
+`HELLO` 的 `session_id` 必须为 0。
+
+```json
+{
+  "device_id": "lenovo-nav-01",
+  "boot_id": "30ee3b75-346d-4f5a-80b6-f3c2eb49a900",
+  "software_version": "grain-nav-1.0.0",
+  "protocol_min": "1.0",
+  "protocol_max": "1.0",
+  "capabilities": ["nav2", "sfast_lio", "mapping", "relocalization", "obstacle"]
+}
+```
+
+### 6.2 HELLO_ACK
+
+```json
+{
+  "accepted": true,
+  "session_id": 305419896,
+  "server_boot_id": "ed467dbc-39cc-46bd-bb0e-dfc263317afb",
+  "server_time_ms": 1790640000000,
+  "udp_session_key_b64": "<32-byte-random-key-base64>",
+  "heartbeat_period_ms": 500,
+  "heartbeat_timeout_ms": 1500,
+  "motion_rx_timeout_ms": 200,
+  "limits": {
+    "linear_x_mm_s": 300,
+    "linear_y_mm_s": 0,
+    "angular_z_mrad_s": 800,
+    "max_motion_valid_ms": 150
+  }
+}
+```
+
+`session_id` 和 `udp_session_key` 每次会话都必须重新生成，不得写死在配置文件中。
+`udp_session_key` 属于敏感信息，双方不得将其写入常规日志、错误上报或抓包文件。
+
+### 6.3 HEARTBEAT
+
+```json
+{
+  "uptime_ms": 381245,
+  "state": "READY",
+  "last_rx_sequence": 912
+}
+```
+
+- 双方每 500 ms 发送一次心跳。
+- 超过 1500 ms 没有收到对端任何有效 TCP 帧，会话判定为断开。
+- **HEARTBEAT 绝对不能刷新 200 ms 运动指令超时。**
+- 会话断开时，3588 立即停车、撤销 `motion_epoch`并取消当前导航。
+
+## 7. 导航目标协议
+
+### 7.1 NAV_GOAL_REQUEST
+
+```json
+{
+  "request_id": "6400aacc-0705-43d9-8fcf-299a896ea5b7",
+  "goal_id": "warehouse-A-point-03-0001",
+  "map_id": "warehouse-A-20260929",
+  "frame_id": "map",
+  "pose": {
+    "x_m": 12.35,
+    "y_m": 4.20,
+    "yaw_rad": 1.5708
+  },
+  "position_tolerance_m": 0.20,
+  "yaw_tolerance_rad": 0.1745,
+  "timeout_ms": 120000
+}
+```
+
+规则：
+
+- `goal_id` 在当前会话内必须唯一。
+- V1 只接受 `frame_id="map"`。旧系统的 `camera_init` 必须由网关在发送前完成坐标转换，不允许只改字符串。
+- 收到新目标时，已有目标必须先取消并使其运动许可失效。
+- 目标被接受不等于车辆已获得运动许可。
+
+### 7.2 NAV_GOAL_RESPONSE
+
+```json
+{
+  "request_id": "6400aacc-0705-43d9-8fcf-299a896ea5b7",
+  "goal_id": "warehouse-A-point-03-0001",
+  "accepted": true,
+  "error_code": 0,
+  "message": "goal accepted"
+}
+```
+
+### 7.3 NAV_CANCEL
+
+```json
+{
+  "request_id": "523f3c96-374f-4376-88f6-60459d90eaa4",
+  "goal_id": "warehouse-A-point-03-0001",
+  "reason": "operator_cancel"
+}
+```
+
+3588 发送 `NAV_CANCEL` 时必须先本地停车和撤销运动许可，不得等待联想主机响应。
+
+### 7.4 NAV_STATUS
+
+```json
+{
+  "goal_id": "warehouse-A-point-03-0001",
+  "state": "CONTROLLING",
+  "distance_remaining_m": 2.37,
+  "estimated_time_remaining_ms": 18000,
+  "recovery_count": 0,
+  "localization_valid": true,
+  "message": "following local trajectory"
+}
+```
+
+`state` 枚举：
+
+```text
+ACCEPTED, PLANNING, CONTROLLING, PAUSED, RECOVERY,
+SUCCEEDED, CANCELED, FAILED
+```
+
+`NAV_STATUS` 状态变化时立即发送，导航期间至少每 500 ms 重发当前状态。
+
+### 7.5 NAV_RESULT
+
+```json
+{
+  "goal_id": "warehouse-A-point-03-0001",
+  "result": "SUCCEEDED",
+  "error_code": 0,
+  "final_position_error_m": 0.12,
+  "final_yaw_error_rad": 0.06,
+  "message": "arrived"
+}
+```
+
+发送 `NAV_RESULT` 前，联想必须先连续发送至少 3 帧零速 `MOTION_COMMAND`，再发送 `MOTION_STOP`。3588 收到终态结果后必须再执行一次本地停车并撤销许可。
+
+## 8. 运动许可与速度指令
+
+### 8.1 MOTION_ARM_REQUEST
+
+联想只能在以下条件全部满足时请求运动：
+
+- 当前目标已被接受。
+- 地图与重定位有效。
+- 里程计和 TF 未超时。
+- Nav2 已进入可控制状态。
+- 没有导航主机本地故障。
+
+```json
+{
+  "request_id": "f84fb40c-8433-45d3-b452-2367b719cf7f",
+  "goal_id": "warehouse-A-point-03-0001",
+  "localization_valid": true,
+  "odom_age_ms": 18
+}
+```
+
+### 8.2 MOTION_ARM_RESPONSE
+
+3588 只有在 RC 有效、处于自动档、急停未锁定、无障碍停车、底盘串口正常时才能授权。
+
+```json
+{
+  "request_id": "f84fb40c-8433-45d3-b452-2367b719cf7f",
+  "goal_id": "warehouse-A-point-03-0001",
+  "granted": true,
+  "motion_epoch": 270544960,
+  "error_code": 0,
+  "message": "motion granted"
+}
+```
+
+- `motion_epoch` 由 3588 生成，必须非零。
+- 每次撤销许可、切换模式、停车、取消、故障、断线或重新授权都必须使原 `motion_epoch` 失效。
+- 授权只绑定当前 `session_id + goal_id + motion_epoch`。
+
+### 8.3 MOTION_COMMAND
+
+`MOTION_COMMAND` 使用 20 字节固定二进制负载：
+
+| 偏移 | 长度 | 类型 | 字段 | 范围/说明 |
+|---:|---:|---|---|---|
+| 0 | 4 | `uint32` | `motion_epoch` | 必须等于当前授权值 |
+| 4 | 4 | `int32` | `linear_x_mm_s` | `-300..300` mm/s |
+| 8 | 4 | `int32` | `linear_y_mm_s` | V1 必须为 0 |
+| 12 | 4 | `int32` | `angular_z_mrad_s` | `-800..800` mrad/s |
+| 16 | 2 | `uint16` | `valid_for_ms` | `50..150` ms |
+| 18 | 1 | `uint8` | `source` | 1=`NAV2` |
+| 19 | 1 | `uint8` | `reserved` | 必须为 0 |
+
+发送和接收规则：
+
+- 联想发送频率为 20–30 Hz，推荐 20 Hz。
+- `timestamp_ms + valid_for_ms` 早于接收时间的指令丢弃。
+- 时钟偏差超过 50 ms 时不允许新的运动授权。
+- 3588 仅用“最后一帧新的、验证通过的运动指令”刷新本地运动时间。
+- 任何越界、`linear_y != 0`、过期、错会话、错 `motion_epoch`、重复或乱序指令均丢弃，不得裁剪后执行。
+- 零速 `MOTION_COMMAND` 表示导航中临时保持停车，可刷新 200 ms 运动超时，但不解除任何故障。
+- 心跳、状态包、TCP 消息和重放的旧速度包都不能刷新运动超时。
+- 3588 连续 200 ms 没收到新的有效 `MOTION_COMMAND` 时，必须发出本地停车、撤销授权并上报 `MOTION_TIMEOUT`。
+
+3588 接收验证通过后的本地换算：
+
+```text
+forward = round(linear_x_mm_s / 300.0 * 1000)
+turn    = round(angular_z_mrad_s / 800.0 * 1000)
+linear_y_mm_s 必须为 0
+```
+
+`forward` 和 `turn` 必须再次检查在 `-1000..1000`，随后由 3588 唯一的底盘控制器调用 `ChassisSerial.stream_effort(forward, turn)`。这仍然只是物理速度到 STM32 归一化控制量的换算；网络层和 3588 都不直接计算电调 PWM，最终 PWM、遥控优先和 300 ms 保护仍由 STM32 负责。
+
+### 8.4 MOTION_STOP
+
+`MOTION_STOP` 使用 8 字节二进制负载：
+
+| 偏移 | 长度 | 类型 | 字段 |
+|---:|---:|---|---|
+| 0 | 4 | `uint32` | `motion_epoch` |
+| 4 | 2 | `uint16` | `stop_reason` |
+| 6 | 2 | `uint16` | 保留，必须为 0 |
+
+`stop_reason`：
+
+| 值 | 原因 |
+|---:|---|
+| 1 | 正常到达 |
+| 2 | 操作员取消 |
+| 3 | 定位无效 |
+| 4 | 障碍物 |
+| 5 | 规划/控制故障 |
+| 6 | 导航超时 |
+| 7 | 联想主机关闭 |
+| 8 | 其他安全原因 |
+
+- 联想应连续发送 3 帧 UDP `MOTION_STOP`，帧间隔 10 ms，并在 TCP 上再发一次。
+- 3588 收到任意一帧有效 `MOTION_STOP` 即立停车并撤销授权。
+- 为保持失效安全，只要 `MOTION_STOP` 通过当前 `session_id` 的认证，3588 就必须停止当前自动运动；`motion_epoch` 不匹配只增加诊断记录，不得阻止停车。
+- `EMERGENCY` 标志可提高停车事件的日志与处理优先级，但仍不得用于解除本地急停。
+
+## 9. 机器人与安全状态
+
+### 9.1 ROBOT_STATUS
+
+3588 在状态变化时立即发送，并在联机期间以 10 Hz 发送。
+
+```json
+{
+  "rc_mode": "auto",
+  "rc_valid": true,
+  "rc_age_ms": 42,
+  "chassis_link": "online",
+  "chassis_armed": true,
+  "estop_latched": false,
+  "obstacle_stop": false,
+  "motion_epoch": 270544960,
+  "last_motion_age_ms": 31,
+  "last_motion_sequence": 4812,
+  "faults": []
+}
+```
+
+`rc_mode` 只允许 `manual`、`auto`、`unknown`。联想不得根据最后一次的 `auto` 状态自行延长其有效性。
+
+### 9.2 SAFETY_EVENT / MOTION_EVENT
+
+```json
+{
+  "event": "RC_MODE_CHANGED",
+  "severity": "STOP",
+  "goal_id": "warehouse-A-point-03-0001",
+  "motion_epoch": 270544960,
+  "error_code": 200,
+  "message": "manual mode selected; automatic motion revoked"
+}
+```
+
+需立即停车并撤销授权的事件包括：
+
+- `RC_MODE_CHANGED`：离开自动档。
+- `RC_INVALID`：遥控数据无效或超时。
+- `CHASSIS_LINK_LOST`：3588 与 STM32 链路中断。
+- `ESTOP_LATCHED`：急停已锁定。
+- `OBSTACLE_STOP`：3588 本地障碍停车。
+- `MOTION_TIMEOUT`：200 ms 内没有新的有效速度帧。
+- `SESSION_LOST`：双机会话中断。
+
+## 10. 定位、障碍与建图状态
+
+### 10.1 POSE_STATUS
+
+```json
+{
+  "frame_id": "map",
+  "timestamp_ms": 1790640000123,
+  "x_m": 4.82,
+  "y_m": 1.37,
+  "yaw_rad": -0.21,
+  "linear_x_m_s": 0.18,
+  "angular_z_rad_s": 0.04,
+  "position_covariance_xx": 0.012,
+  "position_covariance_yy": 0.014,
+  "yaw_covariance": 0.008,
+  "localization_valid": true,
+  "odom_age_ms": 12
+}
+```
+
+- 发送频率建议 10 Hz，用于 3588 UI 显示，不参与 3588 的底盘速度闭环。
+- `localization_valid=false` 时，联想必须同时停止发送非零运动指令、发送 `MOTION_STOP` 并结束当前目标。
+
+### 10.2 OBSTACLE_STATUS
+
+```json
+{
+  "blocked": true,
+  "zone": "front_hard_stop",
+  "nearest_distance_m": 0.54,
+  "cloud_age_ms": 38,
+  "sensor_valid": true
+}
+```
+
+- 状态变化时立即发送，并以 5 Hz 重发。
+- `blocked=true` 或 `sensor_valid=false` 时，3588 必须按停车状态处理。
+- 障碍消失只代表可重新规划，不代表可自动恢复已撤销的 `motion_epoch`。
+
+### 10.3 SLAM_COMMAND
+
+```json
+{
+  "request_id": "17520a3c-0ebf-41d2-9260-4caeaf95cfdb",
+  "operation": "START_LOCALIZATION",
+  "map_id": "warehouse-A-20260929",
+  "map_name": "A仓"
+}
+```
+
+`operation` 枚举：
+
+```text
+START_MAPPING
+STOP_MAPPING
+SAVE_MAP
+START_LOCALIZATION
+STOP_LOCALIZATION
+```
+
+约束：
+
+- `START_MAPPING` 必须先停止重定位。
+- `START_LOCALIZATION` 必须先停止建图。
+- 建图与重定位不能同时运行。
+- 有活动运动许可时，不允许切换建图/重定位模式。
+- `SAVE_MAP` 必须等待地图文件真正写入并完成 SHA-256 校验后才能返回成功。
+
+### 10.4 SLAM_STATUS
+
+```json
+{
+  "mode": "LOCALIZING",
+  "map_id": "warehouse-A-20260929",
+  "localization_valid": true,
+  "lidar_age_ms": 21,
+  "imu_age_ms": 8,
+  "odom_age_ms": 15,
+  "message": "relocalization active"
+}
+```
+
+`mode` 枚举：`IDLE`、`MAPPING`、`LOCALIZING`、`SAVING`、`ERROR`。
+
+## 11. 地图管理与文件传输
+
+`MAP_LIST_RESPONSE` 只返回元数据，不在 29100 TCP 通道中传输大型 PCD。
+
+```json
+{
+  "request_id": "0a35c367-2007-4036-9953-230e4503bd9d",
+  "maps": [
+    {
+      "map_id": "warehouse-A-20260929",
+      "name": "A仓",
+      "created_at_ms": 1790638000000,
+      "pcd_size_bytes": 184223918,
+      "grid_size_bytes": 284311,
+      "sha256": "<manifest-sha256>",
+      "preview_url": "https://192.168.50.2:29102/api/v1/maps/warehouse-A-20260929/preview.png"
+    }
+  ]
+}
+```
+
+HTTPS 可选接口：
+
+```text
+GET /api/v1/maps
+GET /api/v1/maps/{map_id}/manifest
+GET /api/v1/maps/{map_id}/preview.png
+GET /api/v1/maps/{map_id}/grid.yaml
+GET /api/v1/maps/{map_id}/grid.png
+GET /api/v1/maps/{map_id}/map.pcd
+```
+
+- 路径参数只允许协议规定的 `map_id`，不接受任意文件系统路径。
+- 每个文件必须在 manifest 中提供长度和 SHA-256。
+- 3588 默认只下载缩略图、二维栅格和元数据，不自动下载大型 PCD。
+
+## 12. 错误码
+
+| 错误码 | 名称 | 含义 |
+|---:|---|---|
+| 0 | `OK` | 成功 |
+| 100 | `UNSUPPORTED_VERSION` | 协议版本不支持 |
+| 101 | `AUTH_FAILED` | TLS/HMAC 认证失败 |
+| 102 | `INVALID_SESSION` | 会话无效 |
+| 103 | `INVALID_SEQUENCE` | 序号重复或乱序 |
+| 104 | `CHECKSUM_FAILED` | CRC 错误 |
+| 105 | `STALE_MESSAGE` | 消息过期 |
+| 106 | `CLOCK_UNSYNCED` | 时钟偏差过大 |
+| 200 | `RC_NOT_AUTO` | 遥控不在自动档 |
+| 201 | `RC_INVALID` | 遥控无效/超时 |
+| 202 | `CHASSIS_OFFLINE` | 3588 与 STM32 链路离线 |
+| 203 | `ESTOP_LATCHED` | 急停已锁定 |
+| 204 | `OBSTACLE_BLOCKED` | 障碍停车 |
+| 205 | `MOTION_NOT_ARMED` | 尚未获得运动许可 |
+| 206 | `MOTION_EPOCH_MISMATCH` | 运动令牌不匹配 |
+| 207 | `COMMAND_OUT_OF_RANGE` | 速度越界或 `vy != 0` |
+| 208 | `MOTION_TIMEOUT` | 运动指令超时 |
+| 209 | `MOTION_SOURCE_CONFLICT` | 存在第二个自动指令源 |
+| 300 | `LOCALIZATION_INVALID` | 定位无效 |
+| 301 | `MAP_NOT_LOADED` | 地图未加载 |
+| 302 | `GOAL_INVALID` | 目标无效或坐标系错误 |
+| 303 | `PLAN_FAILED` | 全局规划失败 |
+| 304 | `CONTROL_FAILED` | 局部控制失败 |
+| 305 | `NAV_TIMEOUT` | 导航任务超时 |
+| 306 | `SENSOR_TIMEOUT` | 雷达/IMU/里程计超时 |
+| 400 | `BUSY` | 当前状态不允许该操作 |
+| 401 | `INTERNAL_ERROR` | 内部错误 |
+
+## 13. 状态机
+
+### 13.1 3588 运动状态
+
+```text
+DISARMED
+   |
+   | MOTION_ARM_REQUEST 通过本地安全检查
+   v
+ARMED_IDLE --首帧有效 MOTION_COMMAND--> ACTIVE
+   |                                      |
+   |                                      | 200 ms 超时/取消/手动/故障
+   +------------------STOP----------------+
+                                          v
+                                      DISARMED
+
+急停锁定：任意状态 -> ESTOP_LATCHED
+ESTOP_LATCHED 只能由 3588 本地显式解除，网络消息不能解除。
+```
+
+### 13.2 联想导航状态
+
+```text
+IDLE -> ACCEPTED -> PLANNING -> CONTROLLING -> SUCCEEDED
+                    |               |
+                    |               +-> RECOVERY -> CONTROLLING/FAILED
+                    +------------------------------> FAILED
+任意非终态 --NAV_CANCEL/安全事件--> CANCELED
+```
+
+终态不得自动回到 `CONTROLLING`。新导航必须使用新 `goal_id` 和新 `motion_epoch`。
+
+## 14. 断线、超时与重连
+
+| 场景 | 3588 必须执行 | 联想必须执行 |
+|---|---|---|
+| 200 ms 无新速度帧 | 停车、撤销授权、取消导航、上报超时 | 停止旧目标，不得继续重发旧指令 |
+| TCP 断开 | 立即停车并作废会话 | 终止导航输出，开始退避重连 |
+| UDP 丢包 | 只使用最新有效包；不插值积压的旧指令 | 继续发送新序号指令 |
+| 网络恢复 | 保持未授权 | 重新 HELLO，等待新目标 |
+| 任一主机重启 | 停车，旧 session/epoch 失效 | 不恢复旧导航 |
+
+联想重连退避建议：0.5 s、1 s、2 s、4 s，之后最大 5 s。重连成功只恢复状态通信，不恢复运动。
+
+## 15. 软件栈与现有项目映射
+
+### 15.1 联想网关
+
+| ROS2/Nav2 侧 | GRICP |
+|---|---|
+| Nav2 `NavigateToPose` Action | `NAV_GOAL_REQUEST/RESPONSE/STATUS/RESULT` |
+| `/cmd_vel_nav` 或速度平滑器输出 | `MOTION_COMMAND` |
+| Nav2 cancel | `NAV_CANCEL` |
+| S-FAST_LIO 位姿/里程计 | `POSE_STATUS` |
+| 障碍检测 | `OBSTACLE_STATUS` |
+| 建图/重定位管理节点 | `SLAM_COMMAND/STATUS` |
+
+### 15.2 3588 非 ROS 机器人守护进程
+
+| GRICP | 3588 本地处理 |
+|---|---|
+| `NAV_GOAL_REQUEST` | UI/工作流经本机 IPC 提交目标，由守护进程转发 |
+| `NAV_STATUS/RESULT` | 更新本地任务状态机并通过事件接口通知 UI |
+| `MOTION_ARM_REQUEST` | 由本地 `MotionGuard` 检查并生成 `motion_epoch` |
+| `MOTION_COMMAND` | `ChassisController` 换算后调用 `ChassisSerial.stream_effort()` |
+| `MOTION_STOP` | 调用 `ChassisSerial.stream_control(AUTO_STOP)` |
+| `ROBOT_STATUS` | 由底盘串口回包、本地安全状态和机构状态生成 |
+| `POSE_STATUS` | 更新本地状态模型并通过 IPC 供 UI 显示 |
+| `OBSTACLE_STATUS` | 进入本地 `MotionGuard`，必要时立即停车 |
+| `SLAM_COMMAND/STATUS` | UI 经守护进程远程控制联想的建图/重定位 |
+
+重要约束：
+
+- GRICP 是唯一的跨主机导航接口，不再同时使用分布式 ROS 直接跨机传递速度。
+- Nav2 启用时必须禁用旧 `goal_controller` 的非零输出。
+- 3588 生产运行时不启动 `roscore`、`rospy`、`chassis_node` 或 `mechanism_node`。
+- `grain_robot_daemon` 是底盘 USB-TTL 串口的唯一拥有者；UI 和其他进程只能走本机 IPC。
+- 3588 只在当前会话获得运动许可时向 `ChassisSerial` 输出非零控制量。
+- 急停、手动遥控、STM32 指令超时和底盘串口故障仍在 3588/STM32 本地处理。
+
+## 16. 开发验收清单
+
+### 16.1 自动化测试
+
+- 大小端和字段偏移一致性测试。
+- CRC-32C 和 HMAC 标准向量测试。
+- TCP 拆包、粘包、超长负载和非法 JSON 测试。
+- UDP 丢包、重复、乱序、延迟、旧会话和错 HMAC 测试。
+- 越界速度、`vy != 0`、错 `motion_epoch`、时钟不同步测试。
+- 心跳持续但速度指令停止时，必须在 200 ms 超时。
+- 新会话建立后重放旧速度包，必须被拒绝。
+- 取消、到达、定位失效和障碍触发的停车时序测试。
+
+### 16.2 台架/实车测试
+
+| 场景 | 合格条件 |
+|---|---|
+| 联想未启动 | 3588/STM32 保持可停止状态，手动遥控不依赖联想 |
+| 联想进程崩溃 | 3588 不再输出非零命令；STM32 保留 300 ms 独立看门狗 |
+| 拔掉双机网线 | 运动指令有效期不超过 200 ms，不因 TCP 心跳缓冲而延长 |
+| 网络恢复 | 不自动恢复旧目标或旧速度 |
+| 自动运动时切手动 | STM32 手动优先，3588 撤销 `motion_epoch` |
+| 手动切回自动 | 旧导航不自动继续，需新目标/新授权 |
+| 急停后持续收到非零包 | 底盘保持停止，网络命令不能解除急停 |
+| 定位超时/跳变 | 联想停止非零输出，3588 本地超时作为后备 |
+| 同时启动旧控制器 | 启动检查拒绝运行并报 `MOTION_SOURCE_CONFLICT` |
+| 正常到点 | 先零速停车，再上报 `SUCCEEDED`，3588 任务状态机收到到位事件后才进入机构流程 |
+
+> 200 ms 和 300 ms 是“输出停车命令”的最大通信超时，不代表机械车体必然在相同时间内完全静止。实际制动距离必须在不同速度和负载下单独测量。
+
+## 17. 待实现交付物
+
+- `gricp` 共享协议包：帧编解码、CRC、HMAC、序号与错误码。
+- 联想侧网关：Nav2/SLAM 与 GRICP 适配。
+- 3588 侧守护进程：GRICP、`ChassisSerial`、机构控制器、UI/工作流本机 IPC 适配，无 ROS 运行依赖。
+- TLS 证书生成、轮换和部署脚本。
+- 协议单元测试、网络故障注入测试与实车验收记录。
+- Wireshark dissector 或等价抓包解析工具。
+- 协议升级、回滚与旧版兼容说明。
