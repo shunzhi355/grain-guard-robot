@@ -1,7 +1,8 @@
 # 粮食扦样机器人双机工程
 
 - [3588/](3588/README.md)：LPA3588 UI、任务流程、底盘串口、机构和 GRICP 服务端。
-- [LENOVO/](LENOVO/README.md)：MID360、建图/点云、导航迁移文件及 GRICP 协议副本。
+- [LENOVO/](LENOVO/README.md)：MID360、建图/点云、导航迁移文件及 GRICP 帧格式代码。
+- [双机通信协议.md](双机通信协议.md)：两台主机共同遵循的唯一协议主文档。
 - `stm32/`：原有底盘单片机固件，本次未修改。
 
 旧 `grain_sampling_robot_software_share/` 的内容已按运行主机迁入上述目录，原空目录已移除。当前3588代码可做协议和仿真测试；联想侧 ROS2/Nav2 客户端与地图服务、TLS 证书部署及双机实车验收仍需完成。

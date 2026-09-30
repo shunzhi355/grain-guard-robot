@@ -385,16 +385,32 @@ class WorkflowOrchestrator:
             x, y = 0.0, 0.0
         logger.info("Navigating to waypoint %d: (%.2f, %.2f)", idx, x, y)
         ok = self._bridge.call_navigate(x, y)
-        if ok:
+        if ok and self._fsm.current_state == SamplingState.NAVIGATE_TO_POINT:
             self._fsm.transition(SamplingAction.SYSTEM_NAV_COMPLETE)
+        elif not ok:
+            self._navigation_failed(SamplingState.NAVIGATE_TO_POINT)
 
     def _handle_return_to_start(self) -> None:
         """Step 15: navigate back to start, then complete."""
         target = self._start_position if self._start_position is not None else (0.0, 0.0)
         logger.info("Returning to start position (%.2f, %.2f)", target[0], target[1])
         ok = self._bridge.call_navigate(target[0], target[1])
-        if ok:
+        if ok and self._fsm.current_state == SamplingState.RETURN:
             self._fsm.transition(SamplingAction.SYSTEM_RETURN_COMPLETE)
+        elif not ok:
+            self._navigation_failed(SamplingState.RETURN)
+
+    def _navigation_failed(self, expected_state: SamplingState) -> None:
+        """Stop a failed navigation instead of leaving the UI waiting forever."""
+        if self._fsm.current_state != expected_state:
+            return  # The operator may have already stopped/abandoned the task.
+        reason = getattr(self._bridge, "last_error", "") or "导航未完成"
+        try:
+            self._bridge.cancel_goal()  # 3588 stops the chassis locally.
+        except Exception:
+            logger.exception("Could not cancel failed navigation")
+        self._fsm.set_stop_reason(str(reason))
+        self._fsm.transition(SamplingAction.STOP)
 
     def _handle_press_and_suction(self) -> None:
         """Step 5: press pipe + suction, auto-advance with depth check.

@@ -13,7 +13,9 @@
 
 机构链：UI/工作流 → 本机 Socket → `MechanismRuntime` → PCA9685/X2P。机构动作只在底盘未授权运动时放行。急停同时锁定底盘与机构；仅本机显式 `clear_estop` 请求可复位。
 
-GRICP 协议见 [docs/LENOVO_LPA3588_COMM_PROTOCOL.md](docs/LENOVO_LPA3588_COMM_PROTOCOL.md)。TLS 证书与实机串口/I2C 设备必须现场配置；本仓库没有默认生产证书。首次上电前必须架空履带测试手动优先、断网、串口断开、超时与急停。
+GRICP 协议见根目录 [双机通信协议.md](../双机通信协议.md)。TLS 证书与实机串口/I2C 设备必须现场配置；本仓库没有默认生产证书。首次上电前必须架空履带测试手动优先、断网、串口断开、超时与急停。
+
+不接联想主机、只测 3588 后续扦样流程时，使用默认关闭的[假导航联调模式](docs/FAKE_NAVIGATION_BENCH_TEST.md)。新终端程序不依赖 ROS，不发送任何底盘速度；每个采样点和返航都须人工按 Enter 确认。旧 `legacy_ros/scripts/fake_navigation_events.py` 不能用于此运行入口。
 
 `legacy_ros/` 保留旧启动脚本、ROS 服务定义和旧底盘输出实现用于追溯；生产服务不调用它。`src/grain_sampling_workflow/` 中的若干旧 ROS1 包装模块仍为历史测试保留，当前 UI 与守护进程入口不导入它们。
 

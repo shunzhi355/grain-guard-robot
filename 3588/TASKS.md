@@ -1,7 +1,7 @@
 # LPA3588（临滴工控机）任务清单
 
 > 目标架构：联想主机负责 MID360、SLAM/重定位和 Nav2；LPA3588 负责 UI、任务流程、扦样机构、底盘安全网关和 STM32 通信。  
-> 双机协议：[LENOVO_LPA3588_COMM_PROTOCOL.md](docs/LENOVO_LPA3588_COMM_PROTOCOL.md)  
+> 双机协议：[双机通信协议.md](../双机通信协议.md)
 > 文档状态：待实现/待实机验收
 
 ## 结论

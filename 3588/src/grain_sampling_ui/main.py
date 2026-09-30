@@ -515,7 +515,13 @@ class MainWindow(QMainWindow):
         # Create workflow components
         fsm = SamplingStateMachine(total_waypoints=len(waypoints), max_depth=len(depth_list))
         fsm.set_depth_targets(depth_list)
-        bridge = SamplingBridge()
+        fake_navigation = _env_flag("GRAIN_SAMPLING_UI_FAKE_NAVIGATION")
+        if fake_navigation:
+            from grain_sampling_workflow.fake_navigation import FakeNavigationBridge
+            bridge = FakeNavigationBridge()
+            logger.warning("FAKE NAVIGATION BENCH MODE: operator confirms each stationary goal")
+        else:
+            bridge = SamplingBridge()
         cloud_client = CloudHttpClient.from_app_config(AppConfig())
         orchestrator = WorkflowOrchestrator(
             fsm=fsm, bridge=bridge, waypoints=waypoints, cloud_client=cloud_client,
@@ -557,6 +563,7 @@ class MainWindow(QMainWindow):
             orchestrator.set_convey_duration(params["convey_duration"])
 
         # Attach to guidance page
+        self._guidance_page.set_fake_navigation_mode(fake_navigation)
         self._guidance_page.attach_orchestrator(fsm, orchestrator)
 
         # Persist the running task so a reboot can detect & abandon it.

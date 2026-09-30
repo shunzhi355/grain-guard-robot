@@ -395,6 +395,10 @@ class GuidancePage(QWidget):
         self._safety_widget.setVisible(False)
         self._render(fsm.current_state, None)
 
+    def set_fake_navigation_mode(self, enabled: bool) -> None:
+        """Label operator-confirmed bench navigation clearly in the live UI."""
+        self._fake_navigation_mode = bool(enabled)
+
     def has_active_task(self) -> bool:
         """Return True if there is a task currently in progress.
 
@@ -566,6 +570,11 @@ class GuidancePage(QWidget):
             return
 
         title_text, detail_text, button_names = meta
+        if getattr(self, "_fake_navigation_mode", False) and state in (
+            SamplingState.NAVIGATE_TO_POINT, SamplingState.RETURN,
+        ):
+            title_text = "假导航联调：等待人工确认"
+            detail_text = "底盘不会移动；请在假导航终端确认现场安全并按 Enter。"
 
         # ── Title ───────────────────────────────────────────
         self._title.setText(title_text)

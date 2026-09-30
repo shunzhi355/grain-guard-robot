@@ -45,16 +45,38 @@ class RobotBridge:
 
     def call_navigate(self, x: float, y: float) -> bool:
         try:
+            initial_status = self.client.request("status")
+            test_mode = initial_status.get("test_navigation_mode") is True
+            if test_mode:
+                response = self.client.request("test_goal", pose={"x_m": float(x),
+                    "y_m": float(y)})
+                goal_id = response["goal_id"]
+                deadline = time.monotonic() + self.NAV_TIMEOUT_SEC
+                while time.monotonic() < deadline:
+                    status = self.client.request("status")
+                    nav = status.get("navigation") or {}
+                    if nav.get("goal_id") == goal_id:
+                        if nav.get("result") == "SUCCEEDED" and nav.get("test_only") is True:
+                            self.last_error = ""
+                            return True
+                        if nav.get("result") in ("FAILED", "CANCELED"):
+                            self.last_error = nav.get("message", "test navigation stopped")
+                            return False
+                    time.sleep(0.2)
+                self.client.request("cancel")
+                self.last_error = "operator arrival confirmation timed out"
+                return False
             ready_deadline = time.monotonic() + 15
             map_id = None
+            status = initial_status
             while time.monotonic() < ready_deadline:
-                status = self.client.request("status")
                 slam = status.get("slam") or {}
                 pose = status.get("pose") or {}
                 if pose.get("localization_valid") and slam.get("map_id"):
                     map_id = slam["map_id"]
                     break
                 time.sleep(0.2)
+                status = self.client.request("status")
             if not map_id:
                 raise RuntimeError("Lenovo map or localization is not ready")
             response = self.client.request("goal", goal={"frame_id": "map",

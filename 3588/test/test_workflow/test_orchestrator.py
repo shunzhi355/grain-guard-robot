@@ -89,6 +89,18 @@ class TestCoreOrchestration:
         orch._handle_return_to_start()
         mock_bridge.call_navigate.assert_called_with(5.0, 6.0)
 
+    def test_failed_navigation_stops_instead_of_entering_mechanisms(
+        self, orch, mock_bridge
+    ):
+        mock_bridge.call_navigate.return_value = False
+        mock_bridge.last_error = "假导航终端未启动"
+        orch._fsm._state = SamplingState.NAVIGATE_TO_POINT
+        orch._handle_navigate()
+        assert orch._fsm.current_state == SamplingState.STOPPED
+        assert "假导航终端未启动" in orch._fsm.stop_reason
+        mock_bridge.cancel_goal.assert_called_once()
+        mock_bridge.call_clamp.assert_not_called()
+
     def test_arrived_prompt_state(self, orch):
         """After the auto-chain completes, state is ARRIVED_PROMPT."""
         orch._fsm.transition(SamplingAction.CONFIRM_READY)

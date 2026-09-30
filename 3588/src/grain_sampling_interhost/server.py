@@ -69,6 +69,8 @@ class RobotServer:
         self.lock = threading.RLock()
         self.running = threading.Event()
         self.state = {"navigation": None, "pose": None, "slam": None}
+        self.test_navigation_mode = os.getenv("GRAIN_TEST_FAKE_NAVIGATION", "").strip() == "1"
+        self.test_goal_id: str | None = None
         self.pose_received_at = 0.0
         self.obstacle_received_at = 0.0
         self.chassis.set_obstacle(True)  # No fresh obstacle report means unsafe.
@@ -87,6 +89,7 @@ class RobotServer:
         with self.lock:
             session = self.session
             self.session = None
+            self.test_goal_id = None
             self.chassis.stop(reason)
             self.state["navigation"] = {"state": "CANCELED", "message": reason}
         if session is not None:
@@ -318,7 +321,42 @@ class RobotServer:
         if kind == "status":
             pose = self.state["pose"] if time.monotonic() - self.pose_received_at <= 0.5 else None
             return {"ok": True, "chassis": self.chassis.status(),
-                    "lenovo_online": self.session is not None, **self.state, "pose": pose}
+                    "lenovo_online": self.session is not None,
+                    "test_navigation_mode": self.test_navigation_mode,
+                    **self.state, "pose": pose}
+        if kind == "test_goal":
+            with self.lock:
+                if not self.test_navigation_mode or self.session is not None:
+                    raise RuntimeError("local fake navigation is disabled or Lenovo is online")
+                chassis = self.chassis.status()
+                if (chassis["motion_armed"] or chassis["chassis_link"] != "online"
+                    or chassis["rc_mode"] != "auto" or chassis["estop_latched"]
+                    or self.mechanism.estop_latched):
+                    raise RuntimeError("chassis must be stopped, online, in auto mode and not e-stopped")
+                self.chassis.stop("local fake navigation goal")
+                goal_id = str(uuid.uuid4())
+                self.test_goal_id = goal_id
+                self.state["navigation"] = {"goal_id": goal_id,
+                    "state": "AWAITING_OPERATOR", "test_only": True,
+                    "pose": request.get("pose")}
+                return {"ok": True, "goal_id": goal_id}
+        if kind == "test_arrive":
+            with self.lock:
+                goal_id = request.get("goal_id")
+                if (not self.test_navigation_mode or self.session is not None
+                    or not self.test_goal_id or goal_id != self.test_goal_id):
+                    raise RuntimeError("no matching local fake navigation goal")
+                chassis = self.chassis.status()
+                if (chassis["motion_armed"] or chassis["chassis_link"] != "online"
+                    or chassis["rc_mode"] != "auto" or chassis["estop_latched"]
+                    or self.mechanism.estop_latched):
+                    raise RuntimeError("chassis must be stopped, online, in auto mode and not e-stopped")
+                self.chassis.stop("local fake navigation arrival")
+                self.test_goal_id = None
+                self.state["navigation"] = {"goal_id": goal_id,
+                    "result": "SUCCEEDED", "test_only": True,
+                    "message": "operator confirmed stationary arrival"}
+                return {"ok": True}
         if kind == "estop":
             self._drop("local emergency stop")
             self.chassis.estop()
@@ -331,6 +369,13 @@ class RobotServer:
         if kind == "cancel":
             self.chassis.stop("local cancel")
             with self.lock:
+                if self.test_goal_id is not None:
+                    previous = self.test_goal_id
+                    self.test_goal_id = None
+                    self.state["navigation"] = {"goal_id": previous,
+                        "result": "CANCELED", "test_only": True,
+                        "message": "operator_cancel"}
+                    return {"ok": True}
                 session = self.session
                 if session is not None:
                     previous = session.goal_id

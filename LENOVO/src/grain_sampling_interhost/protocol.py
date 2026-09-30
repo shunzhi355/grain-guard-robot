@@ -1,7 +1,7 @@
 """GRICP v1 wire format shared by the 3588 server and Lenovo client.
 
 This module has no ROS or hardware dependency.  The protocol is specified in
-docs/LENOVO_LPA3588_COMM_PROTOCOL.md.
+../../双机通信协议.md.
 """
 from __future__ import annotations
 
