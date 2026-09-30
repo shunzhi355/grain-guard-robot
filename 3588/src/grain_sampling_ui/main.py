@@ -469,6 +469,7 @@ class MainWindow(QMainWindow):
         """
         # Local tasks keep a legacy 'id' field; prefer it over 'order_id'
         order_id = task_data.get("id") or task_data.get("order_id")
+        fake_navigation = _env_flag("GRAIN_SAMPLING_UI_FAKE_NAVIGATION")
 
         # ── Warehouse-based map switching ──
         warehouse = task_data.get("warehouse", "")
@@ -477,6 +478,8 @@ class MainWindow(QMainWindow):
         )
         if skip_mapping:
             logger.warning("Skipping map relocalization for commissioning task %s", order_id)
+        elif fake_navigation:
+            logger.info("Fake navigation: map relocalization is not required for task %s", order_id)
         elif warehouse and self._slam_bridge is not None:
             map_path = self._slam_bridge.find_map_by_warehouse(warehouse)
             if map_path:
@@ -515,7 +518,6 @@ class MainWindow(QMainWindow):
         # Create workflow components
         fsm = SamplingStateMachine(total_waypoints=len(waypoints), max_depth=len(depth_list))
         fsm.set_depth_targets(depth_list)
-        fake_navigation = _env_flag("GRAIN_SAMPLING_UI_FAKE_NAVIGATION")
         if fake_navigation:
             from grain_sampling_workflow.fake_navigation import FakeNavigationBridge
             bridge = FakeNavigationBridge()
@@ -731,6 +733,7 @@ class MainWindow(QMainWindow):
         self._ros_thread = RobotEventThread()
         self._ros_thread.connection_changed.connect(self.set_connected)
         self._ros_thread.error.connect(self._alarm_bar.set_alarm)
+        self._ros_thread.safety_status_updated.connect(self._on_safety_status)
         self._ros_thread.rc_mode_updated.connect(self._on_rc_mode_mirror)
         self._ros_thread.odometry_updated.connect(self._main_page._on_odometry)
         self._ros_thread.cloud_registered_updated.connect(
@@ -744,6 +747,13 @@ class MainWindow(QMainWindow):
         self._setup_rc_control()
         self._ros_thread.start()
         logger.info("Robot daemon event thread started")
+
+    @Slot(str)
+    def _on_safety_status(self, message: str) -> None:
+        if message:
+            self._alarm_bar.set_alarm(message, "danger")
+        else:
+            self._alarm_bar.clear_alarm()
 
     def stop_ros(self) -> None:
         """Stop the ROS background thread."""

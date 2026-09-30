@@ -405,6 +405,7 @@ class WorkflowOrchestrator:
         if self._fsm.current_state != expected_state:
             return  # The operator may have already stopped/abandoned the task.
         reason = getattr(self._bridge, "last_error", "") or "导航未完成"
+        logger.error("Navigation stopped before mechanism operation: %s", reason)
         try:
             self._bridge.cancel_goal()  # 3588 stops the chassis locally.
         except Exception:

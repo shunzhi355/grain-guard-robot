@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+import logging
 
 from grain_sampling_devices.mechanism_driver import MechanismController
 from grain_sampling_devices.x2p_lift import build_x2p_lift_drive
@@ -10,6 +11,7 @@ from grain_sampling_workflow.mechanism_config import get_grain_params
 from utils.sampling_params import X2P_DURATION_S, X2P_FORWARD_SIGN, X2P_PORT, X2P_RPM, X2P_SLAVE
 
 DEPTHS = ("shallow", "mid", "deep")
+logger = logging.getLogger(__name__)
 
 
 class MechanismRuntime:
@@ -23,6 +25,16 @@ class MechanismRuntime:
         self._action_lock = threading.Lock()
 
     def start(self):
+        # The real reciprocating press defaults to 30 r/min.  Allow a bounded
+        # per-run override for supervised bench tests without changing the
+        # production calibration or the X2P controller's 500 r/min limit.
+        lift_rpm = os.getenv("GRAIN_LIFT_RPM")
+        if lift_rpm is not None:
+            requested_rpm = int(lift_rpm)
+            if not 1 <= requested_rpm <= 300:
+                raise ValueError("GRAIN_LIFT_RPM must be in 1..300 r/min")
+            self.controller.lift_rpm = requested_rpm
+            logger.warning("X2P supervised lift speed override: %d r/min", requested_rpm)
         self.controller.open()
         try:
             self.controller.init_escs(hold_s=3.0)

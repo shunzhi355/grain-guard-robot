@@ -30,12 +30,16 @@ class FakeNavigationBridge(RobotBridge):
         chassis = status.get("chassis") or {}
         if status.get("lenovo_online"):
             raise RuntimeError("联想导航已连接，禁止启用假导航")
-        if (chassis.get("chassis_link") != "online"
-                or chassis.get("rc_mode") != "auto"
-                or chassis.get("motion_armed")
-                or chassis.get("estop_latched")
-                or chassis.get("faults")):
-            raise RuntimeError("底盘未满足静止联调条件：串口在线、自动档、未授权运动、无急停/故障")
+        if chassis.get("chassis_link") != "online":
+            raise RuntimeError("底盘串口离线，禁止假导航联调")
+        if chassis.get("rc_mode") != "auto":
+            raise RuntimeError("遥控器不在自动档，禁止假导航联调")
+        if chassis.get("motion_armed"):
+            raise RuntimeError("底盘仍获运动授权，禁止假导航联调")
+        if chassis.get("estop_latched"):
+            raise RuntimeError("底盘急停仍锁定；请现场检查并按设备规程复位，软件不会自动解除")
+        if chassis.get("faults"):
+            raise RuntimeError(f"底盘故障码 {chassis['faults']}，禁止假导航联调")
 
     def record_start_position(self) -> tuple[float, float] | None:
         # A bench test has no Lenovo pose.  This coordinate is displayed only

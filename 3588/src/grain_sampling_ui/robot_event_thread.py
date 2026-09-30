@@ -7,6 +7,7 @@ from PySide2.QtCore import QThread, Signal
 from PySide2.QtGui import QImage
 
 from grain_sampling_workflow.robot_bridge import RobotClient
+from grain_sampling_ui.safety_status import chassis_safety_message
 
 
 class RobotEventThread(QThread):
@@ -17,6 +18,7 @@ class RobotEventThread(QThread):
     error = Signal(str)
     cloud_registered_updated = Signal(QImage)
     rc_mode_updated = Signal(str)
+    safety_status_updated = Signal(str)
 
     def __init__(self, parent=None, client=None):
         super().__init__(parent)
@@ -24,6 +26,7 @@ class RobotEventThread(QThread):
         self._running = True
         self._connected = False
         self._last_error = ""
+        self._last_safety_message = None
 
     def run(self):
         while self._running:
@@ -36,6 +39,10 @@ class RobotEventThread(QThread):
                     self.connection_changed.emit(connected)
                 chassis = status.get("chassis") or {}
                 self.rc_mode_updated.emit(chassis.get("rc_mode", "unknown"))
+                safety_message = chassis_safety_message(chassis)
+                if safety_message != self._last_safety_message:
+                    self._last_safety_message = safety_message
+                    self.safety_status_updated.emit(safety_message)
                 pose = status.get("pose") or {}
                 if all(isinstance(pose.get(k), (int, float)) and math.isfinite(pose[k])
                        for k in ("x_m", "y_m", "yaw_rad")):

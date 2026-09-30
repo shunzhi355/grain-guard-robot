@@ -1,6 +1,7 @@
 """GRICP framing and the 3588 motion safety boundary."""
 import os
 import time
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,38 @@ from grain_sampling_interhost.protocol import (MOTION, MessageType, ProtocolErro
                                                 encode, json_payload)
 from grain_sampling_interhost.server import RobotServer
 from grain_sampling_workflow.robot_bridge import RobotBridge
+from grain_sampling_workflow.robot_bridge import RobotClient
+
+
+def test_mechanism_ipc_timeout_covers_full_x2p_cycle(monkeypatch):
+    from grain_sampling_workflow import robot_bridge
+
+    class Socket:
+        timeout = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def connect(self, path):
+            assert path == "/tmp/test-control.sock"
+
+        def sendall(self, data):
+            assert b'"action": "mechanism"' in data
+
+        def makefile(self, *_):
+            return io.BytesIO(b'{"ok": true}\n')
+
+    conn = Socket()
+    monkeypatch.setattr(robot_bridge.socket, "AF_UNIX", 1, raising=False)
+    monkeypatch.setattr(robot_bridge.socket, "socket", lambda *_: conn)
+    assert RobotClient(path="/tmp/test-control.sock").request("mechanism")["ok"]
+    assert conn.timeout >= 600.0
 
 
 class FakeLink:
@@ -106,6 +139,37 @@ def test_stm32_reboot_revokes_motion():
             time.sleep(0.005)
         assert controller.status()["motion_armed"] is False
         assert controller.status()["last_stop_reason"] == "STM32 rebooted"
+    finally:
+        controller.close()
+
+
+def test_rc_fault_recovery_does_not_restart_previous_goal():
+    fake = FakeLink()
+    fake.mode_telemetry = SimpleNamespace(
+        status={"boot": 1, "flags": 4, "faults": 0, "rc_age_ms": 20},
+        received_at=time.monotonic())
+    controller = ChassisController()
+    controller.link = fake
+    controller.mode = "auto"
+    controller.start()
+    try:
+        time.sleep(0.06)
+        old_epoch = controller.arm("goal-1")
+        controller.command(old_epoch, 150, 0)
+        fake.mode_telemetry.status = {"boot": 1, "flags": 4, "faults": 1, "rc_age_ms": 20}
+        fake.mode_telemetry.received_at = time.monotonic()
+        deadline = time.monotonic() + 0.2
+        while controller.status()["motion_armed"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert controller.status()["motion_armed"] is False
+        assert controller.status()["last_stop_reason"] == "STM32 fault"
+        fake.mode_telemetry.status = {"boot": 1, "flags": 4, "faults": 0, "rc_age_ms": 20}
+        fake.mode_telemetry.received_at = time.monotonic()
+        with pytest.raises(RuntimeError, match="previous goal stopped"):
+            controller.arm("goal-1")
+        with pytest.raises(RuntimeError):
+            controller.command(old_epoch, 150, 0)
+        controller.arm("goal-2")
     finally:
         controller.close()
 

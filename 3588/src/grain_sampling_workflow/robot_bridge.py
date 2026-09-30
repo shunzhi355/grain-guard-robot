@@ -9,12 +9,18 @@ from typing import Any
 
 
 class RobotClient:
+    # A 20 cm X2P reciprocating press includes multiple 50 mm down / 20 mm
+    # up legs and can take over 180 s on the real hardware.  Keep the IPC
+    # request alive for the complete guarded operation; emergency stop uses a
+    # separate local connection and remains available while this one waits.
+    MECHANISM_TIMEOUT_SEC = 600.0
+
     def __init__(self, path: str | None = None):
         self.path = path or os.getenv("GRAIN_ROBOT_SOCKET", "/run/grain-robot/control.sock")
 
     def request(self, action: str, **values: Any) -> dict:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(180.0 if action == "mechanism" else 10.0)
+            conn.settimeout(self.MECHANISM_TIMEOUT_SEC if action == "mechanism" else 10.0)
             conn.connect(self.path)
             conn.sendall(json.dumps({"action": action, **values}, allow_nan=False).encode() + b"\n")
             with conn.makefile("rb") as stream:

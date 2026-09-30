@@ -29,7 +29,28 @@ def test_fake_navigation_rejects_unsafe_chassis(tmp_path):
     client = Client(motion_armed=True)
     bridge = FakeNavigationBridge(client=client, terminal_path=str(tmp_path / "nav.sock"))
     assert bridge.call_navigate(1, 2) is False
-    assert "静止联调条件" in bridge.last_error
+    assert "运动授权" in bridge.last_error
+    assert client.calls == ["status"]
+
+
+@pytest.mark.parametrize(("field", "value", "message"), [
+    ("estop_latched", True, "急停仍锁定"),
+    ("rc_mode", "manual", "自动档"),
+    ("faults", 1, "故障码 1"),
+])
+def test_fake_navigation_explains_safety_interlock(tmp_path, field, value, message):
+    client = Client(**{field: value})
+    bridge = FakeNavigationBridge(client=client, terminal_path=str(tmp_path / "nav.sock"))
+    assert bridge.call_navigate(1, 2) is False
+    assert message in bridge.last_error
+    assert client.calls == ["status"]
+
+
+def test_fake_navigation_allows_chassis_obstacle_when_stationary(tmp_path):
+    client = Client(obstacle_stop=True, obstacle=True)
+    bridge = FakeNavigationBridge(client=client, terminal_path=str(tmp_path / "nav.sock"))
+    assert bridge.call_navigate(1, 2) is False  # No operator terminal is running.
+    assert "障碍物" not in bridge.last_error
     assert client.calls == ["status"]
 
 

@@ -32,6 +32,7 @@ class ChassisController:
         self.mode = "unknown"
         self.epoch: int | None = None
         self.goal_id: str | None = None
+        self.faulted_goal_id: str | None = None
         self.last_command: float | None = None
         self.effort = (0, 0)
         self.estop_latched = False
@@ -118,6 +119,10 @@ class ChassisController:
         with self.lock:
             if not goal_id or self.link is None or self.mode != "auto":
                 raise RuntimeError("chassis unavailable or RC not in auto mode")
+            if goal_id == self.faulted_goal_id:
+                raise RuntimeError("previous goal stopped by STM32 fault; start a new goal")
+            if self.status()["faults"]:
+                raise RuntimeError("STM32 fault active")
             if self.estop_latched or self.obstacle:
                 raise RuntimeError("safety interlock active")
             self._stop_locked("new authorization")
@@ -194,6 +199,7 @@ class ChassisController:
                             self._stop_locked("STM32 rebooted")
                         self._mcu_boot = status["boot"]
                         if status["faults"] and self.epoch is not None:
+                            self.faulted_goal_id = self.goal_id
                             self._stop_locked("STM32 fault")
                         if status["flags"] & 2:
                             self.estop_latched = True
