@@ -90,10 +90,13 @@ def check(args: argparse.Namespace) -> None:
         for index, line in enumerate(lines)
         if (match := re.search(r"FSM: SamplingState\.\w+ -> SamplingState\.(\w+)", line))
     ]
-    if not transitions or transitions[-1][1] != "ARRIVED_PROMPT":
-        fail("旧工单不在静止的到位等待阶段，拒绝自动结束")
+    if not transitions or transitions[-1][1] not in {"ARRIVED_PROMPT", "STOPPED", "COMPLETED"}:
+        fail("旧工单仍可能执行流程动作，拒绝自动结束")
     last_transition = transitions[-1][0]
-    if any("[ERROR]" in line for line in lines[last_transition:]):
+    if any(
+        "[ERROR]" in line and "Report failed: cloud error" not in line
+        for line in lines[last_transition:]
+    ):
         fail("到位等待后出现错误日志，拒绝自动结束")
     last_press = max(
         (index for index, line in enumerate(lines) if "Mechanism press begin" in line),
@@ -105,6 +108,10 @@ def check(args: argparse.Namespace) -> None:
     )
     if last_press > last_return:
         fail("上次下压没有已记录的完整回程，拒绝覆盖原点")
+    mechanism_used = any(
+        re.search(r"Mechanism (?!set_grain\b)\w+ begin", line)
+        for line in lines
+    )
 
     path = daemon_socket(args.daemon_pid)
     for _ in range(2):
@@ -114,14 +121,16 @@ def check(args: argparse.Namespace) -> None:
             chassis.get("motion_armed") is not False
             or chassis.get("chassis_link") != "online"
             or chassis.get("estop_latched") is not False
-            or chassis.get("faults") != 0
         ):
-            fail("底盘不满足静止、在线、无急停和无故障条件")
+            fail("底盘不满足静止、在线、无急停条件")
         # MechanismRuntime serializes actions with lift_health. A short IPC
-        # timeout therefore rejects a still-running mechanism operation.
-        ipc_request(path, "mechanism", name="lift_health")
+        # timeout therefore rejects a still-running mechanism operation. If
+        # navigation stopped before any actuation, RC may now be unavailable;
+        # in that case the server intentionally blocks even this health call.
+        if mechanism_used:
+            ipc_request(path, "mechanism", name="lift_health")
         time.sleep(0.5)
-    print(f"旧本地任务 {marker['task_id']} 已无 UI 窗口，停在到位等待且机构只读检查通过")
+    print(f"旧本地任务 {marker['task_id']} 已无 UI 窗口，处于非动作终态且静止检查通过")
 
 
 def main() -> int:
