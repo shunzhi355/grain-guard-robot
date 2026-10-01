@@ -189,7 +189,7 @@ def test_semantic_actions_write_expected_channels(mock_mechanism):
 
     assert mock_mechanism.pca9685.register_history[0] == [1200]         # convey → CH0 开
     assert mock_mechanism.pca9685.register_history[4] == [BIN_OPEN_PULSE, BIN_CLOSE_PULSE]
-    assert mock_mechanism.pca9685.register_history[5] == [1900, 1200]   # clamp 关/夹紧 / unclamp 开/松开 (CH5 独立)
+    assert mock_mechanism.pca9685.register_history[5] == [1900, 1000]   # clamp 关/夹紧 / unclamp 开/松开 (CH5 独立)
     assert mock_mechanism.pca9685.register_history[6] == [1300, 1900]   # tighten 关/拧紧 / untighten 开/拧松 (CH6 独立)
     assert mock_mechanism.pca9685.register_history[2] == [1200, 1900]   # press 开 / lift 关
     assert mock_mechanism.pca9685.register_history[7] == [1200]         # fan → CH7 开

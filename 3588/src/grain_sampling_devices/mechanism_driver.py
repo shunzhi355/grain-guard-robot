@@ -728,7 +728,7 @@ class _BaseMechanismController:
         self._act_pulse("clamp", CHANNELS["clamp"], CLAMP_PULSE_CLOSE, duration)
 
     def unclamp(self, duration=None) -> None:
-        """松开（CH5 独立标定：1200us）。"""
+        """松开（CH5 独立标定：1000us）。"""
         self._act_pulse("unclamp", CHANNELS["clamp"], CLAMP_PULSE_OPEN, duration)
 
     def tighten(self, duration=None) -> None:

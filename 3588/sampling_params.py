@@ -67,9 +67,9 @@ PULSE_OPEN: float = 1200.0    # 开（输送 throttle 默认值，实机标定 1
 PULSE_CLOSE: float = 1900.0   # 动作脉宽，非停止命令
 PULSE_STOP: float = 1500.0    # 停止及初始化中位，持续输出
 
-#: CH5 夹紧独立标定（us）：夹紧=1900，松开=1200（实测确认）。
+#: CH5 夹紧独立标定（us）：夹紧=1900，松开=1000（2026-10-01 用户调整）。
 CLAMP_PULSE_CLOSE: float = 1900.0
-CLAMP_PULSE_OPEN: float = 1200.0
+CLAMP_PULSE_OPEN: float = 1000.0
 
 #: CH6 拧紧独立标定（us）：拧紧=1300，拧松=1900（实测确认）。
 TIGHTEN_PULSE_CLOSE: float = 1300.0
@@ -98,7 +98,7 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "open_duration": 5.0,       # 目标仓开门动作时长；旧 open_bin 服务用于自动关仓延时
     "close_duration": 3.0,      # 非目标仓/收尾三仓关门时长；动作后回中位（无到位反馈）
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
-    "unclamp_duration": 5.0,     # 松开时长（实机确认 5s）
+    "unclamp_duration": 10.0,    # 松开时长（2026-10-01 用户调整为 10s）
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）
     "untighten_duration": 3.0,   # 旋松时长
     "throttle_open": 1200.0,     # 输送/节流开（实机标定：开=1200us）

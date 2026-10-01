@@ -57,6 +57,14 @@ def test_default_params_have_complete_fields():
     assert REQUIRED_KEYS <= set(DEFAULT_GRAIN_PARAMS)
 
 
+def test_unclamp_duration_is_ten_seconds_for_every_grain():
+    assert DEFAULT_GRAIN_PARAMS["unclamp_duration"] == 10.0
+    assert all(
+        params["unclamp_duration"] == 10.0
+        for params in GRAIN_MECHANISM_CONFIG.values()
+    )
+
+
 # ── get_grain_params: known grains ──────────────────────────────────────
 
 
@@ -77,7 +85,7 @@ def test_get_grain_params_specific_values(grain):
     assert params["open_duration"] == 5.0
     assert params["close_duration"] == 3.0
     assert params["clamp_duration"] == 2.0
-    assert params["unclamp_duration"] == 5.0
+    assert params["unclamp_duration"] == 10.0
     assert params["tighten_duration"] == 10.0
     assert params["untighten_duration"] == 3.0
     assert params["throttle_open"] == 1200.0
