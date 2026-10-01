@@ -75,10 +75,22 @@ if fuser -s "$CHASSIS_SERIAL_PORT" 2>/dev/null; then
     echo "STM32 串口已被占用；不会抢占正在运行的底盘服务。" >&2
     exit 1
 fi
-if pgrep -f '[p]ython3 scripts/start_ui.py|[f]ake_navigation_terminal.py|[g]rain_sampling_interhost.server' >/dev/null; then
-    echo "检测到现有 UI、假导航或守护进程；先安全结束旧会话。" >&2
-    exit 1
-fi
+# Inspect real Python argv, not pgrep -f: an SSH wrapper may contain the
+# searched text in its own command line and cause a false busy result.
+for cmdline_file in /proc/[0-9]*/cmdline; do
+    [[ -r "$cmdline_file" ]] || continue
+    process_argv=()
+    mapfile -d '' -t process_argv < "$cmdline_file" || continue
+    process_name="${process_argv[0]:-}"
+    [[ "${process_name##*/}" == python3* ]] || continue
+    if [[ "${process_argv[1]:-}" == -m
+          && "${process_argv[2]:-}" == grain_sampling_interhost.server ]] \
+        || [[ "${process_argv[1]:-}" == *start_ui.py ]] \
+        || [[ "${process_argv[1]:-}" == *fake_navigation_terminal.py ]]; then
+        echo "检测到现有 UI、假导航或守护进程；先安全结束旧会话。" >&2
+        exit 1
+    fi
+done
 
 umask 077
 LOG_DIR="$PROJECT_DIR/log/bench/$(date +%Y%m%d-%H%M%S)-$$"
