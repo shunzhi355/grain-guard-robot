@@ -363,8 +363,31 @@ class RobotServer:
             self.mechanism.emergency_stop()
             return {"ok": True}
         if kind == "clear_estop":
-            self.chassis.clear_estop()
-            self.mechanism.reset(str(request.get("grain", "")))
+            with self.lock:
+                mechanical_reset_confirmed = request.get("mechanical_reset_confirmed") is True
+                if (self.mechanism.requires_mechanical_reset()
+                        and not mechanical_reset_confirmed):
+                    raise RuntimeError(
+                        "incomplete lift return: confirm physical mechanical reset "
+                        "before clearing the saved lift origin"
+                    )
+                chassis = self.chassis.status()
+                if (chassis["chassis_link"] != "online"
+                        or chassis["rc_mode"] != "auto"
+                        or chassis["rc_valid"] is not True
+                        or chassis["faults"] != 0
+                        or chassis["motion_armed"]
+                        or self.session is not None
+                        or self.test_goal_id is not None):
+                    raise RuntimeError(
+                        "emergency stop reset requires online healthy chassis, "
+                        "valid auto RC, no motion authorization and no active goal"
+                    )
+                self.chassis.clear_estop()
+                self.mechanism.reset(
+                    str(request.get("grain", "")),
+                    mechanical_reset_confirmed=mechanical_reset_confirmed,
+                )
             return {"ok": True}
         if kind == "cancel":
             self.chassis.stop("local cancel")

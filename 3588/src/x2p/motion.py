@@ -773,6 +773,28 @@ class MotionController:
             tolerance_pulses=None,
         )
 
+    def _verify_position_segment_selected(self) -> None:
+        """Verify the one-shot Pn701 trigger without ever writing it twice.
+
+        A busy drive can return an inconsistent first monitor read.  Read-only
+        confirmation may recover that case; persistent disagreement must stop
+        the move because the trigger may already have executed.
+        """
+        readbacks: list[int] = []
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.10)
+            value = self.drive.read_registers(Register.POSITION_SEGMENT)[0]
+            readbacks.append(value)
+            if value == 1:
+                if attempt:
+                    self._emit(f"Pn701只读复核成功: readbacks={readbacks}")
+                return
+        raise ConfigurationError(
+            f"Pn701位置段选择写入读回不一致: readbacks={readbacks}; "
+            "触发指令未重发，转入停机流程"
+        )
+
     def _move_pulses(
         self,
         direction: str | Direction,
@@ -828,9 +850,12 @@ class MotionController:
         peak = 0
         completed = False
         start_position = 0
+        phase = "prepare"
         try:
             forced_inputs = self._prepare_position_move(rpm)
+            phase = "write_target"
             self.drive.write_signed32(Register.PR1_PULSES, signed_pulses)
+            phase = "verify_target"
             if (
                 self.drive.read_signed32(Register.PR1_PULSES)
                 != signed_pulses
@@ -841,6 +866,7 @@ class MotionController:
             # soon as Pr1 is accepted, even if a brake, torque inhibit, or
             # mechanical disconnection prevents the axis from moving.  Use
             # the actual encoder position (Un022) for all arrival decisions.
+            phase = "read_encoder"
             start_position = self.drive.read_signed32(
                 Register.SERVO_POSITION_ENCODER
             )
@@ -848,13 +874,16 @@ class MotionController:
                 signed_pulses * self.config.encoder_forward_sign
             )
             target_position = start_position + encoder_pulses
+            phase = "servo_enable"
             self._enable_and_verify(forced_inputs)
             # Mode 7 executes the segment immediately when Pn701 becomes
             # non-zero.  Board testing proved mode 6 + DI2/CTRG was ignored,
             # while this path moved the encoder on the same 5 mm command.
+            phase = "trigger_segment"
             self.drive.write_register(Register.POSITION_SEGMENT, 1)
-            if self.drive.read_registers(Register.POSITION_SEGMENT)[0] != 1:
-                raise ConfigurationError("Pn701位置段选择写入读回不一致")
+            phase = "verify_segment"
+            self._verify_position_segment_selected()
+            phase = "monitor_motion"
             deadline = time.monotonic() + timeout
             settled = 0
             while time.monotonic() < deadline:
@@ -874,13 +903,15 @@ class MotionController:
                     completed = True
                     break
                 time.sleep(self.monitor_interval_s)
-        except Exception:
+        except Exception as exc:
+            self._emit(f"MOVE_ABORT phase={phase} error={type(exc).__name__}: {exc}")
             self._invalidate_position_static_setup()
             raise
         finally:
             try:
                 self.stop(verify_off=True)
-            except Exception:
+            except Exception as exc:
+                self._emit(f"MOVE_STOP_FAILED after_phase={phase} error={type(exc).__name__}: {exc}")
                 self._invalidate_position_static_setup()
                 raise
 

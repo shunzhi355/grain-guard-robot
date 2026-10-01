@@ -23,23 +23,74 @@ class StubController:
         self.opened = False
 
 
-def test_supervised_speed_override_is_300_rpm(monkeypatch):
-    monkeypatch.setenv("GRAIN_LIFT_RPM", "300")
+def test_supervised_speed_override_is_800_rpm(monkeypatch):
+    monkeypatch.setenv("GRAIN_LIFT_RPM", "800")
     monkeypatch.setenv("X2P_PORT", "")
     controller = StubController()
     runtime = MechanismRuntime(controller=controller)
     runtime.start()
-    assert controller.lift_rpm == 300
+    assert controller.lift_rpm == 800
     assert controller.opened
     runtime.close()
 
 
 def test_speed_override_rejects_excess_before_open(monkeypatch):
-    monkeypatch.setenv("GRAIN_LIFT_RPM", "301")
+    monkeypatch.setenv("GRAIN_LIFT_RPM", "801")
     controller = StubController()
-    with pytest.raises(ValueError, match="1..300"):
+    with pytest.raises(ValueError, match="1..800"):
         MechanismRuntime(controller=controller).start()
     assert not controller.opened
+
+
+def test_speed_override_updates_x2p_position_limit(monkeypatch):
+    monkeypatch.setenv("GRAIN_LIFT_RPM", "800")
+    monkeypatch.setenv("X2P_PORT", "/dev/test-x2p")
+    observed = {}
+
+    class Drive:
+        def read_position(self):
+            return 0
+
+    def build_drive(**kwargs):
+        observed.update(kwargs)
+        return Drive()
+
+    monkeypatch.setattr(
+        "grain_sampling_interhost.mechanism_controller.build_x2p_lift_drive",
+        build_drive,
+    )
+    controller = StubController()
+    runtime = MechanismRuntime(controller=controller)
+    runtime.start()
+    assert controller.lift_rpm == 800
+    assert observed["rpm"] == 800
+    runtime.close()
+
+
+def test_default_x2p_position_limit_unchanged(monkeypatch):
+    monkeypatch.delenv("GRAIN_LIFT_RPM", raising=False)
+    monkeypatch.delenv("X2P_RPM", raising=False)
+    monkeypatch.setenv("X2P_PORT", "/dev/test-x2p")
+    observed = {}
+
+    class Drive:
+        def read_position(self):
+            return 0
+
+    def build_drive(**kwargs):
+        observed.update(kwargs)
+        return Drive()
+
+    monkeypatch.setattr(
+        "grain_sampling_interhost.mechanism_controller.build_x2p_lift_drive",
+        build_drive,
+    )
+    controller = StubController()
+    runtime = MechanismRuntime(controller=controller)
+    runtime.start()
+    assert controller.lift_rpm == 30
+    assert observed["rpm"] == 500
+    runtime.close()
 
 
 def test_default_speed_unchanged(monkeypatch):

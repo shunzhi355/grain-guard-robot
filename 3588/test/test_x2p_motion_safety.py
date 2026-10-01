@@ -12,7 +12,7 @@ try:  # pragma: no cover - depends on the developer environment
 except ImportError:  # pragma: no cover
     sys.modules["serial"] = ModuleType("serial")
 
-from x2p.errors import SafetyInterlockError
+from x2p.errors import ConfigurationError, SafetyInterlockError
 from x2p.motion import (
     MotionController,
     _approach_profile,
@@ -137,3 +137,51 @@ def test_position_fast_setup_invalidates_cache_if_axis_is_not_off(
         controller._prepare_position_move(167)
 
     assert controller._position_static_ready is False
+
+
+def test_position_segment_readback_rechecks_without_replaying_trigger(monkeypatch) -> None:
+    drive = _StaticSetupDrive()
+    controller = MotionController(drive, output=None)
+    values = iter((0, 1))
+    monkeypatch.setattr(drive, "read_registers", lambda address: [next(values)])
+    monkeypatch.setattr("x2p.motion.time.sleep", lambda seconds: None)
+
+    drive.write_register(Register.POSITION_SEGMENT, 1)
+    controller._verify_position_segment_selected()
+
+    assert drive.writes == [(int(Register.POSITION_SEGMENT), 1)]
+
+
+def test_position_segment_persistent_mismatch_stops_without_replay(monkeypatch) -> None:
+    drive = _StaticSetupDrive()
+    controller = MotionController(drive, output=None)
+    monkeypatch.setattr(drive, "read_registers", lambda address: [0])
+    monkeypatch.setattr("x2p.motion.time.sleep", lambda seconds: None)
+
+    drive.write_register(Register.POSITION_SEGMENT, 1)
+    with pytest.raises(ConfigurationError, match="readbacks=\\[0, 0, 0\\]"):
+        controller._verify_position_segment_selected()
+
+    assert drive.writes == [(int(Register.POSITION_SEGMENT), 1)]
+
+
+def test_position_move_logs_failing_phase_before_safe_stop(monkeypatch) -> None:
+    messages: list[str] = []
+    controller = MotionController(_StaticSetupDrive(), output=messages.append)
+    stop_calls: list[bool] = []
+    monkeypatch.setattr(
+        controller, "_prepare_position_move",
+        lambda rpm: (_ for _ in ()).throw(SafetyInterlockError("E37")),
+    )
+    monkeypatch.setattr(
+        controller, "stop", lambda *, verify_off: stop_calls.append(verify_off),
+    )
+
+    with pytest.raises(SafetyInterlockError, match="E37"):
+        controller._move_pulses(
+            "forward", 1000, 30, mode="position", timeout_s=None,
+            record_result=False, tolerance_pulses=None,
+        )
+
+    assert stop_calls == [True]
+    assert any("MOVE_ABORT phase=prepare" in message for message in messages)

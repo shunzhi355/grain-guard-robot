@@ -125,6 +125,10 @@ class RobotBridge:
     def call_emergency_stop(self) -> bool:
         return self._request("estop")
 
+    def call_clear_estop(self) -> bool:
+        """Operator-requested reset; never resumes the canceled task."""
+        return self._request("clear_estop", mechanical_reset_confirmed=True)
+
     def publish_cmd_vel(self, linear_mps: float = 0.0, angular_rps: float = 0.0) -> bool:
         if linear_mps or angular_rps:
             self.last_error = "3588 does not originate navigation velocity"

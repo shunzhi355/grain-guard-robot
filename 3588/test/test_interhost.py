@@ -205,6 +205,62 @@ def test_nav_result_requires_zero_frames_and_stop():
     assert server.state["navigation"]["result"] == "FAILED"
 
 
+def test_clear_estop_requires_healthy_idle_chassis_and_does_not_resume_goal():
+    class Chassis:
+        def __init__(self):
+            self.faults = 0
+            self.resets = 0
+
+        def set_obstacle(self, blocked):
+            pass
+
+        def status(self):
+            return {"chassis_link": "online", "rc_mode": "auto",
+                    "rc_valid": True, "faults": self.faults,
+                    "motion_armed": False}
+
+        def clear_estop(self):
+            self.resets += 1
+
+    class Mechanism:
+        def __init__(self):
+            self.resets = []
+            self.pending_origin = False
+
+        def requires_mechanical_reset(self):
+            return self.pending_origin
+
+        def reset(self, grain, *, mechanical_reset_confirmed=False):
+            self.resets.append((grain, mechanical_reset_confirmed))
+
+    chassis = Chassis()
+    mechanism = Mechanism()
+    server = RobotServer(bind_ip="127.0.0.1", allowed_peer="127.0.0.1",
+        cert="", key="", ca="", ipc_path="", chassis=chassis, mechanism=mechanism)
+    chassis.faults = 1
+    with pytest.raises(RuntimeError, match="healthy chassis"):
+        server.local_request({"action": "clear_estop"})
+    assert chassis.resets == 0
+
+    chassis.faults = 0
+    server.test_goal_id = "old-goal"
+    with pytest.raises(RuntimeError, match="no active goal"):
+        server.local_request({"action": "clear_estop"})
+    assert chassis.resets == 0
+
+    server.test_goal_id = None
+    mechanism.pending_origin = True
+    with pytest.raises(RuntimeError, match="incomplete lift return"):
+        server.local_request({"action": "clear_estop"})
+    assert chassis.resets == 0
+
+    mechanism.pending_origin = False
+    assert server.local_request({"action": "clear_estop", "grain": "稻谷"}) == {"ok": True}
+    assert chassis.resets == 1
+    assert mechanism.resets == [("稻谷", False)]
+    assert server.state["navigation"] is None
+
+
 def test_ui_waits_for_final_nav_result_not_status_label(monkeypatch):
     class Client:
         status_calls = 0
@@ -227,3 +283,17 @@ def test_ui_waits_for_final_nav_result_not_status_label(monkeypatch):
     client = Client()
     assert RobotBridge(client=client).call_navigate(1.0, 2.0)
     assert client.status_calls == 3
+
+
+def test_bridge_clear_estop_uses_explicit_local_action():
+    class Client:
+        def __init__(self):
+            self.actions = []
+
+        def request(self, action, **values):
+            self.actions.append((action, values))
+            return {"ok": True}
+
+    client = Client()
+    assert RobotBridge(client=client).call_clear_estop()
+    assert client.actions == [("clear_estop", {"mechanical_reset_confirmed": True})]

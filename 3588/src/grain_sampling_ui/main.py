@@ -295,6 +295,12 @@ class MainWindow(QMainWindow):
         estop_btn.clicked.connect(self._on_emergency_stop)
         layout.addWidget(estop_btn)
 
+        reset_btn = QPushButton("故障复位")
+        reset_btn.setObjectName("fault_reset")
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.clicked.connect(self._on_clear_estop)
+        layout.addWidget(reset_btn)
+
         parent_layout.addWidget(panel)
 
     # ── Page registration ───────────────────────────────────
@@ -365,6 +371,41 @@ class MainWindow(QMainWindow):
         bridge = SamplingBridge()
         if not bridge.call_emergency_stop():
             self._alarm_bar.set_alarm(bridge.last_error)
+
+    def _on_clear_estop(self) -> None:
+        """Manual recovery after the operator has inspected the stopped robot."""
+        bridge = SamplingBridge()
+        try:
+            chassis = bridge.client.request("status").get("chassis") or {}
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._alarm_bar.set_alarm(f"读取底盘状态失败：{exc}")
+            return
+        if not chassis.get("estop_latched"):
+            QMessageBox.information(self, "故障复位", "底盘当前没有急停锁定。")
+            return
+        if (chassis.get("chassis_link") != "online"
+                or chassis.get("rc_mode") != "auto"
+                or chassis.get("rc_valid") is not True
+                or chassis.get("faults") != 0
+                or chassis.get("motion_armed")):
+            self._alarm_bar.set_alarm("复位条件不足：确认底盘在线、遥控自动档且有效、故障码为0、无运动授权")
+            return
+        reply = QMessageBox.question(
+            self, "确认故障复位",
+            "请先现场确认：机构和底盘完全静止、取样管与升降机构已机械复位、"
+            "故障原因已排查、运动范围无人。\n"
+            "复位只清除软件/STM32 急停锁；不会恢复旧任务，也不会启动电机。\n"
+            "确认现在复位吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if not bridge.call_clear_estop():
+            self._alarm_bar.set_alarm(f"故障复位失败：{bridge.last_error}")
+            return
+        logger.warning("Operator cleared local emergency stop; old task remains canceled")
+        QMessageBox.information(self, "故障复位", "急停锁已清除。请从新任务开始；不要继续故障前的动作。")
 
     def _on_pause(self) -> None:
         """Stop and cancel navigation; resumption requires a new goal."""

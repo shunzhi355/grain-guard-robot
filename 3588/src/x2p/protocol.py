@@ -174,7 +174,9 @@ class ModbusRTUClient:
             )
             if transient_busy_exception and attempt + 1 < attempts:
                 logger.warning(
-                    "X2P交易暂时返回0x03，延时后重试"
+                    "X2P交易返回0x03，延时后重试: function=0x%02X request=%s",
+                    function,
+                    request.hex(" "),
                 )
                 time.sleep(0.10)
                 continue

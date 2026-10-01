@@ -27,12 +27,14 @@ class MechanismRuntime:
     def start(self):
         # The real reciprocating press defaults to 30 r/min.  Allow a bounded
         # per-run override for supervised bench tests without changing the
-        # production calibration or the X2P controller's 500 r/min limit.
+        # production calibration. The same bound must reach the X2P motion
+        # controller, otherwise it rejects the faster timed position moves.
         lift_rpm = os.getenv("GRAIN_LIFT_RPM")
+        requested_rpm = None
         if lift_rpm is not None:
             requested_rpm = int(lift_rpm)
-            if not 1 <= requested_rpm <= 300:
-                raise ValueError("GRAIN_LIFT_RPM must be in 1..300 r/min")
+            if not 1 <= requested_rpm <= 800:
+                raise ValueError("GRAIN_LIFT_RPM must be in 1..800 r/min")
             self.controller.lift_rpm = requested_rpm
             logger.warning("X2P supervised lift speed override: %d r/min", requested_rpm)
         self.controller.open()
@@ -42,7 +44,8 @@ class MechanismRuntime:
             if port:
                 self.controller.lift_drive = build_x2p_lift_drive(
                     port=port, slave=int(os.getenv("X2P_SLAVE", X2P_SLAVE)),
-                    rpm=int(os.getenv("X2P_RPM", X2P_RPM)),
+                    rpm=(requested_rpm if requested_rpm is not None
+                         else int(os.getenv("X2P_RPM", X2P_RPM))),
                     duration_s=float(os.getenv("X2P_DURATION", X2P_DURATION_S)),
                     forward_sign=int(os.getenv("X2P_FORWARD_SIGN", X2P_FORWARD_SIGN)),
                 )
@@ -65,11 +68,16 @@ class MechanismRuntime:
             self.controller.set_grain(grain)
             self.grain = grain
 
-    def reset(self, grain: str):
+    def requires_mechanical_reset(self) -> bool:
+        return self.controller._lift_cycle_origin is not None
+
+    def reset(self, grain: str, *, mechanical_reset_confirmed: bool = False):
         """Only the trusted local operator workflow may clear mechanism estop."""
         with self._action_lock, self._lock:
             self.controller.set_grain(grain)
-            self.controller.reset()
+            self.controller.reset(
+                mechanical_reset_confirmed=mechanical_reset_confirmed
+            )
             self.grain = grain
             self.estop_latched = False
 

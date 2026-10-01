@@ -278,6 +278,23 @@ def test_failed_return_keeps_origin_for_diagnostics_and_safe_retry():
     assert ctrl._lift_cycle_origin == 20
 
 
+def test_reset_requires_explicit_confirmation_before_discarding_failed_origin():
+    lift = _FakeCycleLift(position=20)
+    ctrl = _cycle_controller(lift)
+    ctrl.move_lift("down_cycle", 5.0, duration_s=3.0)
+    ctrl.emergency_stop()
+    assert ctrl._lift_cycle_origin == 20
+
+    with pytest.raises(RuntimeError, match="机械复位"):
+        ctrl.reset()
+    assert ctrl._lift_cycle_origin == 20
+    assert ctrl._stop_flag.is_set()
+
+    ctrl.reset(mechanical_reset_confirmed=True)
+    assert ctrl._lift_cycle_origin is None
+    assert not ctrl._stop_flag.is_set()
+
+
 def test_manual_up_down_do_not_enter_paired_cycle_state():
     lift = _FakeCycleLift(position=20)
     ctrl = _cycle_controller(lift)

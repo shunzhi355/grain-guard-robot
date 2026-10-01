@@ -549,8 +549,20 @@ class _BaseMechanismController:
         if drive is not None:
             drive.stop()
 
-    def reset(self) -> None:
-        """清除急停标志，允许继续执行（不影响当前通道状态）。"""
+    def reset(self, *, mechanical_reset_confirmed: bool = False) -> None:
+        """解锁前处理未完成的升降原点；机械复位必须由操作员显式确认。"""
+        with self._lift_motion_lock:
+            if self._lift_cycle_origin is not None:
+                if not mechanical_reset_confirmed:
+                    raise RuntimeError(
+                        "上次自动回程未完成；须现场机械复位后显式确认，"
+                        "不能仅清急停或自动覆盖原点"
+                    )
+                logger.warning(
+                    "LIFT_CYCLE_ORIGIN_DISCARDED_AFTER_MANUAL_RESET origin=%d",
+                    self._lift_cycle_origin,
+                )
+                self._lift_cycle_origin = None
         self._stop_flag.clear()
 
     # -- 品种参数 ---------------------------------------------------------
