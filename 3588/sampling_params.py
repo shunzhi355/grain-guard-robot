@@ -32,17 +32,22 @@ PRESS_PAUSE_S = 0.0  # 不额外等待；每段仍须停稳、验位并重新使
 
 #: 执行器 → PCA9685 通道映射（物理接线确认 2026-08，用户已确认）。
 #: CH0=螺旋输送1、CH1=螺旋输送2、CH2=开仓(浅)、CH3=开仓(中)、CH4=开仓(深)、
-#: CH5=夹紧、CH6=拧紧、CH7=负压风机。
+#: CH5=旧夹爪电调（只保持中位）、CH6=拧紧、CH7=负压风机。
 CHANNELS: dict[str, int] = {
     "convey_1": 0,      # 螺旋输送 1
     "convey_2": 1,      # 螺旋输送 2
     "bin_shallow": 2,   # 开仓(浅)
     "bin_mid": 3,       # 开仓(中)
     "bin_deep": 4,      # 开仓(深)
-    "clamp": 5,         # 夹紧
+    "clamp": 5,         # 旧夹爪电调中位；正式夹爪动作已迁移到 CH8/9/10
     "tighten": 6,       # 拧紧
     "fan": 7,           # 负压风机
 }
+
+# DRV8701E 夹爪电机。CH5 保留原电调的中位输出，不再用于夹爪动作。
+CLAMP_PH_CHANNEL: int = 8
+CLAMP_EN_CHANNEL: int = 9
+CLAMP_NS_CHANNEL: int = 10
 
 # LPB3588 实机确认 PCA9685 映射到 Linux I2C2，可用环境变量覆盖。
 PCA9685_I2C_BUS: int = 2
@@ -60,16 +65,21 @@ PCA9685_FREQUENCY_HZ: float = 50.0
 #: 脉宽标定值（us）：板端实机确认 —— 
 #: 输送（CH0/1）用全局 open/close（throttle 品种参数默认值）。
 #: 三仓（CH2/3/4）为独立标定（见 BIN_OPEN_PULSE/BIN_CLOSE_PULSE，与品种无关）。
-#: CH5 夹紧、CH6 拧紧为独立标定（见下），不走全局 open/close。
+#: CH5 旧电调保持中位，CH6 拧紧为独立标定（见下）。
 #: 电调需先收到中位信号初始化（1500us）才能正常响应控制。
-#: 停止/待机/动作结束统一保持中位PWM，不再使用FULL_OFF。
+#: CH0–7 停止/待机/动作结束保持中位 PWM；夹爪则由 NS 拉低休眠。
 PULSE_OPEN: float = 1200.0    # 开（输送 throttle 默认值，实机标定 1200us）
 PULSE_CLOSE: float = 1900.0   # 动作脉宽，非停止命令
 PULSE_STOP: float = 1500.0    # 停止及初始化中位，持续输出
 
-#: CH5 夹紧独立标定（us）：夹紧=1900，松开=1200（实测确认）。
+#: CH5 历史夹爪标定，保留兼容旧配置引用；正式夹爪改用 DRV8701E。
 CLAMP_PULSE_CLOSE: float = 1900.0
 CLAMP_PULSE_OPEN: float = 1200.0
+
+# 先按旧 CH5 脉宽占 50 Hz 周期的比例试运行：夹紧 9.5%，松开 6%。
+# 这是 DRV8701E EN 的起测占空比，并非旧电调的等效速度。
+CLAMP_EN_DUTY_CLOSE_PERCENT: float = CLAMP_PULSE_CLOSE * PCA9685_FREQUENCY_HZ / 10_000
+CLAMP_EN_DUTY_OPEN_PERCENT: float = CLAMP_PULSE_OPEN * PCA9685_FREQUENCY_HZ / 10_000
 
 #: CH6 拧紧独立标定（us）：拧紧=1300，拧松=1900（实测确认）。
 TIGHTEN_PULSE_CLOSE: float = 1300.0

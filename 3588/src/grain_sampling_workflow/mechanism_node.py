@@ -6,8 +6,8 @@
 ======================  ==================================================
 Service                  Action
 ======================  ==================================================
-/mechanism/clamp         夹紧采样管（CH5 关）
-/mechanism/unclamp       松开夹紧（CH5 开）
+/mechanism/clamp         夹紧采样管（DRV8701E：PH 低、NS 高）
+/mechanism/unclamp       松开夹紧（DRV8701E：PH 高、NS 高）
 /mechanism/tighten       拧紧接头（CH6 关）
 /mechanism/untighten     拧松接头（CH6 开）
 /mechanism/press         伺服升降-下压（未接通道占位）

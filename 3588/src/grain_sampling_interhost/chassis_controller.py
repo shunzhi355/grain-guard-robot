@@ -16,6 +16,7 @@ from grain_sampling_devices import chassis_protocol as stm32
 from grain_sampling_devices.chassis_serial import ChassisSerial, DEFAULT_SERIAL_PORT
 
 logger = logging.getLogger(__name__)
+TELEMETRY_RECONNECT_TIMEOUT_S = 2.0
 
 
 class ChassisController:
@@ -41,6 +42,7 @@ class ChassisController:
         self.obstacle = False
         self.last_stop_reason = "startup"
         self._mcu_boot: int | None = None
+        self._link_opened_at: float | None = None
 
     def _open_serial(self):
         import serial
@@ -176,6 +178,7 @@ class ChassisController:
         self.effort = (0, 0)
         self.last_command = None
         self._mcu_boot = None
+        self._link_opened_at = None
         if link is not None:
             try:
                 link.serial.close()
@@ -189,11 +192,21 @@ class ChassisController:
                 try:
                     if self.link is None:
                         self.link = ChassisSerial(self.serial_factory())
+                        self._link_opened_at = self.clock()
                         self.link.stream_control(stm32.AUTO_STOP)
+                    elif self._link_opened_at is None:
+                        self._link_opened_at = self.clock()
                     mode = self.link.poll_mode()
                     telemetry = getattr(self.link, "mode_telemetry", None)
                     status = getattr(telemetry, "status", None)
                     received_at = getattr(telemetry, "received_at", float("-inf"))
+                    # A USB serial adapter can disappear and re-enumerate
+                    # without the old file descriptor immediately raising an
+                    # I/O error. Never leave that stale descriptor "online".
+                    last_fresh = max(received_at, self._link_opened_at)
+                    if self.clock() - last_fresh >= TELEMETRY_RECONNECT_TIMEOUT_S:
+                        self._stop_locked("STM32 telemetry stale")
+                        raise RuntimeError("STM32 telemetry stale; reopening serial")
                     if status is not None and self.clock() - received_at < 1.0:
                         if self._mcu_boot is not None and status["boot"] != self._mcu_boot:
                             self._stop_locked("STM32 rebooted")

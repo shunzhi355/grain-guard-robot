@@ -593,10 +593,15 @@ class MainWindow(QMainWindow):
                 pinzhong_code=str(task_data.get("pinzhong_code", "")),
                 pinzhong=str(task_data.get("pinzhong", "")),
             )
-            orchestrator.set_task_order(order)
+            startup_ready = orchestrator.set_task_order(order)
         else:
             orchestrator.set_task_id(order_id)
-            orchestrator.set_grain(grain_type)
+            startup_ready = orchestrator.set_grain(grain_type)
+        if startup_ready is False:
+            detail = getattr(bridge, "last_error", "") or "机构启动条件不满足"
+            logger.error("Task %s rejected before FSM start: %s", order_id, detail)
+            self._alarm_bar.set_alarm(f"任务未启动：{detail}")
+            return
 
         # Set grain-specific durations
         from grain_sampling_workflow.mechanism_config import GRAIN_MECHANISM_CONFIG

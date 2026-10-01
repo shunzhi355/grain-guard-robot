@@ -13,8 +13,8 @@
 
 设计约定（mechanism-driver 计划）：
 - PCA9685：本机断电/上电对照确认 /dev/i2c-2，地址 0x40，50Hz，4096 计数/周期
-- 执行器映射：CH0/1=螺旋输送、CH2/3/4=开仓(浅/中/深)、CH5=夹紧、CH6=拧紧、
-  CH7=负压风机；伺服升降独立控制
+- 执行器映射：CH0/1=螺旋输送、CH2/3/4=开仓(浅/中/深)、CH5=旧电调中位、
+  CH6=拧紧、CH7=负压风机；夹爪 DRV8701E 接 CH8/9/10；伺服升降独立控制
 - 脉宽标定从 sampling_params 读取；停止固定为持续1500us中位，不切断PWM。
   写入前钳制到全局合法范围 1000~2300us（sampling_params.PULSE_MIN_US/MAX_US）。
 - 接口差异说明：真实 ``PCA9685.set_pwm(channel, pulse_us)`` 直接写脉宽；
@@ -43,6 +43,11 @@ from utils.sampling_params import (
     BIN_CLOSE_PULSE,
     BIN_OPEN_PULSE,
     CHANNELS,
+    CLAMP_PH_CHANNEL,
+    CLAMP_EN_CHANNEL,
+    CLAMP_NS_CHANNEL,
+    CLAMP_EN_DUTY_CLOSE_PERCENT,
+    CLAMP_EN_DUTY_OPEN_PERCENT,
     CLAMP_PULSE_CLOSE,
     CLAMP_PULSE_OPEN,
     ENABLE_UNWIRED_CHANNELS,
@@ -84,6 +89,8 @@ MODE1_AUTO_INCREMENT = 0x20
 MODE1_SLEEP = 0x10
 MODE1_ALLCALL = 0x01
 MODE2_OUTDRV = 0x04
+MODE2_INVRT = 0x10
+FULL_ON_OFF_BIT = 0x10
 
 CHANNEL_COUNT = 16
 COUNTS_PER_CYCLE = 4096
@@ -201,9 +208,14 @@ class PCA9685:
             ) from exc
         try:
             fcntl.ioctl(self.fd, I2C_SLAVE, self.address)
+            # PCA9685 may retain its last output when only the host restarts.
+            self.set_level(CLAMP_NS_CHANNEL, False)
             # Restore first-revision oscillator initialization on every open.
             self.set_frequency(DEFAULT_FREQUENCY_HZ)
             self.all_stop()  # 保留用户要求：初始化为持续中位，不恢复FULL_OFF。
+            self.set_level(CLAMP_PH_CHANNEL, False)
+            # EN is a continuous speed-control PWM; nSLEEP controls motor stop.
+            self.set_duty_cycle(CLAMP_EN_CHANNEL, CLAMP_EN_DUTY_CLOSE_PERCENT)
         except Exception:
             self.close()
             raise
@@ -284,7 +296,7 @@ class PCA9685:
         self.write_register(MODE1, awake_mode)
         time.sleep(0.005)
         self.write_register(MODE1, awake_mode | MODE1_RESTART)
-        self.write_register(MODE2, self.read_register(MODE2) | MODE2_OUTDRV)
+        self.write_register(MODE2, (self.read_register(MODE2) | MODE2_OUTDRV) & ~MODE2_INVRT)
         self.frequency_hz = frequency_hz
         return prescale_to_frequency(prescale)
 
@@ -314,6 +326,40 @@ class PCA9685:
         return counts
 
     @_serialized_i2c
+    def set_level(self, channel: int, high: bool) -> None:
+        """Use the PCA9685 full-on/full-off bits for a stable logic level."""
+        base = self._channel_base(channel)
+        if high:
+            # FULL_OFF dominates FULL_ON; release it last.
+            self._write_channel(base, 0, FULL_ON_OFF_BIT, 0, 0)
+        else:
+            # Assert FULL_OFF first, before changing the other registers.
+            self.write_register(base + 3, FULL_ON_OFF_BIT)
+            self.write_register(base + 1, 0)
+            self.write_register(base, 0)
+            self.write_register(base + 2, 0)
+
+    @_serialized_i2c
+    def set_duty_cycle(self, channel: int, percent: float) -> None:
+        """Set ordinary PWM duty, with true constant output at 0% and 100%."""
+        if not math.isfinite(percent) or not 0 <= percent <= 100:
+            raise ValueError("percent must be between 0 and 100")
+        if percent == 0:
+            self.set_level(channel, False)
+            return
+        if percent == 100:
+            self.set_level(channel, True)
+            return
+        counts = max(1, min(COUNTS_PER_CYCLE - 1, round(percent * COUNTS_PER_CYCLE / 100)))
+        base = self._channel_base(channel)
+        # When changing a running PWM, retain PWM output; nSLEEP stays low
+        # during clamp direction/duty changes.
+        self.write_register(base, 0)
+        self.write_register(base + 1, 0)
+        self.write_register(base + 2, counts & 0xFF)
+        self.write_register(base + 3, (counts >> 8) & 0x0F)
+
+    @_serialized_i2c
     def channel_stop(self, channel: int) -> None:
         """停止电机而不停止信号：持续输出固定 1500us 中位。"""
         base = self._channel_base(channel)
@@ -332,7 +378,7 @@ class PCA9685:
 
     @_serialized_i2c
     def all_stop(self) -> None:
-        """所有已配置机构回到持续中位，未使用通道不参与控制。"""
+        """旧电调 CH0–7 回到持续中位；夹爪由 NS 另行控制。"""
         for channel in sorted(set(CHANNELS.values())):
             self.channel_stop(channel)
 
@@ -351,12 +397,22 @@ class _RecordingPCA9685:
 
     def __init__(self) -> None:
         self.register_history: dict[int, list] = {}
+        self.level_history: dict[int, list[bool]] = {}
+        self.duty_history: dict[int, list[float]] = {}
 
-    def set_pwm(self, channel: int, pulse_us: float) -> None:
+    def set_pwm(self, channel: int, pulse_us: float, off: float | None = None) -> None:
+        if off is not None:  # MockMechanismController's legacy three-argument call
+            pulse_us = off
         self.register_history.setdefault(channel, []).append(pulse_us)
 
     def set_frequency(self, frequency_hz: float) -> None:
         pass
+
+    def set_level(self, channel: int, high: bool) -> None:
+        self.level_history.setdefault(channel, []).append(bool(high))
+
+    def set_duty_cycle(self, channel: int, percent: float) -> None:
+        self.duty_history.setdefault(channel, []).append(float(percent))
 
     def channel_off(self, channel: int) -> None:
         self.set_pwm(channel, PULSE_STOP)
@@ -964,6 +1020,109 @@ class MechanismController(_BaseMechanismController):
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
         self.lift_rpm = 30
         self.lift_duration = 2.0
+        self._clamp_timer: threading.Timer | None = None
+
+    def _clamp_write(self, operation) -> None:
+        """Retry one DRV8701E input write using the mechanism I2C policy."""
+        for attempt in range(self.WRITE_ATTEMPTS):
+            try:
+                operation()
+                return
+            except Exception:
+                if attempt == self.WRITE_ATTEMPTS - 1:
+                    raise
+                time.sleep(self.RETRY_INTERVAL)
+
+    def _cancel_clamp_timer(self) -> None:
+        timer = self._clamp_timer
+        self._clamp_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _stop_clamp_locked(self) -> None:
+        """Sleep the bridge while leaving EN's speed PWM running."""
+        error = None
+        try:
+            self._clamp_write(lambda: self.pca9685.set_level(CLAMP_NS_CHANNEL, False))
+        except Exception as exc:
+            error = exc
+        self._running.discard(CLAMP_EN_CHANNEL)
+        if error is not None:
+            raise RuntimeError("failed to stop DRV8701E clamp") from error
+
+    def _finish_clamp(self, timer: threading.Timer) -> None:
+        with self._lock:
+            if self._clamp_timer is not timer or self._stop_flag.is_set():
+                return
+            self._clamp_timer = None
+            try:
+                self._stop_clamp_locked()
+            except Exception:
+                logger.exception("Failed to stop DRV8701E clamp after duration")
+                self.emergency_stop()
+
+    def _drive_clamp(self, name: str, *, ph_high: bool, duration) -> None:
+        with self._lock:
+            if self._stop_flag.is_set() or self._shutdown:
+                raise RuntimeError("controller is in emergency-stop state")
+            self._cancel_clamp_timer()
+            try:
+                self._stop_clamp_locked()
+                self._clamp_write(lambda: self.pca9685.set_level(CLAMP_PH_CHANNEL, ph_high))
+                duty = (
+                    CLAMP_EN_DUTY_OPEN_PERCENT if ph_high
+                    else CLAMP_EN_DUTY_CLOSE_PERCENT
+                )
+                self._clamp_write(lambda: self.pca9685.set_duty_cycle(CLAMP_EN_CHANNEL, duty))
+                self._clamp_write(lambda: self.pca9685.set_level(CLAMP_NS_CHANNEL, True))
+                time.sleep(0.001)  # DRV8701E nSLEEP wake-up time
+            except Exception:
+                try:
+                    self._stop_clamp_locked()
+                except Exception:
+                    logger.exception("Failed to disable clamp after start error")
+                raise
+            self._running.add(CLAMP_EN_CHANNEL)
+            self.action_history.append(
+                (name, {"channel": CLAMP_EN_CHANNEL, "ph_high": ph_high,
+                        "duty_percent": duty, "duration": duration})
+            )
+            if duration is not None and duration > 0:
+                timer = threading.Timer(duration, lambda: self._finish_clamp(timer))
+                timer.daemon = True
+                self._clamp_timer = timer
+                timer.start()
+
+    def clamp(self, duration=None) -> None:
+        """DRV8701E: PH low closes the clamp, EN drives at configured duty."""
+        self._drive_clamp("clamp", ph_high=False, duration=duration)
+
+    def unclamp(self, duration=None) -> None:
+        """DRV8701E: PH high opens the clamp, EN drives at configured duty."""
+        self._drive_clamp("unclamp", ph_high=True, duration=duration)
+
+    def emergency_stop(self) -> None:
+        self._stop_flag.set()
+        with self._lock:
+            self._cancel_clamp_timer()
+            try:
+                self._stop_clamp_locked()
+            except Exception:
+                logger.exception("Failed to disable clamp during emergency stop")
+            self._running.discard(CLAMP_EN_CHANNEL)
+        super().emergency_stop()
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._shutdown:
+                return
+            self._cancel_clamp_timer()
+            try:
+                self._stop_clamp_locked()
+            except Exception:
+                logger.exception("Failed to disable clamp during shutdown")
+            self._running.discard(CLAMP_EN_CHANNEL)
+        super().shutdown()
 
     def open(self) -> None:
         """打开底层 I2C 设备（PCA9685 支持显式 open）。"""
@@ -1046,19 +1205,23 @@ class MechanismController(_BaseMechanismController):
         self._act("fan", CHANNELS["fan"], "open", duration=duration)
 
 
-class MockMechanismController(_BaseMechanismController):
+class MockMechanismController(MechanismController):
     """机构控制器（mock 模式，兼容 test/conftest.py）。
 
-    conftest 注入的 ``mock_pca9685`` 是 ``MagicMock(spec=["set_pwm"])``，
+    conftest 注入的 ``mock_pca9685`` 提供脉宽、固定电平和占空比接口，
     签名 ``set_pwm(channel, on, off)``，side_effect 把 off（脉宽 us）记录到
     ``register_history[channel]``。因此本类写脉宽统一调用
     ``pca9685.set_pwm(channel, 0, pulse_us)``（on=0, off=pulse_us）。
+    夹爪动作继承 DRV8701E 的 PH/NS 逻辑，并记录固定的 EN PWM。
 
     所有动作同时记录到 ``action_history``（[(action_name, kwargs), ...]）。
     """
 
     def __init__(self, pca9685=None, mock_mode: bool = True) -> None:
         super().__init__(pca9685=pca9685, mock_mode=mock_mode)
+        self.pca9685.set_level(CLAMP_NS_CHANNEL, False)
+        self.pca9685.set_level(CLAMP_PH_CHANNEL, False)
+        self.pca9685.set_duty_cycle(CLAMP_EN_CHANNEL, CLAMP_EN_DUTY_CLOSE_PERCENT)
 
     # -- 低层：conftest mock 签名 set_pwm(channel, on, off) ---------------
     def _write_hw(self, channel: int, pulse_us: float) -> None:
@@ -1068,3 +1231,9 @@ class MockMechanismController(_BaseMechanismController):
     def _write_hw_off(self, channel: int) -> None:
         if self.pca9685 is not None:
             self.pca9685.set_pwm(channel, 0, PULSE_STOP)
+
+    def press(self, duration=None) -> None:
+        _BaseMechanismController.press(self, duration)
+
+    def lift(self, duration=None) -> None:
+        _BaseMechanismController.lift(self, duration)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only guard before abandoning a closed fake-navigation UI session.
+"""Guard before abandoning a stopped fake-navigation UI session.
 
-This deliberately accepts only the local bench task waiting at an arrival
-prompt.  It never clears a task record or sends a motion/stop command.
+Only a known pre-motion software E-stop may be cleared; every other lock is
+left intact. This never clears a task record or sends a motion command.
 """
 
 from __future__ import annotations
@@ -80,9 +80,6 @@ def check(args: argparse.Namespace) -> None:
     marker = json.loads(args.marker.read_text(encoding="utf-8"))
     if marker.get("source") != "local" or not marker.get("task_id"):
         fail("仅允许自动收尾本地假导航工单")
-    if ui_window_exists(args.ui_pid):
-        fail("旧 UI 窗口仍打开；请在 UI 中结束任务，不能从启动脚本中断")
-
     log = ui_log(args.log_root, args.ui_pid)
     lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     transitions = [
@@ -92,6 +89,8 @@ def check(args: argparse.Namespace) -> None:
     ]
     if not transitions or transitions[-1][1] not in {"ARRIVED_PROMPT", "STOPPED", "COMPLETED"}:
         fail("旧工单仍可能执行流程动作，拒绝自动结束")
+    if ui_window_exists(args.ui_pid) and transitions[-1][1] != "STOPPED":
+        fail("旧 UI 窗口仍打开且任务未停止，拒绝从启动脚本中断")
     last_transition = transitions[-1][0]
     if any(
         "[ERROR]" in line and "Report failed: cloud error" not in line
@@ -114,15 +113,32 @@ def check(args: argparse.Namespace) -> None:
     )
 
     path = daemon_socket(args.daemon_pid)
+    software_premotion_estop = (
+        transitions[-1][1] == "STOPPED"
+        and not mechanism_used
+        and any(
+            "Stopping FSM: mechanism set_grain failed: chassis must be stopped, online and in auto mode"
+            in line for line in lines
+        )
+    )
     for _ in range(2):
         status = ipc_request(path, "status")
         chassis = status.get("chassis") or {}
         if (
             chassis.get("motion_armed") is not False
             or chassis.get("chassis_link") != "online"
-            or chassis.get("estop_latched") is not False
         ):
-            fail("底盘不满足静止、在线、无急停条件")
+            fail("底盘不满足静止、在线条件")
+        if chassis.get("estop_latched") is True:
+            if not software_premotion_estop:
+                fail("急停来源不是已识别的启动前软件故障，拒绝自动清锁")
+            if (
+                chassis.get("rc_mode") != "auto"
+                or chassis.get("rc_valid") is not True
+                or chassis.get("faults") != 0
+                or (status.get("navigation") or {}).get("state") == "AWAITING_OPERATOR"
+            ):
+                fail("遥控或底盘故障尚未恢复，拒绝自动清锁")
         # MechanismRuntime serializes actions with lift_health. A short IPC
         # timeout therefore rejects a still-running mechanism operation. If
         # navigation stopped before any actuation, RC may now be unavailable;
@@ -130,18 +146,63 @@ def check(args: argparse.Namespace) -> None:
         if mechanism_used:
             ipc_request(path, "mechanism", name="lift_health")
         time.sleep(0.5)
-    print(f"旧本地任务 {marker['task_id']} 已无 UI 窗口，处于非动作终态且静止检查通过")
+    if chassis.get("estop_latched") is True:
+        # The daemon checks its live lift-origin guard; no mechanical-reset
+        # confirmation is fabricated by this script.
+        ipc_request(path, "clear_estop", mechanical_reset_confirmed=False)
+        cleared = ipc_request(path, "status").get("chassis") or {}
+        if cleared.get("estop_latched") is not False:
+            fail("软件急停复位未得到 STM32 确认")
+        print("已清除这次启动前失败造成的软件急停；旧任务不会续跑")
+    print(f"旧本地任务 {marker['task_id']} 处于非动作阶段，静止检查通过")
+
+
+def check_offline(args: argparse.Namespace) -> None:
+    """Accept only a pre-motion STOPPED task left by a board reboot."""
+    marker = json.loads(args.marker.read_text(encoding="utf-8"))
+    if marker.get("source") != "local" or not marker.get("task_id"):
+        fail("仅允许归档本地假导航工单")
+    logs = sorted(
+        args.log_root.glob("*/ui-stdout.log"), key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not logs:
+        fail("没有上一轮 UI 日志，无法核查重启前状态")
+    lines = None
+    for log in logs:
+        candidate = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        persisted = [line for line in candidate if "Current task persisted:" in line]
+        if persisted and f"Current task persisted: {marker['task_id']} (local)" in persisted[-1]:
+            lines = candidate
+            break
+    if lines is None:
+        fail("没有找到与残留工单匹配的 UI 日志")
+    transitions = [
+        match.group(1) for line in lines
+        if (match := re.search(r"FSM: SamplingState\.\w+ -> SamplingState\.(\w+)", line))
+    ]
+    if not transitions or transitions[-1] != "STOPPED":
+        fail("重启前任务没有明确进入 STOPPED")
+    if any(re.search(r"Mechanism (?!set_grain\b)\w+ begin", line) for line in lines):
+        fail("上一轮已开始机构动作，不能在重启后自动丢弃机械位置记录")
+    print(f"重启前本地任务 {marker['task_id']} 在机构动作前停止，可归档残留工单")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ui-pid", type=int, required=True)
-    parser.add_argument("--daemon-pid", type=int, required=True)
+    parser.add_argument("--ui-pid", type=int)
+    parser.add_argument("--daemon-pid", type=int)
+    parser.add_argument("--offline", action="store_true")
     parser.add_argument("--marker", type=Path, required=True)
     parser.add_argument("--log-root", type=Path, required=True)
     args = parser.parse_args()
     try:
-        check(args)
+        if args.offline:
+            check_offline(args)
+        else:
+            if args.ui_pid is None or args.daemon_pid is None:
+                parser.error("online mode requires --ui-pid and --daemon-pid")
+            check(args)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"不能自动结束旧工单：{exc}", file=sys.stderr)
         return 1

@@ -27,8 +27,10 @@ def mock_pca9685():
     用法：测试中可断言 ``pca.register_history[0] == [1300, 1650]``，
     或直接使用 ``pca.set_pwm.assert_called_with(...)``。
     """
-    pca = MagicMock(spec=["set_pwm", "channel_off"])
+    pca = MagicMock(spec=["set_pwm", "channel_off", "set_level", "set_duty_cycle"])
     pca.register_history = {}
+    pca.level_history = {}
+    pca.duty_history = {}
 
     def _record_pwm(channel, on, off):
         pca.register_history.setdefault(channel, []).append(off)
@@ -36,8 +38,16 @@ def mock_pca9685():
     def _record_off(channel):
         pca.register_history.setdefault(channel, []).append("OFF")
 
+    def _record_level(channel, high):
+        pca.level_history.setdefault(channel, []).append(bool(high))
+
+    def _record_duty(channel, percent):
+        pca.duty_history.setdefault(channel, []).append(float(percent))
+
     pca.set_pwm.side_effect = _record_pwm
     pca.channel_off.side_effect = _record_off
+    pca.set_level.side_effect = _record_level
+    pca.set_duty_cycle.side_effect = _record_duty
     return pca
 
 

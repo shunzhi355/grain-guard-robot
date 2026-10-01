@@ -174,6 +174,39 @@ def test_rc_fault_recovery_does_not_restart_previous_goal():
         controller.close()
 
 
+def test_stale_stm32_telemetry_reopens_serial_without_rearming(monkeypatch):
+    """USB re-enumeration may leave an open fd that never raises I/O errors."""
+    from grain_sampling_interhost import chassis_controller as chassis_module
+
+    monkeypatch.setattr(chassis_module, "TELEMETRY_RECONNECT_TIMEOUT_S", 0.06)
+    monkeypatch.setattr(chassis_module, "ChassisSerial", lambda link: link)
+    old = FakeLink()
+    old.closed = False
+    old.close = lambda: setattr(old, "closed", True)
+    replacements = []
+
+    def open_replacement():
+        link = FakeLink()
+        replacements.append(link)
+        return link
+
+    controller = ChassisController(serial_factory=open_replacement)
+    controller.link = old
+    controller.start()
+    try:
+        deadline = time.monotonic() + 0.5
+        while not old.closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert old.closed
+        assert controller.status()["motion_armed"] is False
+        deadline = time.monotonic() + 0.8
+        while not replacements and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert replacements
+    finally:
+        controller.close()
+
+
 def test_nav_result_requires_zero_frames_and_stop():
     class Chassis:
         def __init__(self):

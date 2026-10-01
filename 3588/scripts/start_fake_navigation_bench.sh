@@ -118,8 +118,8 @@ collect_old_bench_pids() {
 }
 
 collect_old_bench_pids
+task_marker="$(getent passwd "$(id -u)" | cut -d: -f6)/.grain_robot/current_task.json"
 if ((${#old_supervisors[@]} + ${#old_ui[@]} + ${#old_fake_terminals[@]} + ${#old_daemons[@]})); then
-    task_marker="$(getent passwd "$(id -u)" | cut -d: -f6)/.grain_robot/current_task.json"
     if [[ -f "$task_marker" ]]; then
         if ((${#old_ui[@]} != 1 || ${#old_daemons[@]} != 1)); then
             echo "未完成工单对应的旧 UI/守护进程不唯一，拒绝自动清理。" >&2
@@ -162,6 +162,20 @@ if ((${#old_supervisors[@]} + ${#old_ui[@]} + ${#old_fake_terminals[@]} + ${#old
         archive_path="$archive_dir/current_task-$(date +%Y%m%d-%H%M%S)-$$.json"
         mv -- "$task_marker" "$archive_path"
         echo "旧本地测试任务已结束；恢复记录：$archive_path"
+    fi
+fi
+if [[ -f "$task_marker" ]]; then
+    # After a board reboot there are no processes to inspect.  Only a local
+    # task that the last UI log proves STOPPED before actuation is archived.
+    if python3 "$PROJECT_DIR/scripts/bench_stale_task_guard.py" \
+        --offline --marker "$task_marker" --log-root "$PROJECT_DIR/log/bench"; then
+        archive_dir="$(dirname "$task_marker")/abandoned_bench_tasks"
+        mkdir -p "$archive_dir"
+        archive_path="$archive_dir/current_task-$(date +%Y%m%d-%H%M%S)-$$.json"
+        mv -- "$task_marker" "$archive_path"
+        echo "重启前的本地失败工单已归档：$archive_path"
+    else
+        echo "残留工单保留；服务和 UI 仍会启动，但不会跳过机械复位检查。" >&2
     fi
 fi
 if fuser -s "$CHASSIS_SERIAL_PORT" 2>/dev/null \

@@ -107,7 +107,7 @@ class WorkflowOrchestrator:
         """Set a user callback without breaking the orchestrator's own hook."""
         self._user_callback = callback
 
-    def set_task_order(self, order) -> None:
+    def set_task_order(self, order) -> bool:
         """Store complete order info for cloud status reporting.
 
         Parameters
@@ -118,12 +118,12 @@ class WorkflowOrchestrator:
         self._order_id = order.order_id
         self._jiance = order.jiance
         self._depth_list = order.depth_list
-        # Notify the mechanism of the grain variety at task start (best-effort,
-        # retried with FSM stop on final failure). OrderInfo v2 carries the
+        # Notify the mechanism of the grain variety at task start. OrderInfo v2 carries the
         # variety in ``pinzhong`` / ``pinzhong_code``.
         grain = getattr(order, "pinzhong", "") or getattr(order, "pinzhong_code", "")
         if grain:
-            self.set_grain(grain)
+            return self.set_grain(grain)
+        return True
 
     def set_task_id(self, task_id: str) -> None:
         """Compatibility alias — sets only order_id, no detection context."""
@@ -131,20 +131,31 @@ class WorkflowOrchestrator:
         self._jiance = []
         self._depth_list = []
 
-    def set_grain(self, grain: str) -> None:
-        """Record the grain variety and push it to the mechanism (best-effort).
+    def set_grain(self, grain: str) -> bool:
+        """Record the grain variety and verify the startup precondition.
 
         Called at task start so the mechanism uses the per-grain actuation
-        parameters (and re-enables itself after an emergency stop).
+        parameters. This does not clear an emergency-stop latch.
         """
         self._grain = str(grain or "")
         if not self._grain:
             logger.info("set_grain skipped — no grain variety provided")
-            return
+            return True
         logger.info("set_grain(%s) at task start", self._grain)
-        self._call_mechanism(
-            "set_grain", lambda: self._bridge.call_set_grain(self._grain)
-        )
+        # Startup failure must not call _stop_fsm(): no mechanism movement
+        # has begun, and latching an emergency stop here makes a transient RC
+        # disconnect require a full hardware reset.
+        for attempt in range(3):
+            try:
+                if self._bridge.call_set_grain(self._grain):
+                    return True
+            except Exception:
+                logger.exception("set_grain startup precondition failed")
+            if attempt < 2:
+                time.sleep(self._mechanism_retry_interval)
+        logger.error("set_grain startup precondition failed: %s",
+                     getattr(self._bridge, "last_error", ""))
+        return False
 
     # ── Mechanism connection switch (real hardware vs placeholder) ────────
 

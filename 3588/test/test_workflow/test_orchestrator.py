@@ -361,6 +361,17 @@ class TestMechanismIntegration:
         ))
         mock_bridge.call_set_grain.assert_not_called()
 
+    def test_set_grain_failure_does_not_latch_estop_before_task(self, orch, mock_bridge):
+        """A missing RC precondition rejects startup without a hardware E-stop."""
+        mock_bridge.call_set_grain.return_value = False
+        mock_bridge.last_error = "RC unavailable"
+        orch._mechanism_retry_interval = 0
+
+        assert orch.set_grain("稻谷") is False
+        assert orch._fsm.current_state == SamplingState.INIT
+        assert mock_bridge.call_set_grain.call_count == 3
+        mock_bridge.call_emergency_stop.assert_not_called()
+
     def test_mechanism_failure_retries_then_stops_fsm(self, orch, mock_bridge):
         """A bridge method that always fails is retried, then the FSM stops."""
         orch.enable_mechanism()
