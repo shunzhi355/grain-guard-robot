@@ -26,6 +26,34 @@ bash scripts/start_fake_navigation_bench.sh
 
 当前一键联调脚本默认升降转速为现场指定的 **800 r/min**；可用 `--rpm 30` 等参数降低本轮速度。它不改变生产流程默认的 30 r/min 指令，也不会把 800 写进驱动器永久参数。开始任何真实动作前，须按设备铭牌、机构负载与实际起点确认适用，保持现场监护。脚本会显示 STM32 遥控状态；如果不是有效自动档、故障码不为 0 或急停锁定，UI 虽可打开，真实任务仍会被安全检查拦截。当前手动拆分三终端的方式保留如下，便于单独排障。
 
+### DRV8701E 夹爪单项验证（首次接线后）
+
+先把本次代码同步到 3588，在板端执行 `python3 -m py_compile sampling_params.py src/grain_sampling_devices/mechanism_driver.py`，确认服务能导入。按上述方式启动联调会话，**暂不在 UI 开始任务**。在 `3588/` 的另一个终端执行：
+
+```bash
+source config/industrial_pc.env
+export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+python3 - <<'PY'
+from grain_sampling_workflow.robot_bridge import RobotClient
+s = RobotClient().request("status")["chassis"]
+print(s)
+assert s["chassis_link"] == "online" and s["rc_mode"] == "auto"
+assert s["motion_armed"] is False and s["estop_latched"] is False
+assert s["faults"] == 0
+PY
+```
+
+确认夹爪周围安全、可用物理急停后，分别发送夹紧和松开；每次等待动作自动停止并观察方向，不能在夹爪仍运动时切换：
+
+```bash
+python3 -c 'from grain_sampling_workflow.robot_bridge import RobotClient; RobotClient().request("mechanism", name="clamp")'
+# 观察：PH/CH8 低，EN/CH9 为 50 Hz、约 9.5% PWM，NS/CH10 高约 2 秒后变低。
+python3 -c 'from grain_sampling_workflow.robot_bridge import RobotClient; RobotClient().request("mechanism", name="unclamp")'
+# 观察：PH/CH8 高，EN/CH9 为 50 Hz、约 6% PWM，NS/CH10 高约 5 秒后变低。
+```
+
+命令返回只表示动作已启动；必须按上述时长等待并观察 CH10 回低。若方向相反、持续转动、驱动报警或不能保持夹紧，停止联调并检查接线及机构，再进入下述 UI 全流程。EN 在待机时仍是 PWM，由 NS 低电平使驱动休眠。旧 CH5 脉宽只是 EN 起测占空比的换算依据，实际速度须现场标定。
+
 在 `3588/` 目录执行。按现场部署配置加载 `config/industrial_pc.env`；不要把假导航环境变量写入生产 service。
 
 终端 1，启动无 ROS 的 3588 守护进程：
