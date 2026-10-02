@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from grain_sampling_interhost.chassis_controller import ChassisController
+from grain_sampling_devices.chassis_telemetry import ModeTelemetry
 from grain_sampling_interhost.protocol import (MOTION, MessageType, ProtocolError,
                                                 Frame, crc32c, decode, decode_motion,
                                                 encode, json_payload)
@@ -50,9 +51,13 @@ class FakeLink:
     def __init__(self):
         self.commands = []
         self.serial = self
+        self.mode_telemetry = ModeTelemetry()
+        self.mode_telemetry.status = {"boot": 1, "mode": 2, "flags": 4,
+                                      "faults": 0, "rc_age_ms": 20}
+        self.mode_telemetry.received_at = time.monotonic()
 
     def poll_mode(self):
-        return "auto"
+        return self.mode_telemetry.mode()
 
     def stream_control(self, kind):
         self.commands.append(("control", kind))
@@ -125,9 +130,6 @@ def test_estop_never_rearms_from_new_velocity():
 
 def test_stm32_reboot_revokes_motion():
     fake = FakeLink()
-    fake.mode_telemetry = SimpleNamespace(
-        status={"boot": 1, "flags": 4, "faults": 0, "rc_age_ms": 20},
-        received_at=time.monotonic())
     controller = ChassisController()
     controller.link = fake
     controller.mode = "auto"
@@ -135,7 +137,7 @@ def test_stm32_reboot_revokes_motion():
     try:
         time.sleep(0.06)
         controller.arm("goal-1")
-        fake.mode_telemetry.status = {"boot": 2, "flags": 4, "faults": 0, "rc_age_ms": 20}
+        fake.mode_telemetry.status = dict(fake.mode_telemetry.status, boot=2)
         fake.mode_telemetry.received_at = time.monotonic()
         deadline = time.monotonic() + 0.2
         while controller.status()["motion_armed"] and time.monotonic() < deadline:
@@ -148,9 +150,6 @@ def test_stm32_reboot_revokes_motion():
 
 def test_rc_fault_recovery_does_not_restart_previous_goal():
     fake = FakeLink()
-    fake.mode_telemetry = SimpleNamespace(
-        status={"boot": 1, "flags": 4, "faults": 0, "rc_age_ms": 20},
-        received_at=time.monotonic())
     controller = ChassisController()
     controller.link = fake
     controller.mode = "auto"
@@ -159,14 +158,14 @@ def test_rc_fault_recovery_does_not_restart_previous_goal():
         time.sleep(0.06)
         old_epoch = controller.arm("goal-1")
         controller.command(old_epoch, 150, 0)
-        fake.mode_telemetry.status = {"boot": 1, "flags": 4, "faults": 1, "rc_age_ms": 20}
+        fake.mode_telemetry.status = dict(fake.mode_telemetry.status, faults=1)
         fake.mode_telemetry.received_at = time.monotonic()
         deadline = time.monotonic() + 0.2
         while controller.status()["motion_armed"] and time.monotonic() < deadline:
             time.sleep(0.005)
         assert controller.status()["motion_armed"] is False
         assert controller.status()["last_stop_reason"] == "STM32 fault"
-        fake.mode_telemetry.status = {"boot": 1, "flags": 4, "faults": 0, "rc_age_ms": 20}
+        fake.mode_telemetry.status = dict(fake.mode_telemetry.status, faults=0)
         fake.mode_telemetry.received_at = time.monotonic()
         with pytest.raises(RuntimeError, match="previous goal stopped"):
             controller.arm("goal-1")
@@ -177,35 +176,32 @@ def test_rc_fault_recovery_does_not_restart_previous_goal():
         controller.close()
 
 
-def test_stale_stm32_telemetry_reopens_serial_without_rearming(monkeypatch):
-    """USB re-enumeration may leave an open fd that never raises I/O errors."""
-    from grain_sampling_interhost import chassis_controller as chassis_module
-
-    monkeypatch.setattr(chassis_module, "TELEMETRY_RECONNECT_TIMEOUT_S", 0.06)
-    monkeypatch.setattr(chassis_module, "ChassisSerial", lambda link: link)
+def test_stale_mode_stops_motion_without_reopening_or_rearming():
+    """A missing CH8 report is not a failed command or a reconnect request."""
     old = FakeLink()
     old.closed = False
     old.close = lambda: setattr(old, "closed", True)
-    replacements = []
-
-    def open_replacement():
-        link = FakeLink()
-        replacements.append(link)
-        return link
-
-    controller = ChassisController(serial_factory=open_replacement)
+    controller = ChassisController(serial_factory=lambda: pytest.fail("unexpected reopen"))
     controller.link = old
+    controller.mode = "auto"
+    epoch = controller.arm("goal-1")
+    # Simulate an interruption longer than the former 2 s reconnect threshold.
+    old.mode_telemetry.received_at -= 3
     controller.start()
     try:
         deadline = time.monotonic() + 0.5
-        while not old.closed and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert old.closed
+        while controller.status()["motion_armed"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert controller.status()["rc_mode"] == "unknown"
         assert controller.status()["motion_armed"] is False
-        deadline = time.monotonic() + 0.8
-        while not replacements and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert replacements
+        assert controller.link is old and not old.closed
+        old.mode_telemetry.received_at = time.monotonic()
+        deadline = time.monotonic() + 0.5
+        while controller.status()["rc_mode"] != "auto" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert controller.status()["rc_mode"] == "auto"
+        with pytest.raises(RuntimeError, match="invalid motion epoch"):
+            controller.command(epoch, 100, 0)
     finally:
         controller.close()
 

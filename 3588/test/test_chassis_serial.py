@@ -87,35 +87,36 @@ def test_status_layout_matches_c_offsets():
     assert (status["crc_errors"], status["rejects"]) == (17, 19)
 
 
-def test_handshake_arm_ack_updates_token_before_effort():
+def test_commands_share_sequence_without_handshake_or_ack():
     mcu = MCU()
+    mcu.silent = True
     link = ChassisSerial(mcu)
-    link.request(p.HELLO)
-    link.token_request(p.AUTO_ARM)
-    link.effort(-500, 250)
-    assert link.boot == 42
-    assert struct.unpack("<Ihh", mcu.sent[-1].payload) == (8, -500, 250)
+    assert link.stream_effort(-500, 250) == 1
+    assert link.mechanism_command(1, 6) == 2
+    assert struct.unpack("<hh", mcu.sent[0].payload) == (-500, 250)
     link.close()
+    assert [f.sequence for f in mcu.sent] == [1, 2, 3]
     assert mcu.sent[-1].kind == p.STREAM_CONTROL
     assert mcu.closed
 
 
-@pytest.mark.parametrize("failure", ["reject", "silent", "short"])
-def test_link_failures_are_reported(failure):
+def test_short_write_is_reported_without_waiting_for_reply():
     mcu = MCU()
-    link = ChassisSerial(mcu, timeout=0.001)
-    link.request(p.HELLO)
-    setattr(mcu, failure, True)
-    with pytest.raises(ChassisError):
-        link.token_request(p.AUTO_ARM)
+    mcu.short = True
+    link = ChassisSerial(mcu)
+    with pytest.raises(ChassisError, match="short serial write"):
+        link.stream_control(p.CLEAR_ESTOP)
 
 
-def test_foreign_session_status_is_ignored():
+def test_unsolicited_nack_does_not_control_next_command():
     mcu = MCU()
     link = ChassisSerial(mcu)
-    mcu.rx.extend(p.encode(p.STATUS, link.session ^ 1, 1, bytes(52)))
-    assert link.receive() == []
-    assert link.status is None
+    mcu.reject = True
+    link.stream_effort(100, 0)
+    assert link.poll_mode() == ""
+    link.stream_effort(200, 0)
+    assert len(mcu.sent) == 2
+    assert link.mode_telemetry.status is None
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
@@ -206,15 +207,15 @@ def test_status_loss_detected_with_fresh_navigation(monkeypatch):
     node.link.stream_effort.assert_called_once_with(400, 0)
 
 
-def test_mcu_reboot_detected():
+def test_mcu_reboot_is_passive_status_not_a_command_response():
     mcu = MCU()
     link = ChassisSerial(mcu)
-    link.request(p.HELLO)
     payload = bytearray(52)
     struct.pack_into("<I", payload, 0, 43)
-    mcu.rx.extend(p.encode(p.STATUS, link.session, 2, payload))
-    with pytest.raises(ChassisError, match="restarted"):
-        link.receive()
+    mcu.rx.extend(p.encode(p.STATUS, 0, 2, payload))
+    link.poll_mode()
+    assert link.mode_telemetry.status["boot"] == 43
+    assert mcu.sent == []
 
 
 def test_short_write_during_disconnect_still_clears_connection():
@@ -256,27 +257,24 @@ def test_goal_controller_serial_output_preserves_effort_units(monkeypatch):
 def test_missing_effort_ack_does_not_block_next_setpoint():
     mcu = MCU()
     link = ChassisSerial(mcu)
-    link.request(p.HELLO)
-    link.token_request(p.AUTO_ARM)
     mcu.silent = True
-    link.clock = lambda: (_ for _ in ()).throw(AssertionError("must not wait"))
-    first = link.effort(200, 0)
-    assert link.effort(100, 50) == first + 1
-    assert struct.unpack("<Ihh", mcu.sent[-1].payload) == (8, 100, 50)
+    mcu.read = lambda n: pytest.fail("TX must not read or wait for ACK")
+    first = link.stream_effort(200, 0)
+    assert link.stream_effort(100, 50) == first + 1
+    assert struct.unpack("<hh", mcu.sent[-1].payload) == (100, 50)
     mcu.short = True
     with pytest.raises(ChassisError, match="short serial write"):
-        link.effort(0, 0)
+        link.stream_effort(0, 0)
 
 
-def test_new_goal_renews_session_before_arm():
+def test_new_connection_gets_fresh_sender_without_hello():
     mcu = MCU()
     link = ChassisSerial(mcu)
-    link.request(p.HELLO)
-    previous = link.session
-    link.renew_session()
-    link.token_request(p.AUTO_ARM)
-    assert link.session != previous
-    assert [f.kind for f in mcu.sent] == [p.HELLO, p.HELLO, p.AUTO_ARM]
+    link.stream_effort(100, 0)
+    replacement = ChassisSerial(mcu)
+    replacement.stream_effort(200, 0)
+    assert replacement.session != link.session
+    assert [f.kind for f in mcu.sent] == [p.STREAM_EFFORT, p.STREAM_EFFORT]
 
 
 def test_stop_service_reports_sent_not_acknowledged():

@@ -6,7 +6,20 @@
 
 生产入口 `grain_sampling_interhost.server` 默认启用。UI、正式采样流程和通过本机 Socket 操作的联调工具在触发机构动作时，会通过已有底盘串口发送对应命令，然后执行原 PCA9685 动作。PCA9685 驱动、脉宽、夹爪三线控制和原定时器均保留，X2P 升降仍走工控机原有 RS485 链路。
 
-串口继续使用 `CHASSIS_SERIAL_PORT`，115200、8N1，无流控。没有新增第二个串口句柄。机构和底盘帧共享 `ChassisSerial` 的非零会话号、递增序号及 `ChassisController` 的串口锁。底盘运动帧、遥控状态接收和运动超时规则不变。
+串口继续使用 `CHASSIS_SERIAL_PORT`，115200、8N1，无流控，只有一个串口句柄。机构和底盘帧共享 `ChassisSerial` 的非零发送方编号、递增序号及发送锁；接收不使用发送锁。编号用于帧识别，不需要与单片机握手建立会话。
+
+## TX 发指令，RX 持续接收 CH8 状态
+
+工控机和单片机按两个独立方向工作：
+
+- 工控机 TX → 单片机 RX：发送底盘、夹爪、拧管、三仓和输粮动作。每条机构动作只发送一次，不等待 ACK、执行结果或完成回传，不因没有回传重发 START。
+- 单片机 TX → 工控机 RX：单片机持续主动上报 CH8 自动／手动状态，工控机的 `chassis-rx` 线程持续读取。不发送状态查询，也不要求状态帧与某条指令的编号对应。
+
+`chassis-rx` 每 10 ms 检查已缓冲数据，单次最多读取 4096 字节，串口 `timeout=0`；没有数据立即返回。底盘发送循环和机构发送均不调用串口读取，因此两个方向不会互相等待应答。多个发送者仍须共用发送锁，避免两条命令在 TX 上交错。系统写入保留 50 ms 超时，用于报告实际串口写故障。
+
+接收沿用现有固件的 `STATUS (0x0A)` 帧及其 CH8 模式字段，无需更换线上的帧格式。固件已有的故障、急停和重启标志仍被动用于安全判断，不作为动作应答；不等待电机完成回传。超过 1 秒没有有效状态，界面模式为“未知”，撤销自动行驶并禁止新的自动机构动作；不会仅因没有状态帧反复关闭、重开串口。实际串口 I/O 错误才触发重连，重连不恢复旧动作。
+
+急停复位在本机条件满足后发送停车及 `CLEAR_ESTOP`，写成功即解除本地锁定，不等待复位确认，也不恢复之前的任务。缓存的复位前急停状态不会再次锁定；新收到的急停状态仍会锁定。`execution_confirmed=false` 表示串口发送成功不等于单片机已执行。
 
 直接实例化 `MechanismRuntime` 时，只有注入 `serial_command` 才会发机构串口命令；旧 ROS 包装和直接使用 `MechanismController` 的 PCA9685 工具保持原行为。部署时更新 `3588/src/` 并重启现有守护进程即可，无需更改 UI 或另开串口程序。
 
@@ -76,7 +89,7 @@ A5 5A 01 36 02 00 78 56 34 12 04 00 00 00 03 00 E8 EE
 
 ```bash
 cd 3588
-python -m pytest -o addopts= test/test_mechanism_serial.py test/test_interhost.py test/test_chassis_serial.py test/test_chassis_mode_telemetry.py test/test_mechanism_runtime_speed.py -q
+python -m pytest -o addopts= test/test_mechanism_serial.py test/test_interhost.py test/test_chassis_serial.py test/test_chassis_mode_telemetry.py test/test_chassis_full_duplex.py test/test_mechanism_runtime_speed.py test/test_chassis_serial_cli.py -q
 ```
 
 `-o addopts=` 用于未安装 pytest-cov 的开发环境，不改变测试断言。

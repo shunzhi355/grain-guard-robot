@@ -1,7 +1,8 @@
 """Non-ROS, single-owner 3588 to STM32 chassis control.
 
-All serial access uses one lock, including local mechanism requests. Loss of
-fresh velocity commands revokes chassis motion locally.
+TX commands share a lock. A separate RX worker only drains unsolicited CH8
+reports, without holding the TX/state lock. No command waits for a reply.
+Loss of fresh velocity commands revokes chassis motion locally.
 """
 from __future__ import annotations
 
@@ -17,7 +18,6 @@ from grain_sampling_devices import mechanism_protocol as mechanism
 from grain_sampling_devices.chassis_serial import ChassisSerial, DEFAULT_SERIAL_PORT
 
 logger = logging.getLogger(__name__)
-TELEMETRY_RECONNECT_TIMEOUT_S = 2.0
 
 
 class ChassisController:
@@ -30,6 +30,7 @@ class ChassisController:
         self.lock = threading.RLock()
         self.running = threading.Event()
         self.worker: threading.Thread | None = None
+        self.receiver: threading.Thread | None = None
         self.link: ChassisSerial | None = None
         self.mode = "unknown"
         self.epoch: int | None = None
@@ -38,29 +39,31 @@ class ChassisController:
         self.last_command: float | None = None
         self.effort = (0, 0)
         self.estop_latched = False
-        self._reset_requested_at: float | None = None
-        self._reset_event = threading.Event()
         self.obstacle = False
         self.last_stop_reason = "startup"
         self._mcu_boot: int | None = None
-        self._link_opened_at: float | None = None
+        self._last_status_received_at = float("-inf")
 
     def _open_serial(self):
         import serial
-        return serial.Serial(self.port, 115200, timeout=0.01,
+        return serial.Serial(self.port, 115200, timeout=0,
                              write_timeout=0.05, exclusive=True)
 
     def start(self):
         if self.running.is_set():
             return
         self.running.set()
-        self.worker = threading.Thread(target=self._loop, daemon=True, name="chassis-serial")
+        self.worker = threading.Thread(target=self._loop, daemon=True, name="chassis-tx")
+        self.receiver = threading.Thread(target=self._receive_loop, daemon=True, name="chassis-rx")
         self.worker.start()
+        self.receiver.start()
 
     def close(self):
         self.running.clear()
         if self.worker is not None:
             self.worker.join(timeout=1)
+        if self.receiver is not None:
+            self.receiver.join(timeout=1)
         with self.lock:
             self._stop_mechanisms_locked()
             self._stop_locked("shutdown")
@@ -118,7 +121,6 @@ class ChassisController:
         with self.lock:
             self._stop_locked("estop")
             self.estop_latched = True
-            self._reset_requested_at = None
             if self.link is not None:
                 try:
                     self.link.stream_control(stm32.ESTOP)
@@ -126,18 +128,22 @@ class ChassisController:
                     self._disconnect_locked()
 
     def clear_estop(self):
+        """Send reset once and release the local latch; never wait for MCU ACK."""
         with self.lock:
             if self.link is None or self.mode != "auto":
                 raise RuntimeError("STM32 link and auto mode required for reset")
-            self._reset_event.clear()
-            self._reset_requested_at = self.clock()
-            self.link.stream_control(stm32.CLEAR_ESTOP)
-        if not self._reset_event.wait(1.0):
-            with self.lock:
-                self._reset_requested_at = None
-            raise RuntimeError("STM32 did not confirm emergency stop reset")
-        with self.lock:
+            # Do not reapply a cached pre-reset estop report. New unsolicited
+            # reports can still latch a real MCU emergency stop.
+            _, self._last_status_received_at = self.link.mode_telemetry.snapshot()
             self._stop_locked("local estop reset")
+            if self.link is None:
+                raise RuntimeError("STM32 reset write failed")
+            try:
+                self.link.stream_control(stm32.CLEAR_ESTOP)
+            except (OSError, RuntimeError):
+                self._disconnect_locked()
+                raise
+            self.estop_latched = False
 
     def set_obstacle(self, blocked: bool):
         with self.lock:
@@ -156,6 +162,8 @@ class ChassisController:
             if self.estop_latched or self.obstacle:
                 raise RuntimeError("safety interlock active")
             self._stop_locked("new authorization")
+            if self.link is None:
+                raise RuntimeError("STM32 stop write failed")
             self.epoch = secrets.randbelow(0xFFFFFFFF) + 1
             self.goal_id = goal_id
             self.last_command = self.clock()
@@ -182,15 +190,15 @@ class ChassisController:
     def status(self) -> dict:
         with self.lock:
             age = None if self.last_command is None else int((self.clock() - self.last_command) * 1000)
-            telemetry = getattr(self.link, "mode_telemetry", None)
-            state = getattr(telemetry, "status", None)
-            received_at = getattr(telemetry, "received_at", float("-inf"))
+            state, received_at = (self.link.mode_telemetry.snapshot() if self.link is not None
+                                  else (None, float("-inf")))
             if state is None or self.clock() - received_at >= 1.0:
                 state = None
             return {"rc_mode": self.mode or "unknown", "rc_valid": self.mode in ("auto", "manual"),
                     "rc_age_ms": state["rc_age_ms"] if state else None,
                     "chassis_link": "online" if self.link is not None else "offline",
                     "chassis_serial_online": self.link is not None,
+                    "execution_confirmed": False,
                     "chassis_armed": self.epoch is not None, "motion_armed": self.epoch is not None,
                     "motion_epoch": self.epoch or 0, "estop_latched": self.estop_latched,
                     "obstacle_stop": self.obstacle, "obstacle": self.obstacle,
@@ -206,12 +214,28 @@ class ChassisController:
         self.effort = (0, 0)
         self.last_command = None
         self._mcu_boot = None
-        self._link_opened_at = None
+        self._last_status_received_at = float("-inf")
         if link is not None:
             try:
                 link.serial.close()
             except OSError:
                 pass
+
+    def _receive_loop(self):
+        """The only UART reader; RX cannot delay command writes or vice versa."""
+        while self.running.is_set():
+            link = self.link
+            if link is not None:
+                try:
+                    link.poll_mode()
+                except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                    with self.lock:
+                        # A read from the old handle may finish after reconnect.
+                        if self.link is link:
+                            logger.error("chassis serial receive failure: %s", exc)
+                            self._stop_locked("serial receive failure")
+                            self._disconnect_locked()
+            time.sleep(0.01 if link is not None else 0.05)
 
     def _loop(self):
         while self.running.is_set():
@@ -219,26 +243,17 @@ class ChassisController:
             with self.lock:
                 try:
                     if self.link is None:
-                        self.link = ChassisSerial(self.serial_factory())
-                        self._link_opened_at = self.clock()
+                        self.link = ChassisSerial(self.serial_factory(), clock=self.clock)
                         self.link.stream_control(stm32.AUTO_STOP)
                         # Cancel MCU timers/pending starts from the previous
                         # connection. Never replay a mechanism START.
                         self.link.mechanism_command(mechanism.STOP_ALL, 0)
-                    elif self._link_opened_at is None:
-                        self._link_opened_at = self.clock()
-                    mode = self.link.poll_mode()
-                    telemetry = getattr(self.link, "mode_telemetry", None)
-                    status = getattr(telemetry, "status", None)
-                    received_at = getattr(telemetry, "received_at", float("-inf"))
-                    # A USB serial adapter can disappear and re-enumerate
-                    # without the old file descriptor immediately raising an
-                    # I/O error. Never leave that stale descriptor "online".
-                    last_fresh = max(received_at, self._link_opened_at)
-                    if self.clock() - last_fresh >= TELEMETRY_RECONNECT_TIMEOUT_S:
-                        self._stop_locked("STM32 telemetry stale")
-                        raise RuntimeError("STM32 telemetry stale; reopening serial")
-                    if status is not None and self.clock() - received_at < 1.0:
+                    # Read cached reports only; this worker never reads the UART.
+                    mode = self.link.mode_telemetry.mode()
+                    status, received_at = self.link.mode_telemetry.snapshot()
+                    if (status is not None and self.clock() - received_at < 1.0
+                            and received_at > self._last_status_received_at):
+                        self._last_status_received_at = received_at
                         if self._mcu_boot is not None and status["boot"] != self._mcu_boot:
                             self._stop_locked("STM32 rebooted")
                         self._mcu_boot = status["boot"]
@@ -249,14 +264,9 @@ class ChassisController:
                             self.estop_latched = True
                             if self.epoch is not None:
                                 self._stop_locked("STM32 emergency stop")
-                        elif (self._reset_requested_at is not None
-                              and received_at > self._reset_requested_at):
-                            self.estop_latched = False
-                            self._reset_requested_at = None
-                            self._reset_event.set()
                     if mode != "auto" and self.epoch is not None:
                         self._stop_locked("RC left auto mode")
-                    self.mode = mode
+                    self.mode = mode if self.link is not None else "unknown"
                     if self.epoch is not None:
                         if self.last_command is None or self.clock() - self.last_command >= self.timeout_s:
                             self._stop_locked("motion timeout")
