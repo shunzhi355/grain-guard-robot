@@ -330,6 +330,7 @@ class MainWindow(QMainWindow):
         # Store page references for task selection flow
         self._guidance_page = pages[1][1]   # guidance page
         self._task_list_page = pages[3][1]  # task list page
+        self._guidance_page.home_requested.connect(self.page_manager.go_home)
 
         # Wire task selection signal
         self._task_list_page.task_selected.connect(self._on_task_selected)

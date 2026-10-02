@@ -49,11 +49,8 @@ class PageManager(QObject):
         if name not in self._pages:
             raise KeyError(f"Page not registered: {name}")
 
-        if self._history:
-            # Record current page before switching
-            current = self._get_current_name()
-            if current:
-                self._history.append(current)
+        if self.current_page_name() == name:
+            return
 
         self._history.append(name)
         self._stack.setCurrentWidget(self._pages[name])

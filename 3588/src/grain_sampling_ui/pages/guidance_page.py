@@ -156,6 +156,7 @@ _BUTTON_STYLES: Dict[str, str] = {
 
 class GuidancePage(QWidget):
     _state_changed_signal = Signal(object, object)  # state, action
+    home_requested = Signal()
     """Guidance page — drives the 15-step sampling workflow and reacts to
     :class:`SamplingStateMachine` state changes.
 
@@ -309,6 +310,10 @@ class GuidancePage(QWidget):
         finish_layout.setContentsMargins(0, 0, 0, 0)
         finish_layout.addStretch()
         finish_layout.addWidget(self._btn_abandon)
+        self._btn_home = QPushButton("返回主菜单")
+        self._btn_home.setObjectName("btn_primary")
+        self._btn_home.clicked.connect(self._on_return_home)
+        finish_layout.addWidget(self._btn_home)
         finish_layout.addStretch()
         self._finish_widget.setVisible(False)
         layout.addWidget(self._finish_widget,
@@ -403,17 +408,21 @@ class GuidancePage(QWidget):
         """Return True if there is a task currently in progress.
 
         A task is considered active when the FSM has been created and is
-        in a state other than ``INIT`` or ``STOPPED``.
+        in a state other than ``INIT``, ``STOPPED`` or ``COMPLETED``.
         """
         if self._fsm is None:
             return False
-        try:
-            from grain_sampling_workflow.state_machine import SamplingState
-            return self._fsm.current_state not in (SamplingState.INIT, SamplingState.STOPPED)
-        except ImportError:
-            return self._fsm is not None
+        return self._fsm.current_state not in (
+            SamplingState.INIT, SamplingState.STOPPED, SamplingState.COMPLETED,
+        )
 
     # ── Slots ───────────────────────────────────────────────
+
+    @Slot()
+    def _on_return_home(self) -> None:
+        """Leave an idle or terminal task without resetting its workflow."""
+        if not self.has_active_task():
+            self.home_requested.emit()
 
     @Slot()
     def _on_user_action(self, button_name: str) -> None:
@@ -643,7 +652,9 @@ class GuidancePage(QWidget):
             SamplingState.INIT,
             SamplingState.COMPLETED,
         )
-        self._finish_widget.setVisible(show_abandon)
+        self._btn_abandon.setVisible(show_abandon)
+        self._btn_home.setVisible(not self.has_active_task())
+        self._finish_widget.setVisible(True)
 
         # ── Terminal state hint ─────────────────────────────
         if state == SamplingState.COMPLETED:
