@@ -108,7 +108,7 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "unclamp_duration": 5.0,    # 松开时长（按当前数值 5s；后续实机标定）
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）
     "untighten_duration": 3.0,   # 旋松时长
-    "throttle_open": 1000.0,     # 输送/节流开（实机标定：开=1200us）
+    "throttle_open": 1000.0,     # 当前输送有效值；现场确认输送 CH0/CH1 能转
     "throttle_close": 1400.0,    # 动作参数；输送停料使用固定PULSE_STOP
     "stop_value": 1500.0,        # 油门/节流停（初始化中位参考值）
 }

@@ -60,6 +60,9 @@ class FakeLink:
     def stream_effort(self, forward, turn):
         self.commands.append(("effort", forward, turn))
 
+    def mechanism_command(self, command, device):
+        self.commands.append(("mechanism", command, device))
+
     def close(self):
         pass
 

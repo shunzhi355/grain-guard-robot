@@ -64,7 +64,9 @@ class RobotServer:
         self.cert, self.key, self.ca = cert, key, ca
         self.ipc_path = ipc_path
         self.chassis = chassis or ChassisController()
-        self.mechanism = mechanism or MechanismRuntime()
+        self.mechanism = mechanism or MechanismRuntime(
+            serial_command=self.chassis.mechanism_command
+        )
         self.session: Session | None = None
         self.lock = threading.RLock()
         self.running = threading.Event()
@@ -537,11 +539,13 @@ class RobotServer:
             self._drop("server shutdown")
             for sock in self._sockets:
                 sock.close()
-            self.chassis.close()
             try:
                 self.mechanism.close()
             except Exception:
                 logger.exception("mechanism shutdown failed")
+            finally:
+                # Keep the shared UART open until mechanism STOP_ALL is sent.
+                self.chassis.close()
 
 
 def main():

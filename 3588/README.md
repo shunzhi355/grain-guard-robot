@@ -11,7 +11,7 @@
 
 速度链：`GRICP MOTION_COMMAND → ChassisController → ChassisSerial.stream_effort → STM32`。3588 只接收 `vx/wz` 物理速度，`vy` 必须为零；STM32 继续负责遥控优先、PWM 和自身断流保护。3588 本地运动指令超时为 200 ms。
 
-机构链：UI/工作流 → 本机 Socket → `MechanismRuntime` → PCA9685/X2P。机构动作只在底盘未授权运动时放行。急停同时锁定底盘与机构；仅本机显式 `clear_estop` 请求可复位。
+机构链：UI/工作流 → 本机 Socket → `MechanismRuntime` → 原 PCA9685/X2P，同时复用底盘串口发送 STM32 `0x36` 机构动作帧。机构动作只在底盘未授权运动时放行。急停同时锁定底盘与机构；仅本机显式 `clear_estop` 请求可复位。编号、关仓语义和 MCU 本地时序限制见[机构串口接入](docs/MECHANISM_SERIAL.md)。
 
 GRICP 协议见根目录 [双机通信协议.md](../双机通信协议.md)。TLS 证书与实机串口/I2C 设备必须现场配置；本仓库没有默认生产证书。首次上电前必须架空履带测试手动优先、断网、串口断开、超时与急停。
 

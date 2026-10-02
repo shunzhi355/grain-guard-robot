@@ -4,6 +4,7 @@ import struct
 import time
 
 from . import chassis_protocol as p
+from . import mechanism_protocol as mechanism
 from .chassis_telemetry import ModeTelemetry
 
 DEFAULT_SERIAL_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AB3N91KX-if00-port0"
@@ -109,6 +110,14 @@ class ChassisSerial:
         if kind not in (p.AUTO_STOP, p.ESTOP, p.CLEAR_ESTOP, p.RECOVER):
             raise ValueError("unsupported stream control")
         return self.send(p.STREAM_CONTROL, bytes((kind,)))
+
+    def mechanism_command(self, command, device):
+        """Send one 18-byte action frame, sharing chassis session and sequence.
+
+        Firmware has no mechanism ACK. Never wait, retry START, or send PWM/time.
+        The owner must hold the same lock used for chassis writes.
+        """
+        return self.send(mechanism.FRAME_TYPE, mechanism.command_payload(command, device))
 
     def close(self):
         try:

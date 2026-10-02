@@ -1,5 +1,7 @@
 # 底盘串口控制与拨杆状态回传
 
+当前无 ROS 守护进程还通过同一串口发送 `0x36` 机构动作命令，保留 PCA9685 输出。机构最终编号、STOP/关仓区别及本地执行时长见 [MECHANISM_SERIAL.md](MECHANISM_SERIAL.md)。下文底盘运动帧与遥控状态格式保持不变，ROS 节点相关段落为历史入口说明。
+
 ## 当前行为
 
 工控机根据 FAST-LIO /Odometry 做位置闭环，通过 goal_controller 输出运动量。

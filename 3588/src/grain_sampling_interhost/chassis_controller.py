@@ -1,7 +1,7 @@
 """Non-ROS, single-owner 3588 to STM32 chassis control.
 
-Only the worker thread accesses the serial transport.  Network and UI threads
-submit state changes; loss of fresh velocity commands revokes motion locally.
+All serial access uses one lock, including local mechanism requests. Loss of
+fresh velocity commands revokes chassis motion locally.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import threading
 import time
 
 from grain_sampling_devices import chassis_protocol as stm32
+from grain_sampling_devices import mechanism_protocol as mechanism
 from grain_sampling_devices.chassis_serial import ChassisSerial, DEFAULT_SERIAL_PORT
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class ChassisController:
         if self.worker is not None:
             self.worker.join(timeout=1)
         with self.lock:
+            self._stop_mechanisms_locked()
             self._stop_locked("shutdown")
             if self.link is not None:
                 try:
@@ -85,6 +87,32 @@ class ChassisController:
     def stop(self, reason: str = "stop"):
         with self.lock:
             self._stop_locked(reason)
+
+    def _stop_mechanisms_locked(self):
+        if self.link is not None:
+            try:
+                self.link.mechanism_command(mechanism.STOP_ALL, 0)
+            except (OSError, RuntimeError):
+                logger.exception("STM32 mechanism stop write failed")
+
+    def mechanism_command(self, command: int, device: int):
+        """Immediate, serialized send; no queued actions survive a reconnect."""
+        mechanism.command_payload(command, device)
+        with self.lock:
+            if self.link is None:
+                raise RuntimeError("STM32 mechanism serial link unavailable")
+            # STOP on a bin is a powered closing move, not a neutral stop.
+            moving = command == mechanism.START or (
+                command == mechanism.STOP and device in mechanism.BIN_DEVICES.values()
+            )
+            if moving and (self.estop_latched or self.epoch is not None or self.mode != "auto"):
+                raise RuntimeError("STM32 mechanism requires stopped chassis, auto mode and no estop")
+            try:
+                return self.link.mechanism_command(command, device)
+            except (OSError, RuntimeError):
+                self._stop_mechanisms_locked()
+                self._disconnect_locked()
+                raise
 
     def estop(self):
         with self.lock:
@@ -194,6 +222,9 @@ class ChassisController:
                         self.link = ChassisSerial(self.serial_factory())
                         self._link_opened_at = self.clock()
                         self.link.stream_control(stm32.AUTO_STOP)
+                        # Cancel MCU timers/pending starts from the previous
+                        # connection. Never replay a mechanism START.
+                        self.link.mechanism_command(mechanism.STOP_ALL, 0)
                     elif self._link_opened_at is None:
                         self._link_opened_at = self.clock()
                     mode = self.link.poll_mode()

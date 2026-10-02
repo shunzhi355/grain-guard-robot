@@ -154,20 +154,20 @@ def test_set_grain_overrides_throttle(mock_mechanism):
 
     assert mock_mechanism.set_grain("稻谷") is True
     assert mock_mechanism.current_grain == "稻谷"
-    assert mock_mechanism.throttle_open == 1200
+    assert mock_mechanism.throttle_open == 1000
     assert mock_mechanism.throttle_close == 1400
     assert mock_mechanism.stop_value == 1500
 
     # set_grain 后的脉宽写入使用品种参数
     mock_mechanism.actuate(0, "open")
-    assert mock_mechanism.pca9685.register_history[0] == [1200]
+    assert mock_mechanism.pca9685.register_history[0] == [1000]
 
 
 def test_set_grain_unknown_falls_back(mock_mechanism):
     assert mock_mechanism.set_grain("unknown") is False
     assert mock_mechanism.current_grain == "unknown"
     # 未知品种回退默认标定值
-    assert mock_mechanism.throttle_open == 1200
+    assert mock_mechanism.throttle_open == 1000
     assert mock_mechanism.throttle_close == 1400
     assert mock_mechanism.stop_value == 1500
 

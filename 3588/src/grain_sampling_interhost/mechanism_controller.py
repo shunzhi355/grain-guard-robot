@@ -1,4 +1,4 @@
-"""Local, ROS-free owner of PCA9685 and X2P mechanism devices."""
+"""PCA9685/X2P owner with optional action mirroring over the shared STM32 UART."""
 from __future__ import annotations
 
 import os
@@ -6,6 +6,7 @@ import threading
 import logging
 
 from grain_sampling_devices.mechanism_driver import MechanismController
+from grain_sampling_devices import mechanism_protocol as mcu
 from grain_sampling_devices.x2p_lift import build_x2p_lift_drive
 from grain_sampling_workflow.mechanism_config import get_grain_params
 from utils.sampling_params import X2P_DURATION_S, X2P_FORWARD_SIGN, X2P_PORT, X2P_RPM, X2P_SLAVE
@@ -17,8 +18,10 @@ logger = logging.getLogger(__name__)
 class MechanismRuntime:
     """Exposes only whitelisted mechanism actions to the local workflow."""
 
-    def __init__(self, controller=None):
+    def __init__(self, controller=None, *, serial_command=None):
         self.controller = controller or MechanismController(mock_mode=False)
+        # Inject the chassis owner's locked writer; never open a second port.
+        self.serial_command = serial_command
         self.grain = ""
         self.estop_latched = False
         self._lock = threading.RLock()
@@ -55,11 +58,47 @@ class MechanismRuntime:
             raise
 
     def close(self):
-        self.controller.close()
+        with self._lock:
+            self.estop_latched = True
+            try:
+                self._serial_stop_all()
+            finally:
+                self.controller.close()
 
     def emergency_stop(self):
-        self.estop_latched = True
-        self.controller.emergency_stop()
+        with self._lock:
+            self.estop_latched = True
+            try:
+                self._serial_stop_all()
+            finally:
+                self.controller.emergency_stop()
+
+    def _serial_stop_all(self):
+        if self.serial_command is not None:
+            try:
+                self.serial_command(mcu.STOP_ALL, 0)
+            except (OSError, RuntimeError):
+                logger.exception("STM32 mechanism STOP_ALL failed; local outputs still stopping")
+
+    def _mirrored(self, operation, commands):
+        # These operations only start PWM/timers, so the lock does not span
+        # motion duration. It orders START against emergency STOP_ALL.
+        with self._lock:
+            if self.estop_latched:
+                raise RuntimeError("mechanism emergency stop latched")
+            try:
+                if self.serial_command is not None:
+                    for command, device in commands:
+                        self.serial_command(command, device)
+                return operation()
+            except Exception:
+                # Either output may have started. Stop both and require an
+                # explicit reset, preventing workflow retries from restarting.
+                try:
+                    self.emergency_stop()
+                except Exception:
+                    logger.exception("mechanism cleanup after action failure")
+                raise
 
     def set_grain(self, grain: str):
         with self._action_lock:
@@ -96,7 +135,11 @@ class MechanismRuntime:
             depth = args.get("depth")
             if depth not in DEPTHS:
                 raise ValueError("invalid bin depth")
-            return getattr(self.controller, action)(depth=depth)
+            command = mcu.STOP if action == "close_bin" else mcu.START
+            return self._mirrored(
+                lambda: getattr(self.controller, action)(depth=depth),
+                ((command, mcu.BIN_DEVICES[depth]),),
+            )
         if action == "move_lift":
             direction = args.get("direction")
             distance = float(args.get("distance_cm", 0))
@@ -116,7 +159,17 @@ class MechanismRuntime:
         }
         if action in actions:
             method, key = actions[action]
-            return method(duration=durations[key])
+            commands = {
+                "clamp": ((mcu.START, mcu.CLAMP),),
+                "unclamp": ((mcu.START, mcu.UNCLAMP),),
+                "tighten": ((mcu.START, mcu.TIGHTEN),),
+                # Firmware has no reverse-twist action. Stop MCU tightening
+                # and leave the existing PCA9685 reverse action in place.
+                "untighten": ((mcu.STOP, mcu.TIGHTEN),),
+                "convey": ((mcu.START, mcu.CONVEY),),
+                "open_bin_default": ((mcu.START, mcu.BIN_MID),),
+            }
+            return self._mirrored(lambda: method(duration=durations[key]), commands[action])
         direct = {
             "start_suction": self.controller.fan,
             "stop_suction": lambda: self.controller.actuate(7, "stop"),
@@ -128,4 +181,13 @@ class MechanismRuntime:
         }
         if action not in direct:
             raise ValueError("unknown mechanism action")
+        commands = {
+            "start_convey": ((mcu.START, mcu.CONVEY),),
+            "stop_convey": ((mcu.STOP, mcu.CONVEY),),
+            # STOP_ALL only neutralizes outputs; normal closing needs STOP
+            # on each bin so the firmware runs its closing PWM and timer.
+            "close_all_bins": tuple((mcu.STOP, device) for device in mcu.BIN_DEVICES.values()),
+        }
+        if action in commands:
+            return self._mirrored(direct[action], commands[action])
         return direct[action]()

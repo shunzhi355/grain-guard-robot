@@ -54,6 +54,20 @@ python3 -c 'from grain_sampling_workflow.robot_bridge import RobotClient; RobotC
 
 命令返回只表示动作已启动；必须按上述时长等待并观察 CH10 回低。若方向相反、持续转动、驱动报警或不能保持夹紧，停止联调并检查接线及机构，再进入下述 UI 全流程。EN 在待机时仍是 PWM，由 NS 低电平使驱动休眠。旧 CH5 脉宽只是 EN 起测占空比的换算依据，实际速度须现场标定。
 
+若出现夹爪只向一边转或三仓不动，先暂停整套流程。在终端 A 运行只读寄存器监测：
+
+```bash
+python3 scripts/inspect_pca9685_outputs.py --watch 12
+```
+
+监测期间在终端 B 分别触发上述 `clamp`、`unclamp`，每次等 NS 回低；另起一轮监测后单独触发三仓动作：
+
+```bash
+python3 -c 'from grain_sampling_workflow.robot_bridge import RobotClient; RobotClient().request("mechanism", name="hold_bin_open", args={"depth":"shallow"})'
+```
+
+夹紧应看到 CH8=LOW、CH9≈9.5% PWM、CH10=HIGH；松开应看到 CH8=HIGH、CH9≈6% PWM、CH10=HIGH。三仓动作应看到 CH2≈1200 µs、CH3/4≈1800 µs，随后各自回到约 1500 µs。若寄存器未变化，保存联调日志排查软件调用；若寄存器变化但电机不响应，再测 PCA9685 输出端及 DRV/电调输入端电压、共地、OE、驱动供电和故障脚。此工具只读芯片寄存器，不能证明线上的实际电平；不要在守护进程运行时使用旧 `multi_ch_control.py` 直接改通道。
+
 在 `3588/` 目录执行。按现场部署配置加载 `config/industrial_pc.env`；不要把假导航环境变量写入生产 service。
 
 终端 1，启动无 ROS 的 3588 守护进程：

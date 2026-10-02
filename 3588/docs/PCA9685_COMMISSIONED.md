@@ -12,8 +12,9 @@
 用户随后确认 CH0–7 均有正常输出波形。手册 TP 标注 I2C4 不作为本机
 总线映射依据，禁止因该标注自动切换总线。
 
-正式入口：`scripts/start_industrial_pc.sh` → `grain_sampling_workflow.mechanism_node`
-→ `grain_sampling_devices.mechanism_driver.PCA9685`。独立测试也使用同一驱动。
+当前无 ROS 正式入口：`scripts/start_industrial_pc.sh` →
+`grain_sampling_interhost.server` → `grain_sampling_interhost.mechanism_controller`
+→ `grain_sampling_devices.mechanism_driver.PCA9685`。旧 `mechanism_node` 属于历史 ROS 入口。
 
 | 配置 | 本机验证值 |
 | --- | --- |
