@@ -514,21 +514,23 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
 
     def _handle_convey(self) -> None:
-        """Start conveying after sampling, then stop and close all bins."""
+        """Close all bins after conveying, then stop the conveyors."""
         if self._mechanism_connected:
             try:
                 if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
                     return
                 if not self._wait_interruptible(self.convey_duration_sec):
                     return
-                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
-                    return
                 if not self._call_mechanism(
                     "close_all_bins", self._bridge.call_close_all_bins
                 ):
                     return
                 close_sec = float(get_grain_params(self._grain)["close_duration"])
-                if not self._wait_interruptible(close_sec + MECHANISM_SETTLE_MARGIN):
+                if not self._wait_interruptible(close_sec):
+                    return
+                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
+                    return
+                if not self._wait_interruptible(MECHANISM_SETTLE_MARGIN):
                     return
             except Exception:
                 self._stop_fsm("bin/conveyor sequence failed")

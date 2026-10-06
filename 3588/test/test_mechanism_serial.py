@@ -87,12 +87,12 @@ def stack():
     ("convey", {}, [(1, 2)], 0, 1200),
     ("start_convey", {}, [(1, 2)], 1, 1200),
     ("stop_convey", {}, [(2, 2)], 0, 1500),
-    ("open_bin", {"depth": "shallow"}, [(1, 3)], 2, 1200),
-    ("hold_bin_open", {"depth": "mid"}, [(1, 4)], 3, 1200),
-    ("hold_bin_open", {"depth": "deep"}, [(1, 5)], 4, 1200),
-    ("close_bin", {"depth": "deep"}, [(2, 5)], 4, 1800),
-    ("open_bin_default", {}, [(1, 4)], 3, 1200),
-    ("close_all_bins", {}, [(2, 3), (2, 4), (2, 5)], 2, 1800),
+    ("open_bin", {"depth": "shallow"}, [], 2, 1200),
+    ("hold_bin_open", {"depth": "mid"}, [], 3, 1200),
+    ("hold_bin_open", {"depth": "deep"}, [], 4, 1200),
+    ("close_bin", {"depth": "deep"}, [], 4, 1800),
+    ("open_bin_default", {}, [], 3, 1200),
+    ("close_all_bins", {}, [], 2, 1800),
 ])
 def test_runtime_sends_semantic_actions_and_retains_pca(
     stack, action, args, payloads, pca_channel, pca_value
@@ -111,9 +111,40 @@ def test_runtime_sends_semantic_actions_and_retains_pca(
         assert all(local.pca9685.register_history[ch][-1] == 1800 for ch in (2, 3, 4))
 
 
+def test_bin_doors_use_pca_even_without_stm32_link(stack):
+    port, chassis, local, runtime = stack
+    chassis.link = None
+    runtime.execute("hold_bin_open", depth="shallow")
+    runtime.execute("close_all_bins")
+    assert port.writes == []
+    assert [local.pca9685.register_history[ch][0] for ch in (2, 3, 4)] == [1200, 1800, 1800]
+    assert all(local.pca9685.register_history[ch][-1] == 1800 for ch in (2, 3, 4))
+
+
+@pytest.mark.parametrize("command,device", [(1, 3), (2, 3), (1, 4), (2, 5)])
+def test_production_uart_rejects_bin_commands(stack, command, device):
+    port, chassis, _, _ = stack
+    with pytest.raises(ValueError, match="I2C PCA9685"):
+        chassis.mechanism_command(command, device)
+    assert port.writes == []
+
+
+def test_bin_i2c_failure_latches_estop_without_bin_serial_start(stack, monkeypatch):
+    port, _, local, runtime = stack
+
+    def fail(**kwargs):
+        raise OSError("I2C failed")
+
+    monkeypatch.setattr(local, "hold_bin_open", fail)
+    with pytest.raises(OSError, match="I2C failed"):
+        runtime.execute("hold_bin_open", depth="mid")
+    assert [f.payload for f in port.frames()] == [b"\x03\x00"]
+    assert runtime.estop_latched and local._stop_flag.is_set()
+
+
 @pytest.mark.parametrize("grain", ["稻谷", "黄豆"])
 def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(stack, grain):
-    port, _, _, runtime = stack
+    port, _, local, runtime = stack
     bridge = MagicMock()
 
     def open_bin(depth):
@@ -128,9 +159,14 @@ def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(s
         runtime.execute("stop_convey")
         return True
 
+    def close_all_bins():
+        runtime.execute("close_all_bins")
+        return True
+
     bridge.call_hold_bin_open.side_effect = open_bin
     bridge.call_start_convey.side_effect = start_convey
     bridge.call_stop_convey.side_effect = stop_convey
+    bridge.call_close_all_bins.side_effect = close_all_bins
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.DISCHARGE_WASTE
     orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
@@ -148,20 +184,26 @@ def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(s
         frames = [f.payload for f in port.frames()]
         if seconds == 5.0:
             assert fsm.current_state == SamplingState.OPEN_BIN
-            assert frames == [b"\x01\x03"]
+            assert frames == []
         elif seconds == 7:
             assert fsm.current_state == SamplingState.FORMAL_SAMPLING
-            assert frames == [b"\x01\x03"]
+            assert frames == []
         elif seconds == convey_sec:
             assert fsm.current_state == SamplingState.CONVEY_1
-            assert frames == [b"\x01\x03", b"\x01\x02"]
+            assert frames == [b"\x01\x02"]
+        elif seconds == 3.0:
+            assert frames == [b"\x01\x02"]
+            assert all(local.pca9685.register_history[ch][-1] == 1800
+                       for ch in (2, 3, 4))
+        elif seconds == 0.5:
+            assert frames == [b"\x01\x02", b"\x02\x02"]
         return True
 
     orch._wait_interruptible = wait
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    assert waits == [5.0, 7, convey_sec, 3.5]
+    assert waits == [5.0, 7, convey_sec, 3.0, 0.5]
     assert [f.payload for f in port.frames()] == [
-        b"\x01\x03", b"\x01\x02", b"\x02\x02",
+        b"\x01\x02", b"\x02\x02",
     ]
     assert fsm.current_state == SamplingState.CONVEY_DONE
 
@@ -368,7 +410,7 @@ def test_chassis_blocks_powered_commands_but_allows_safety_stop(stack, state):
         chassis.estop_latched = True
     else:
         chassis.mode = "manual"
-    for command, device in [(1, 6), (2, 3)]:
+    for command, device in [(1, 6)]:
         with pytest.raises(RuntimeError):
             chassis.mechanism_command(command, device)
     assert not port.writes

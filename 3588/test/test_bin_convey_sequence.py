@@ -20,7 +20,7 @@ def test_production_convey_duration_follows_grain_configuration():
 
 
 @pytest.mark.parametrize("grain,depth", [("稻谷", 0), ("黄豆", 1), ("", 2)])
-def test_waste_select_sample_convey_stop_close_all(grain, depth):
+def test_waste_select_sample_convey_close_all_then_stop(grain, depth):
     events = []
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.DISCHARGE_WASTE
@@ -46,8 +46,8 @@ def test_waste_select_sample_convey_stop_close_all(grain, depth):
         ("wait", 5.0),
         ("start_suction", ()), ("wait", 7), ("stop_suction", ()),
         ("start_convey", ()), ("wait", params["convey_duration"]),
-        ("stop_convey", ()),
-        ("close_all_bins", ()), ("wait", params["close_duration"] + 0.5),
+        ("close_all_bins", ()), ("wait", params["close_duration"]),
+        ("stop_convey", ()), ("wait", 0.5),
     ]
     assert fsm.current_state == SamplingState.CONVEY_DONE
     bridge.call_open_bin.assert_not_called()
@@ -127,11 +127,13 @@ def test_failure_stops_hardware_and_blocks_completion(fail):
     orch._handle_convey()
     assert fsm.current_state == SamplingState.STOPPED
     bridge.call_emergency_stop.assert_called()
+    if fail == "close_all_bins":
+        bridge.call_stop_convey.assert_not_called()
     if fail == "stop_convey":
-        bridge.call_close_all_bins.assert_not_called()
+        bridge.call_close_all_bins.assert_called_once()
 
 
-@pytest.mark.parametrize("interrupt_at", [1, 2])
+@pytest.mark.parametrize("interrupt_at", [1, 2, 3])
 def test_interruption_during_convey_or_closing_stops_outputs(interrupt_at):
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.CONVEY_1
@@ -149,6 +151,10 @@ def test_interruption_during_convey_or_closing_stops_outputs(interrupt_at):
     orch._handle_convey()
     assert fsm.current_state == SamplingState.STOPPED
     bridge.call_emergency_stop.assert_called()
+    if interrupt_at <= 2:
+        bridge.call_stop_convey.assert_not_called()
+    else:
+        bridge.call_stop_convey.assert_called_once()
 
 
 def test_continuous_services_no_timers_and_emergency_stop(mock_mechanism):

@@ -1,7 +1,8 @@
-"""Receive-only STM32 mechanism extension on the existing chassis UART.
+"""STM32 mechanism frame format on the existing chassis UART.
 
 Final device numbering from MECHANISM_PROTOCOL.md: both conveyors are device 2;
-bins are 3..5 and the two gripper directions are 6/7. PWM and timing live on MCU.
+firmware also defines bins as 3..5 and the two gripper directions as 6/7.
+Production bin commands stay on the RK3588 I2C PCA9685 path.
 """
 
 FRAME_TYPE = 0x36

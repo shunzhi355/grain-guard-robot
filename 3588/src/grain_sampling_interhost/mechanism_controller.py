@@ -161,10 +161,10 @@ class MechanismRuntime:
             depth = args.get("depth")
             if depth not in DEPTHS:
                 raise ValueError("invalid bin depth")
-            command = mcu.STOP if action == "close_bin" else mcu.START
+            # Bin doors are wired to the RK3588 I2C PCA9685 only.
             return self._mirrored(
                 lambda: getattr(self.controller, action)(depth=depth),
-                ((command, mcu.BIN_DEVICES[depth]),),
+                (),
             )
         if action == "move_lift":
             direction = args.get("direction")
@@ -212,7 +212,7 @@ class MechanismRuntime:
                 # Firmware has no reverse-twist action. Stop MCU tightening
                 # and leave the existing PCA9685 reverse action in place.
                 "untighten": ((mcu.STOP, mcu.TIGHTEN),),
-                "open_bin_default": ((mcu.START, mcu.BIN_MID),),
+                "open_bin_default": (),
             }
             return self._mirrored(lambda: method(duration=durations[key]), commands[action])
         direct = {
@@ -229,9 +229,7 @@ class MechanismRuntime:
         commands = {
             "start_convey": ((mcu.START, mcu.CONVEY),),
             "stop_convey": ((mcu.STOP, mcu.CONVEY),),
-            # STOP_ALL only neutralizes outputs; normal closing needs STOP
-            # on each bin so the firmware runs its closing PWM and timer.
-            "close_all_bins": tuple((mcu.STOP, device) for device in mcu.BIN_DEVICES.values()),
+            "close_all_bins": (),
         }
         if action in commands:
             if action in ("start_convey", "stop_convey"):
