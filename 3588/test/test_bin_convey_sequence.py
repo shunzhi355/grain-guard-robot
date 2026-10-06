@@ -6,13 +6,21 @@ import pytest
 from grain_sampling_workflow.orchestrator import WorkflowOrchestrator
 from grain_sampling_workflow.state_machine import SamplingState, SamplingStateMachine, SamplingAction
 from grain_sampling_workflow.mechanism_node import MechanismNode
-from grain_sampling_workflow.mechanism_config import get_grain_params
+from grain_sampling_workflow.mechanism_config import GRAIN_MECHANISM_CONFIG, get_grain_params
 from grain_sampling_devices.mechanism_driver import CHANNELS, BIN_OPEN_PULSE, BIN_CLOSE_PULSE
 from grain_sampling_workflow.ros_bridge import SamplingBridge
 
 
-@pytest.mark.parametrize("depth", [0, 1, 2])
-def test_waste_select_sample_convey_stop_close_all(depth):
+def test_production_convey_duration_follows_grain_configuration():
+    assert get_grain_params("")["convey_duration"] == 120.0
+    assert {grain: params["convey_duration"]
+            for grain, params in GRAIN_MECHANISM_CONFIG.items()} == {
+                "稻谷": 10.0, "玉米": 10.0, "黄豆": 90.0,
+            }
+
+
+@pytest.mark.parametrize("grain,depth", [("稻谷", 0), ("黄豆", 1), ("", 2)])
+def test_waste_select_sample_convey_stop_close_all(grain, depth):
     events = []
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.DISCHARGE_WASTE
@@ -29,14 +37,15 @@ def test_waste_select_sample_convey_stop_close_all(depth):
     orch._log_sampling_event = lambda *args: None
     orch._wait_interruptible = lambda secs: events.append(("wait", secs)) or True
     orch.sampling_duration_sec = 7
-    orch.convey_duration_sec = 11
+    orch._grain = grain
+    params = get_grain_params(grain)
+    orch.set_convey_duration(params["convey_duration"])
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    params = get_grain_params("")
     assert events == [
         ("hold_bin_open", (depth,)),
-        ("wait", 5.0), ("start_convey", ()),
+        ("wait", 5.0),
         ("start_suction", ()), ("wait", 7), ("stop_suction", ()),
-        ("wait", 11),
+        ("start_convey", ()), ("wait", params["convey_duration"]),
         ("stop_convey", ()),
         ("close_all_bins", ()), ("wait", params["close_duration"] + 0.5),
     ]
@@ -46,7 +55,7 @@ def test_waste_select_sample_convey_stop_close_all(depth):
     bridge.call_close_bin.assert_not_called()
 
 
-def test_ui_stays_on_open_bin_until_five_second_wait_and_convey_start():
+def test_ui_stays_on_open_bin_for_five_seconds_then_enters_formal_sampling():
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.DISCHARGE_WASTE
     bridge = MagicMock()
@@ -65,7 +74,7 @@ def test_ui_stays_on_open_bin_until_five_second_wait_and_convey_start():
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
     assert waits == [5.0]
     bridge.call_hold_bin_open.assert_called_once_with(0)
-    bridge.call_start_convey.assert_called_once()
+    bridge.call_start_convey.assert_not_called()
     assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
 
@@ -88,19 +97,20 @@ def test_stop_during_open_delay_never_starts_conveyor():
     bridge.call_emergency_stop.assert_called_once()
 
 
-def test_conveyor_start_failure_after_open_keeps_ui_stopped():
+def test_formal_sampling_failure_does_not_start_conveyor():
     fsm = SamplingStateMachine()
-    fsm._state = SamplingState.OPEN_BIN
+    fsm._state = SamplingState.FORMAL_SAMPLING
     bridge = MagicMock()
-    bridge.call_start_convey.return_value = False
+    bridge.call_start_suction.return_value = False
     orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
     orch.enable_mechanism()
     orch._mechanism_retry_interval = 0
     orch._wait_interruptible = lambda seconds: True
 
-    orch._handle_open_bin()
+    orch._handle_formal_sampling()
     assert fsm.current_state == SamplingState.STOPPED
-    assert bridge.call_start_convey.call_count == 3
+    assert bridge.call_start_suction.call_count == 3
+    bridge.call_start_convey.assert_not_called()
     bridge.call_emergency_stop.assert_called_once()
 
 

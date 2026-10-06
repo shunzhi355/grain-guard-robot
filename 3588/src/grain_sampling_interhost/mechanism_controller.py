@@ -26,6 +26,7 @@ class MechanismRuntime:
         self.estop_latched = False
         self._lock = threading.RLock()
         self._action_lock = threading.Lock()
+        self._convey_timer = None
 
     def start(self):
         # The real reciprocating press defaults to 30 r/min.  Allow a bounded
@@ -60,6 +61,7 @@ class MechanismRuntime:
     def close(self):
         with self._lock:
             self.estop_latched = True
+            self._cancel_convey_timer()
             try:
                 self._serial_stop_all()
             finally:
@@ -68,6 +70,7 @@ class MechanismRuntime:
     def emergency_stop(self):
         with self._lock:
             self.estop_latched = True
+            self._cancel_convey_timer()
             try:
                 self._serial_stop_all()
             finally:
@@ -79,6 +82,28 @@ class MechanismRuntime:
                 self.serial_command(mcu.STOP_ALL, 0)
             except (OSError, RuntimeError):
                 logger.exception("STM32 mechanism STOP_ALL failed; local outputs still stopping")
+
+    def _cancel_convey_timer(self):
+        timer = self._convey_timer
+        self._convey_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _finish_timed_convey(self, timer):
+        # Only the latest timed command may stop the conveyors. A manual
+        # start/stop or emergency stop cancels the old callback.
+        with self._action_lock:
+            with self._lock:
+                if self._convey_timer is not timer or self.estop_latched:
+                    return
+                self._convey_timer = None
+            try:
+                self._mirrored(
+                    lambda: self.controller.convey(duration=None, direction=0),
+                    ((mcu.STOP, mcu.CONVEY),),
+                )
+            except Exception:
+                logger.exception("Timed conveyor STOP failed")
 
     def _mirrored(self, operation, commands):
         # These operations only start PWM/timers, so the lock does not span
@@ -113,6 +138,7 @@ class MechanismRuntime:
     def reset(self, grain: str, *, mechanical_reset_confirmed: bool = False):
         """Only the trusted local operator workflow may clear mechanism estop."""
         with self._action_lock, self._lock:
+            self._cancel_convey_timer()
             self.controller.set_grain(grain)
             self.controller.reset(
                 mechanical_reset_confirmed=mechanical_reset_confirmed
@@ -149,12 +175,32 @@ class MechanismRuntime:
                 raise RuntimeError("X2P lift unavailable")
             return self.controller.move_lift(direction, distance)
         durations = get_grain_params(self.grain)
+        if action == "convey":
+            duration = float(durations["convey_duration"])
+            with self._lock:
+                self._cancel_convey_timer()
+            result = self._mirrored(
+                lambda: self.controller.convey(duration=None),
+                ((mcu.START, mcu.CONVEY),),
+            )
+            try:
+                timer = threading.Timer(
+                    duration, lambda: self._finish_timed_convey(timer)
+                )
+                timer.daemon = True
+                with self._lock:
+                    if not self.estop_latched:
+                        self._convey_timer = timer
+                        timer.start()
+            except Exception:
+                self.emergency_stop()
+                raise
+            return result
         actions = {
             "clamp": (self.controller.clamp, "clamp_duration"),
             "unclamp": (self.controller.unclamp, "unclamp_duration"),
             "tighten": (self.controller.tighten, "tighten_duration"),
             "untighten": (self.controller.untighten, "untighten_duration"),
-            "convey": (self.controller.convey, "convey_duration"),
             "open_bin_default": (self.controller.open_bin, "open_duration"),
         }
         if action in actions:
@@ -166,7 +212,6 @@ class MechanismRuntime:
                 # Firmware has no reverse-twist action. Stop MCU tightening
                 # and leave the existing PCA9685 reverse action in place.
                 "untighten": ((mcu.STOP, mcu.TIGHTEN),),
-                "convey": ((mcu.START, mcu.CONVEY),),
                 "open_bin_default": ((mcu.START, mcu.BIN_MID),),
             }
             return self._mirrored(lambda: method(duration=durations[key]), commands[action])
@@ -189,5 +234,8 @@ class MechanismRuntime:
             "close_all_bins": tuple((mcu.STOP, device) for device in mcu.BIN_DEVICES.values()),
         }
         if action in commands:
+            if action in ("start_convey", "stop_convey"):
+                with self._lock:
+                    self._cancel_convey_timer()
             return self._mirrored(direct[action], commands[action])
         return direct[action]()

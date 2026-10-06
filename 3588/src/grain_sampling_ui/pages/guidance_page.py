@@ -80,17 +80,17 @@ _STATE_META: Dict[SamplingState, Tuple[str, str, Tuple[str, ...]]] = {
     ),
     SamplingState.FORMAL_SAMPLING: (
         "正式采样中",
-        "仓门已打开、输粮装置已启动，正在正式吸粮采样，可通过下方按钮控制",
+        "仓门已打开，正在正式吸粮采样；采样结束后启动输粮装置",
         (),
     ),
     SamplingState.CONVEY_1: (
         "输送粮食中",
-        "正式吸粮已结束，输粮装置继续运行；计时结束后停止输粮并关闭仓门…",
+        "正式采样已结束，输粮装置按当前品种的时长运行，之后停止并关闭仓门…",
         (),
     ),
     SamplingState.OPEN_BIN: (
         "开启对应仓口",
-        "废粮已排完，正在打开对应仓门；等待 5 秒后启动输粮装置并继续正式采样…",
+        "废粮已排完，正在打开对应仓门；等待 5 秒后进入正式采样…",
         (),
     ),
     SamplingState.CONVEY_DONE: (

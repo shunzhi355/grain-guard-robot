@@ -27,8 +27,8 @@ class SamplingState(Enum):
     REPEAT_UNTIL_DEPTH = auto() # 7: 重复步骤5-6直到累计深度达到工单要求
     DISCHARGE_WASTE = auto()    # 8: 排出废粮
     FORMAL_SAMPLING = auto()    # 9: 开始正式采样（吸粮2分钟）
-    CONVEY_1 = auto()           # 正式吸粮结束后继续输粮计时 → 停止输粮 → 关仓
-    OPEN_BIN = auto()           # 废粮排完后开仓 → 等待 5s → 启动输粮 → 正式吸粮
+    CONVEY_1 = auto()           # 正式采样结束 → 按品种时长输粮 → 停止输粮 → 关仓
+    OPEN_BIN = auto()           # 废粮排完后开仓 → 等待 5s → 正式吸粮
     CONVEY_DONE = auto()        # 12: 输送完成，提示取粮完成
     NEXT_CHECK = auto()         # 13: 自动判断下一步
     ALL_DONE_PROMPT = auto()    # 14: 所有点位完成，提示确认返航

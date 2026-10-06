@@ -13,6 +13,7 @@ from grain_sampling_devices.mechanism_driver import MechanismController
 from grain_sampling_interhost.chassis_controller import ChassisController
 from grain_sampling_interhost.mechanism_controller import MechanismRuntime
 from grain_sampling_interhost.server import RobotServer
+from grain_sampling_workflow.mechanism_config import get_grain_params
 from grain_sampling_workflow.orchestrator import WorkflowOrchestrator
 from grain_sampling_workflow.state_machine import SamplingAction, SamplingState, SamplingStateMachine
 
@@ -42,6 +43,7 @@ class SerialRecorder:
     (2, 1, 6, "A5 5A 01 36 02 00 78 56 34 12 02 00 00 00 01 06 AD 65"),
     (3, 1, 7, "A5 5A 01 36 02 00 78 56 34 12 03 00 00 00 01 07 2C 30"),
     (4, 1, 2, "A5 5A 01 36 02 00 78 56 34 12 04 00 00 00 01 02 C8 A8"),
+    (4, 2, 2, "A5 5A 01 36 02 00 78 56 34 12 04 00 00 00 02 02 9B FD"),
     (5, 1, 3, "A5 5A 01 36 02 00 78 56 34 12 05 00 00 00 01 03 49 FD"),
     (6, 2, 3, "A5 5A 01 36 02 00 78 56 34 12 06 00 00 00 02 03 FA 66"),
     # The shared chat's STOP_ALL example has an incorrect CRC (EA 6B).
@@ -109,7 +111,8 @@ def test_runtime_sends_semantic_actions_and_retains_pca(
         assert all(local.pca9685.register_history[ch][-1] == 1800 for ch in (2, 3, 4))
 
 
-def test_formal_workflow_serial_opens_bin_then_waits_before_conveyor(stack):
+@pytest.mark.parametrize("grain", ["稻谷", "黄豆"])
+def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(stack, grain):
     port, _, _, runtime = stack
     bridge = MagicMock()
 
@@ -121,24 +124,130 @@ def test_formal_workflow_serial_opens_bin_then_waits_before_conveyor(stack):
         runtime.execute("start_convey")
         return True
 
+    def stop_convey():
+        runtime.execute("stop_convey")
+        return True
+
     bridge.call_hold_bin_open.side_effect = open_bin
     bridge.call_start_convey.side_effect = start_convey
+    bridge.call_stop_convey.side_effect = stop_convey
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.DISCHARGE_WASTE
     orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
     orch.enable_mechanism()
-    orch._run_async = lambda fn: fn() if fn == orch._handle_open_bin else None
+    orch._run_async = lambda fn: fn()
+    orch._log_sampling_event = lambda *args: None
+    orch.sampling_duration_sec = 7
+    orch._grain = grain
+    convey_sec = get_grain_params(grain)["convey_duration"]
+    orch.set_convey_duration(convey_sec)
+    waits = []
 
     def wait(seconds):
-        assert seconds == 5.0
-        assert fsm.current_state == SamplingState.OPEN_BIN
-        assert [f.payload for f in port.frames()] == [b"\x01\x03"]
+        waits.append(seconds)
+        frames = [f.payload for f in port.frames()]
+        if seconds == 5.0:
+            assert fsm.current_state == SamplingState.OPEN_BIN
+            assert frames == [b"\x01\x03"]
+        elif seconds == 7:
+            assert fsm.current_state == SamplingState.FORMAL_SAMPLING
+            assert frames == [b"\x01\x03"]
+        elif seconds == convey_sec:
+            assert fsm.current_state == SamplingState.CONVEY_1
+            assert frames == [b"\x01\x03", b"\x01\x02"]
         return True
 
     orch._wait_interruptible = wait
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    assert [f.payload for f in port.frames()] == [b"\x01\x03", b"\x01\x02"]
-    assert fsm.current_state == SamplingState.FORMAL_SAMPLING
+    assert waits == [5.0, 7, convey_sec, 3.5]
+    assert [f.payload for f in port.frames()] == [
+        b"\x01\x03", b"\x01\x02", b"\x02\x02",
+    ]
+    assert fsm.current_state == SamplingState.CONVEY_DONE
+
+
+def test_legacy_timed_convey_sends_serial_stop_after_grain_duration(stack, monkeypatch):
+    port, _, local, runtime = stack
+    timers = []
+
+    def make_timer(seconds, callback):
+        timer = MagicMock()
+        timer.seconds = seconds
+        timer.callback = callback
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("grain_sampling_interhost.mechanism_controller.threading.Timer", make_timer)
+    runtime.grain = "黄豆"
+    runtime.execute("convey")
+    assert len(timers) == 1
+    assert timers[0].seconds == 90.0
+    timers[0].start.assert_called_once()
+    assert [f.payload for f in port.frames()] == [b"\x01\x02"]
+
+    timers[0].callback()
+    assert [f.payload for f in port.frames()] == [b"\x01\x02", b"\x02\x02"]
+    assert local.pca9685.register_history[0][-1] == 1500
+    assert local.pca9685.register_history[1][-1] == 1500
+
+
+def test_manual_stop_cancels_legacy_convey_timer(stack, monkeypatch):
+    port, _, _, runtime = stack
+    timers = []
+
+    def make_timer(seconds, callback):
+        timer = MagicMock()
+        timer.callback = callback
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("grain_sampling_interhost.mechanism_controller.threading.Timer", make_timer)
+    runtime.execute("convey")
+    runtime.execute("stop_convey")
+    timers[0].cancel.assert_called_once()
+    timers[0].callback()  # A queued old callback must not send another STOP.
+    assert [f.payload for f in port.frames()] == [b"\x01\x02", b"\x02\x02"]
+
+
+def test_emergency_stop_cancels_legacy_convey_timer(stack, monkeypatch):
+    port, _, _, runtime = stack
+    timers = []
+
+    def make_timer(seconds, callback):
+        timer = MagicMock()
+        timer.callback = callback
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("grain_sampling_interhost.mechanism_controller.threading.Timer", make_timer)
+    runtime.execute("convey")
+    runtime.emergency_stop()
+    timers[0].cancel.assert_called_once()
+    timers[0].callback()
+    assert [f.payload for f in port.frames()] == [b"\x01\x02", b"\x03\x00"]
+
+
+def test_timed_convey_stops_local_outputs_without_serial(monkeypatch):
+    timers = []
+
+    def make_timer(seconds, callback):
+        timer = MagicMock()
+        timer.callback = callback
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr("grain_sampling_interhost.mechanism_controller.threading.Timer", make_timer)
+    local = MechanismController(mock_mode=True)
+    runtime = MechanismRuntime(local)
+    try:
+        runtime.execute("convey")
+        assert local.pca9685.register_history[0][-1] == 1200
+        assert local.pca9685.register_history[1][-1] == 1200
+        timers[0].callback()
+        assert local.pca9685.register_history[0][-1] == 1500
+        assert local.pca9685.register_history[1][-1] == 1500
+    finally:
+        runtime.close()
 
 
 @pytest.mark.parametrize("action,device,direction,duty", [

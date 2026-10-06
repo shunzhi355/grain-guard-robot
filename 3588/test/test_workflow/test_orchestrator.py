@@ -329,7 +329,7 @@ class TestMechanismIntegration:
         mock_transition.assert_called_with(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def test_open_bin_calls_bridge_with_depth(self, orch, mock_bridge):
-        """Connected: open the bin, wait 5 s, start conveyor, then transition."""
+        """Connected: open the bin, wait 5 s, then begin formal sampling."""
         orch.enable_mechanism()
         orch._fsm.current_depth_index = 1
         with patch.object(orch._fsm, "transition") as mock_transition, \
@@ -337,7 +337,7 @@ class TestMechanismIntegration:
             orch._handle_open_bin()
         mock_bridge.call_hold_bin_open.assert_called_once_with(1)
         mock_wait.assert_called_once_with(5.0)
-        mock_bridge.call_start_convey.assert_called_once()
+        mock_bridge.call_start_convey.assert_not_called()
         mock_transition.assert_called_with(SamplingAction.SYSTEM_BIN_OPENED)
 
     def test_close_bin_calls_bridge_with_depth(self, orch, mock_bridge):
