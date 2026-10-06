@@ -80,17 +80,17 @@ _STATE_META: Dict[SamplingState, Tuple[str, str, Tuple[str, ...]]] = {
     ),
     SamplingState.FORMAL_SAMPLING: (
         "正式采样中",
-        "正在正式采样（吸粮约 2 分钟），可通过下方按钮控制",
+        "仓门已打开、输粮装置已启动，正在正式吸粮采样，可通过下方按钮控制",
         (),
     ),
     SamplingState.CONVEY_1: (
         "输送粮食中",
-        "正在向已打开的仓口输粮；计时结束后先关仓，关仓完成后停止输粮…",
+        "正式吸粮已结束，输粮装置继续运行；计时结束后停止输粮并关闭仓门…",
         (),
     ),
     SamplingState.OPEN_BIN: (
         "开启对应仓口",
-        "废粮已排完，正在打开当前深度对应仓口，随后正式吸粮并输粮…",
+        "废粮已排完，正在打开对应仓门；等待 5 秒后启动输粮装置并继续正式采样…",
         (),
     ),
     SamplingState.CONVEY_DONE: (
@@ -531,13 +531,13 @@ class GuidancePage(QWidget):
         depth_frac: float = di / md
         base: float = 5.0 + 85.0 * (wp_frac * 0.7 + depth_frac * 0.3)
 
-        # ── Post-depth states (FORMAL_SAMPLING → COMPLETED) ──
+        # ── Post-depth states (OPEN_BIN → COMPLETED) ──
         # Map into 90–99% range
         if state.value >= SamplingState.FORMAL_SAMPLING.value:
             post_depth_states = [
+                SamplingState.OPEN_BIN,
                 SamplingState.FORMAL_SAMPLING,
                 SamplingState.CONVEY_1,
-                SamplingState.OPEN_BIN,
                 SamplingState.CONVEY_DONE,
                 SamplingState.NEXT_CHECK,
                 SamplingState.ALL_DONE_PROMPT,

@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 #: 否则下一步会与仍在转的机构冲突。
 MECHANISM_SETTLE_MARGIN: float = 0.5
 
+#: 开仓串口指令发出后，至少等待 5 秒再启动输粮，并在等待结束后推进 UI。
+BIN_OPEN_TO_CONVEY_DELAY_SEC: float = 5.0
+
 #: 单次下压/上升距离（厘米）。X2P 伺服单次 move_lift ≤ 30cm
 #: （max_distance_mm=300）。扦样时每次 press 下压一节管的一部分，
 #: 由状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度。
@@ -92,6 +95,7 @@ class WorkflowOrchestrator:
         # ── Configurable durations (task C) ─────────────────
         self.sampling_duration_sec: float = 120.0  # default 2 min
         self.convey_duration_sec: float = 120.0  # default 2 min
+        self._convey_started: bool = False
         self._mechanism_connected: bool = False  # placeholder: no hardware
         self._grain: str = ""  # grain variety reported to the mechanism at task start
         self._mechanism_retry_interval: float = 0.5  # backoff between mechanism retries
@@ -191,7 +195,7 @@ class WorkflowOrchestrator:
         self.sampling_duration_sec = float(sec)
 
     def set_convey_duration(self, sec: float) -> None:
-        """Configure the conveyor run duration in seconds."""
+        """Configure extra conveyor run time after formal suction ends."""
         self.convey_duration_sec = float(sec)
 
     # ── Operation logging (task A) ───────────────────────────
@@ -491,8 +495,9 @@ class WorkflowOrchestrator:
             ):
                 return  # final failure already stopped the FSM
             if not self._wait_interruptible(self.sampling_duration_sec):
-                logger.warning("Formal sampling interrupted — stopping suction")
-                self._bridge.call_stop_suction()  # best-effort hardware cleanup
+                logger.warning("Formal sampling interrupted — stopping suction and conveyor")
+                self._bridge.call_emergency_stop()
+                self._convey_started = False
                 return
             if not self._call_mechanism(
                 "stop_suction", self._bridge.call_stop_suction
@@ -511,15 +516,20 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
 
     def _handle_convey(self) -> None:
-        """Convey into the selected bin, stop conveyors, then close all bins."""
+        """Continue conveying after suction, then stop and close all bins."""
         if self._mechanism_connected:
             try:
-                if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
-                    return
+                # Production starts the conveyor before FORMAL_SAMPLING.
+                # A direct CONVEY_1 entry can still start it when needed.
+                if not self._convey_started:
+                    if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
+                        return
+                    self._convey_started = True
                 if not self._wait_interruptible(self.convey_duration_sec):
                     return
                 if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
                     return
+                self._convey_started = False
                 if not self._call_mechanism(
                     "close_all_bins", self._bridge.call_close_all_bins
                 ):
@@ -546,7 +556,7 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def _handle_open_bin(self) -> None:
-        """After waste discharge, open the selected bin and close the others."""
+        """Open the selected bin, wait for its door, then start conveying."""
         depth = self._fsm.current_depth_index
         if self._mechanism_connected:
             if not self._call_mechanism(
@@ -554,13 +564,26 @@ class WorkflowOrchestrator:
             ):
                 return  # final failure already stopped the FSM
             params = get_grain_params(self._grain)
-            doors_sec = max(float(params["open_duration"]), float(params["close_duration"]))
-            if not self._wait_interruptible(doors_sec + MECHANISM_SETTLE_MARGIN):
-                self._bridge.call_emergency_stop()
-                return
-            logger.info("Open bin depth=%d (mechanism connected)", depth)
+            # The default door pulse lasts 5 s.  Longer configured door
+            # movements must also finish before the augers are started.
+            wait_sec = max(
+                BIN_OPEN_TO_CONVEY_DELAY_SEC,
+                float(params["open_duration"]),
+                float(params["close_duration"]) + MECHANISM_SETTLE_MARGIN,
+            )
         else:
-            logger.info("Open bin depth=%d (mechanism placeholder)", depth)
+            wait_sec = BIN_OPEN_TO_CONVEY_DELAY_SEC
+        if not self._wait_interruptible(wait_sec):
+            if self._mechanism_connected:
+                self._bridge.call_emergency_stop()
+            return
+        if self._mechanism_connected:
+            if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
+                return
+            self._convey_started = True
+            logger.info("Open bin depth=%d; conveyor started after %.1f sec", depth, wait_sec)
+        else:
+            logger.info("Open bin depth=%d; placeholder waited %.1f sec", depth, wait_sec)
         self._fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
 
     def _handle_close_bin(self) -> None:

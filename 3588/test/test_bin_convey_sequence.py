@@ -34,9 +34,9 @@ def test_waste_select_sample_convey_stop_close_all(depth):
     params = get_grain_params("")
     assert events == [
         ("hold_bin_open", (depth,)),
-        ("wait", max(params["open_duration"], params["close_duration"]) + 0.5),
+        ("wait", 5.0), ("start_convey", ()),
         ("start_suction", ()), ("wait", 7), ("stop_suction", ()),
-        ("start_convey", ()), ("wait", 11),
+        ("wait", 11),
         ("stop_convey", ()),
         ("close_all_bins", ()), ("wait", params["close_duration"] + 0.5),
     ]
@@ -44,6 +44,64 @@ def test_waste_select_sample_convey_stop_close_all(depth):
     bridge.call_open_bin.assert_not_called()
     bridge.call_convey.assert_not_called()
     bridge.call_close_bin.assert_not_called()
+
+
+def test_ui_stays_on_open_bin_until_five_second_wait_and_convey_start():
+    fsm = SamplingStateMachine()
+    fsm._state = SamplingState.DISCHARGE_WASTE
+    bridge = MagicMock()
+    orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
+    orch.enable_mechanism()
+    orch._run_async = lambda fn: fn() if fn == orch._handle_open_bin else None
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        assert fsm.current_state == SamplingState.OPEN_BIN
+        bridge.call_start_convey.assert_not_called()
+        return True
+
+    orch._wait_interruptible = wait
+    fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+    assert waits == [5.0]
+    bridge.call_hold_bin_open.assert_called_once_with(0)
+    bridge.call_start_convey.assert_called_once()
+    assert fsm.current_state == SamplingState.FORMAL_SAMPLING
+
+
+def test_stop_during_open_delay_never_starts_conveyor():
+    fsm = SamplingStateMachine()
+    fsm._state = SamplingState.OPEN_BIN
+    bridge = MagicMock()
+    orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
+    orch.enable_mechanism()
+
+    def stop_during_wait(seconds):
+        assert seconds == 5.0
+        fsm.transition(SamplingAction.STOP)
+        return False
+
+    orch._wait_interruptible = stop_during_wait
+    orch._handle_open_bin()
+    assert fsm.current_state == SamplingState.STOPPED
+    bridge.call_start_convey.assert_not_called()
+    bridge.call_emergency_stop.assert_called_once()
+
+
+def test_conveyor_start_failure_after_open_keeps_ui_stopped():
+    fsm = SamplingStateMachine()
+    fsm._state = SamplingState.OPEN_BIN
+    bridge = MagicMock()
+    bridge.call_start_convey.return_value = False
+    orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
+    orch.enable_mechanism()
+    orch._mechanism_retry_interval = 0
+    orch._wait_interruptible = lambda seconds: True
+
+    orch._handle_open_bin()
+    assert fsm.current_state == SamplingState.STOPPED
+    assert bridge.call_start_convey.call_count == 3
+    bridge.call_emergency_stop.assert_called_once()
 
 
 @pytest.mark.parametrize("fail", ["start_convey", "close_all_bins", "stop_convey"])

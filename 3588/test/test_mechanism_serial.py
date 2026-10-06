@@ -2,6 +2,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,6 +13,8 @@ from grain_sampling_devices.mechanism_driver import MechanismController
 from grain_sampling_interhost.chassis_controller import ChassisController
 from grain_sampling_interhost.mechanism_controller import MechanismRuntime
 from grain_sampling_interhost.server import RobotServer
+from grain_sampling_workflow.orchestrator import WorkflowOrchestrator
+from grain_sampling_workflow.state_machine import SamplingAction, SamplingState, SamplingStateMachine
 
 
 class SerialRecorder:
@@ -104,6 +107,38 @@ def test_runtime_sends_semantic_actions_and_retains_pca(
             assert local.pca9685.register_history[channel][-1] == 1800
     if action == "close_all_bins":
         assert all(local.pca9685.register_history[ch][-1] == 1800 for ch in (2, 3, 4))
+
+
+def test_formal_workflow_serial_opens_bin_then_waits_before_conveyor(stack):
+    port, _, _, runtime = stack
+    bridge = MagicMock()
+
+    def open_bin(depth):
+        runtime.execute("hold_bin_open", depth=("shallow", "mid", "deep")[depth])
+        return True
+
+    def start_convey():
+        runtime.execute("start_convey")
+        return True
+
+    bridge.call_hold_bin_open.side_effect = open_bin
+    bridge.call_start_convey.side_effect = start_convey
+    fsm = SamplingStateMachine()
+    fsm._state = SamplingState.DISCHARGE_WASTE
+    orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
+    orch.enable_mechanism()
+    orch._run_async = lambda fn: fn() if fn == orch._handle_open_bin else None
+
+    def wait(seconds):
+        assert seconds == 5.0
+        assert fsm.current_state == SamplingState.OPEN_BIN
+        assert [f.payload for f in port.frames()] == [b"\x01\x03"]
+        return True
+
+    orch._wait_interruptible = wait
+    fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
+    assert [f.payload for f in port.frames()] == [b"\x01\x03", b"\x01\x02"]
+    assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
 
 @pytest.mark.parametrize("action,device,direction,duty", [

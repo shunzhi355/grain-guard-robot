@@ -114,13 +114,14 @@ class TestCoreOrchestration:
         orch._start_position = (0.0, 0.0)
 
         # Run all background handlers synchronously to avoid thread races
-        with patch.object(orch, "_run_async", lambda f: f()):
+        with patch.object(orch, "_run_async", lambda f: f()), \
+             patch.object(orch, "_wait_interruptible", return_value=True):
             # Step 1→2→3→4: INIT → RECORD_START → NAVIGATE_TO_POINT → ARRIVED_PROMPT
             orch._fsm.transition(SamplingAction.CONFIRM_READY)
             # Step 4→5→8: ARRIVED_PROMPT → PRESS_AND_SUCTION → DISCHARGE_WASTE
             #   (depth reached with 1 pipe, CONFIRM_PIPE_ADDED / ADD_PIPE_PROMPT skipped)
             orch._fsm.transition(SamplingAction.CONFIRM_READY)
-            # Step 8→9→10→11→12: DISCHARGE_WASTE → FORMAL_SAMPLING → CONVEY_1 → OPEN_BIN → CONVEY_DONE
+            # Step 8→12: DISCHARGE_WASTE → OPEN_BIN → FORMAL_SAMPLING → CONVEY_1 → CONVEY_DONE
             orch._fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
             # Step 12→13→14: CONVEY_DONE → NEXT_CHECK → ALL_DONE_PROMPT
             orch._fsm.transition(SamplingAction.CONFIRM_DONE)
@@ -328,12 +329,15 @@ class TestMechanismIntegration:
         mock_transition.assert_called_with(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def test_open_bin_calls_bridge_with_depth(self, orch, mock_bridge):
-        """Connected: call_open_bin(current_depth_index), then transition."""
+        """Connected: open the bin, wait 5 s, start conveyor, then transition."""
         orch.enable_mechanism()
         orch._fsm.current_depth_index = 1
-        with patch.object(orch._fsm, "transition") as mock_transition:
+        with patch.object(orch._fsm, "transition") as mock_transition, \
+             patch.object(orch, "_wait_interruptible", return_value=True) as mock_wait:
             orch._handle_open_bin()
         mock_bridge.call_hold_bin_open.assert_called_once_with(1)
+        mock_wait.assert_called_once_with(5.0)
+        mock_bridge.call_start_convey.assert_called_once()
         mock_transition.assert_called_with(SamplingAction.SYSTEM_BIN_OPENED)
 
     def test_close_bin_calls_bridge_with_depth(self, orch, mock_bridge):
