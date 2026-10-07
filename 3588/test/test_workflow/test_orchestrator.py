@@ -123,8 +123,11 @@ class TestCoreOrchestration:
             orch._fsm.transition(SamplingAction.CONFIRM_READY)
             # Step 8→12: DISCHARGE_WASTE → OPEN_BIN → FORMAL_SAMPLING → CONVEY_1 → CONVEY_DONE
             orch._fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-            # Step 12→13→14: CONVEY_DONE → NEXT_CHECK → ALL_DONE_PROMPT
+            # Point complete: extract, support, release, and remove the pipe.
             orch._fsm.transition(SamplingAction.CONFIRM_DONE)
+            assert orch._fsm.current_state == SamplingState.PIPE_SUPPORT_PROMPT
+            orch._fsm.transition(SamplingAction.CONFIRM_PIPE_SUPPORTED)
+            orch._fsm.transition(SamplingAction.CONFIRM_PIPE_REMOVED)
             # Step 14→15→COMPLETED: ALL_DONE_PROMPT → RETURN → COMPLETED
             orch._fsm.transition(SamplingAction.CONFIRM_RETURN)
 
@@ -249,8 +252,8 @@ class TestMechanismPlaceholders:
                 SamplingAction.SYSTEM_DEPTH_REACHED
             )
 
-    def test_next_check_all_done(self, orch):
-        """_handle_next_check emits SYSTEM_ALL_DONE when all points and depths done."""
+    def test_next_check_starts_removal(self, orch):
+        """A completed point enters removal before allowing return."""
         orch._fsm.total_waypoints = 1
         orch._fsm.max_depth = 1
         orch._fsm.current_waypoint_index = 0
@@ -258,7 +261,7 @@ class TestMechanismPlaceholders:
         with patch.object(orch._fsm, "transition") as mock_transition:
             orch._handle_next_check()
             mock_transition.assert_called_with(
-                SamplingAction.SYSTEM_ALL_DONE
+                SamplingAction.SYSTEM_START_EXTRACTION
             )
 
     def test_convey_duration_configurable(self, orch):

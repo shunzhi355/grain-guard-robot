@@ -169,7 +169,8 @@ class MechanismRuntime:
         if action == "move_lift":
             direction = args.get("direction")
             distance = float(args.get("distance_cm", 0))
-            if direction not in ("up", "down", "down_cycle", "return") or not 0 < distance <= 30:
+            if direction not in ("up", "down", "down_cycle", "return",
+                                 "extract_prepare", "extract") or not 0 < distance <= 30:
                 raise ValueError("invalid lift movement")
             if self.controller.lift_drive is None:
                 raise RuntimeError("X2P lift unavailable")

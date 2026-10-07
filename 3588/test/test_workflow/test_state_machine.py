@@ -16,6 +16,19 @@ from grain_sampling_workflow.state_machine import (
 # ── Helpers ───────────────────────────────────────────────────
 
 
+def finish_pipe_removal(fsm: SamplingStateMachine) -> None:
+    """Simulate the mechanism and operator events needed before leaving a point."""
+    fsm.transition(SamplingAction.SYSTEM_START_EXTRACTION)
+    while fsm.current_pipe_index:
+        remaining = fsm.current_pipe_index
+        fsm.transition(SamplingAction.SYSTEM_PIPE_EXTRACTED)
+        fsm.transition(SamplingAction.CONFIRM_PIPE_SUPPORTED)
+        fsm.transition(SamplingAction.SYSTEM_PIPE_RELEASED)
+        fsm.transition(SamplingAction.CONFIRM_PIPE_REMOVED)
+        assert fsm.current_pipe_index == remaining - 1
+    assert fsm.current_state == SamplingState.EXTRACT_PIPE
+
+
 class TransitionRecorder:
     """Records state transition callbacks for test assertions."""
 
@@ -108,6 +121,7 @@ class TestFullWorkflow:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # Step 13 → 14: all done (single point, single depth)
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         assert fsm.current_state == SamplingState.ALL_DONE_PROMPT
 
@@ -119,8 +133,8 @@ class TestFullWorkflow:
         fsm.transition(SamplingAction.SYSTEM_RETURN_COMPLETE)
         assert fsm.current_state == SamplingState.COMPLETED
 
-        # Verify all 15 transitions were recorded
-        assert len(recorder.events) == 15
+        # Includes the four pipe removal events and entering extraction.
+        assert len(recorder.events) == 20
 
     def test_full_sequence_multi_depth(self) -> None:
         """Workflow with 1 waypoint, 2 depths — tests REPEAT_UNTIL_DEPTH loop.
@@ -191,6 +205,7 @@ class TestFullWorkflow:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # All done
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         assert fsm.current_state == SamplingState.ALL_DONE_PROMPT
 
@@ -221,6 +236,7 @@ class TestFullWorkflow:
         assert fsm.current_waypoint_index == 0  # still first
 
         # NEXT_CHECK → next point
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
         assert fsm.current_state == SamplingState.NAVIGATE_TO_POINT
         assert fsm.current_waypoint_index == 1  # now second
@@ -241,6 +257,7 @@ class TestFullWorkflow:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # All done
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         assert fsm.current_state == SamplingState.ALL_DONE_PROMPT
         fsm.transition(SamplingAction.CONFIRM_RETURN)
@@ -444,6 +461,7 @@ class TestTracking:
         fsm.transition(SamplingAction.CONFIRM_DONE)
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
         assert fsm.current_waypoint_index == 1
         assert fsm.current_depth_index == 0
@@ -523,6 +541,7 @@ class TestIsRunning:
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
         fsm.transition(SamplingAction.CONFIRM_DONE)
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         fsm.transition(SamplingAction.CONFIRM_RETURN)
         fsm.transition(SamplingAction.SYSTEM_RETURN_COMPLETE)
@@ -841,6 +860,7 @@ class TestMultiPointMultiDepth:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # ── wp1, depth0 (NEXT_POINT) ────────────────────────
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
         assert fsm.current_state == SamplingState.NAVIGATE_TO_POINT
         assert fsm.current_waypoint_index == 1
@@ -882,6 +902,7 @@ class TestMultiPointMultiDepth:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # ── ALL_DONE ────────────────────────────────────────
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         assert fsm.current_state == SamplingState.ALL_DONE_PROMPT
         fsm.transition(SamplingAction.CONFIRM_RETURN)
@@ -909,6 +930,7 @@ class TestMultiPointMultiDepth:
         assert fsm.current_waypoint_index == 0
 
         # Waypoint 1 — via NEXT_POINT
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
         assert fsm.current_waypoint_index == 1
         fsm.transition(SamplingAction.SYSTEM_NAV_COMPLETE)
@@ -924,6 +946,7 @@ class TestMultiPointMultiDepth:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # Waypoint 2 — via NEXT_POINT
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
         assert fsm.current_waypoint_index == 2
         fsm.transition(SamplingAction.SYSTEM_NAV_COMPLETE)
@@ -939,6 +962,7 @@ class TestMultiPointMultiDepth:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # All done
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         assert fsm.current_state == SamplingState.ALL_DONE_PROMPT
         fsm.transition(SamplingAction.CONFIRM_RETURN)
@@ -1007,6 +1031,7 @@ class TestMultiPointMultiDepth:
         assert fsm.current_state == SamplingState.NEXT_CHECK
 
         # All done
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         assert fsm.current_state == SamplingState.ALL_DONE_PROMPT
         fsm.transition(SamplingAction.CONFIRM_RETURN)
@@ -1038,11 +1063,12 @@ class TestCallbacksExtended:
         fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
         fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
         fsm.transition(SamplingAction.CONFIRM_DONE)
+        finish_pipe_removal(fsm)
         fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
         fsm.transition(SamplingAction.CONFIRM_RETURN)
         fsm.transition(SamplingAction.SYSTEM_RETURN_COMPLETE)
 
-        assert len(recorder.events) == 15
+        assert len(recorder.events) == 16
 
     def test_on_state_change_params_correct(self) -> None:
         """Verify (prev, current, action) tuple for first two transitions."""

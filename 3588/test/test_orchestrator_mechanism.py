@@ -181,6 +181,33 @@ def test_add_pipe_branch_skipped_when_depth_reached():
     assert fsm.current_state == SamplingState.DISCHARGE_WASTE
 
 
+def test_add_pipe_then_press_does_not_clamp_twice():
+    bridge = RecordingBridge()
+    orch, fsm, _ = _make_orch(
+        bridge, depth_target=2.0, state=SamplingState.REPEAT_UNTIL_DEPTH
+    )
+    fsm.current_pipe_index = 1
+    orch._handle_repeat_until_depth()
+    orch._handle_press_and_suction()
+    assert bridge.calls == [
+        "tighten", "unclamp", "clamp", "lift_health",
+        "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
+        "clamp", "start_suction",
+    ]
+    assert fsm.current_pipe_index == 2
+
+
+def test_continuing_press_uses_completed_grip():
+    bridge = RecordingBridge()
+    orch, fsm, _ = _make_orch(bridge, depth_target=3.0)
+    orch._handle_press_and_suction()
+    bridge.calls.clear()
+    fsm._state = SamplingState.PRESS_AND_SUCTION
+    orch._handle_press_and_suction()
+    assert bridge.calls[:2] == ["lift_health", "move_lift:down_cycle:20"]
+    assert bridge.calls.count("clamp") == 1  # Only after the return stroke.
+
+
 # ── 3. 参数来自品种配置 ─────────────────────────────────────────────────────
 
 

@@ -397,3 +397,81 @@ def test_stop_during_pause_prevents_next_leg():
     with pytest.raises(RuntimeError, match="急停"):
         ctrl.move_lift("down_cycle", 20)
     assert len(lift.absolute_calls) == 1
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+@pytest.mark.parametrize("distance", [0.5, 5.5, 20.0])
+def test_extraction_reverses_insertion_targets_and_returns_to_origin(sign, distance):
+    lift = _FakeCycleLift()
+    lift.config = type("Config", (), {"encoder_forward_sign": sign})()
+    ctrl = _cycle_controller(lift)
+    origin = lift.position
+    ctrl.move_lift("down_cycle", distance)
+    inserted = [entry[0] for entry in lift.absolute_calls]
+    ctrl.move_lift("return", distance)
+    lift.absolute_calls.clear()
+    ctrl.move_lift("extract_prepare", distance)
+    assert lift.position == inserted[-1]
+    assert ctrl._lift_cycle_origin == origin
+    ctrl.move_lift("extract", distance)
+    assert [entry[0] for entry in lift.absolute_calls] == inserted[::-1] + [origin]
+    assert lift.position == origin
+    assert ctrl._lift_cycle_origin is None
+    assert ctrl._lift_extraction_targets is None
+    assert not ctrl._lift_extraction_ready
+    assert not lift.distance_calls
+
+
+@pytest.mark.parametrize("phase", ["extract_prepare", "extract"])
+def test_extraction_failure_retains_origin_and_cannot_be_replayed(phase):
+    lift = _FakeCycleLift()
+    ctrl = _cycle_controller(lift)
+    if phase == "extract":
+        ctrl.move_lift("extract_prepare", 20)
+    lift.fail_absolute = True
+    with pytest.raises(RuntimeError, match="simulated"):
+        ctrl.move_lift(phase, 20)
+    assert ctrl._lift_cycle_origin == 20
+    assert lift.stopped
+    assert not ctrl._lift_extraction_ready
+    moves = len(lift.absolute_calls)
+    for direction in ("extract_prepare", "extract", "return", "down_cycle"):
+        with pytest.raises(RuntimeError):
+            ctrl.move_lift(direction, 20)
+    assert len(lift.absolute_calls) == moves
+    with pytest.raises(RuntimeError, match="机械复位"):
+        ctrl.reset()
+    ctrl.reset(mechanical_reset_confirmed=True)
+    assert ctrl._lift_cycle_origin is None
+    assert ctrl._lift_extraction_targets is None
+
+
+def test_extraction_requires_preparation_with_matching_distance():
+    lift = _FakeCycleLift()
+    ctrl = _cycle_controller(lift)
+    with pytest.raises(RuntimeError, match="下降准备"):
+        ctrl.move_lift("extract", 20)
+    with pytest.raises(ValueError, match="总行程"):
+        ctrl.move_lift("extract_prepare", 31)
+    assert ctrl._lift_cycle_origin is None
+    ctrl.move_lift("extract_prepare", 20)
+    with pytest.raises(ValueError, match="距离"):
+        ctrl.move_lift("extract", 10)
+    assert len(lift.absolute_calls) == 1
+
+
+def test_emergency_during_extraction_keeps_origin_and_stops_next_leg():
+    lift = _FakeCycleLift()
+    ctrl = _cycle_controller(lift)
+    ctrl.move_lift("extract_prepare", 20)
+    move = lift.move_to_position
+    def stop_after_leg(*args, **kwargs):
+        result = move(*args, **kwargs)
+        ctrl.emergency_stop()
+        return result
+    lift.move_to_position = stop_after_leg
+    with pytest.raises(RuntimeError, match="急停"):
+        ctrl.move_lift("extract", 20)
+    assert len(lift.absolute_calls) == 2
+    assert ctrl._lift_cycle_origin == 20
+    assert not ctrl._lift_extraction_ready

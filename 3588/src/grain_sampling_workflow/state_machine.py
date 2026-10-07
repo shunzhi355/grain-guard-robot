@@ -1,4 +1,4 @@
-"""15-step sampling workflow state machine.
+"""Sampling workflow state machine, including removal before leaving a point.
 
 Defines the full grain sampling guidance workflow as an enum-based finite
 state machine with validation, callbacks, and waypoint/depth/pipe tracking.
@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 
 class SamplingState(Enum):
-    """The 15 steps of the grain sampling workflow (plus terminal states)."""
+    """Sampling stages, pipe removal stages, and terminal states."""
 
     # Normal workflow (steps 1–15)
     INIT = auto()               # 1: 开机初始化，准备就绪
@@ -33,6 +33,11 @@ class SamplingState(Enum):
     NEXT_CHECK = auto()         # 13: 自动判断下一步
     ALL_DONE_PROMPT = auto()    # 14: 所有点位完成，提示确认返航
     RETURN = auto()             # 15: 自主导航回到起始点，完成
+
+    EXTRACT_PIPE = auto()       # 松夹下降 → 夹紧 → 反向上提一节
+    PIPE_SUPPORT_PROMPT = auto() # 上提完成，等待人工托住管节
+    RELEASE_PIPE = auto()       # 拧松接头 → 松夹
+    REMOVE_PIPE_PROMPT = auto() # 等待人工取出当前管节
 
     # Terminal states
     STOPPED = auto()
@@ -53,6 +58,8 @@ class SamplingAction(Enum):
     CONFIRM_WASTE_DISCHARGED = auto()  # "废粮已排完"
     CONFIRM_DONE = auto()              # "确认"
     CONFIRM_RETURN = auto()            # "确认返航"
+    CONFIRM_PIPE_SUPPORTED = auto()   # "已托住管子"
+    CONFIRM_PIPE_REMOVED = auto()     # "已取出管子"
 
     # ── Safety controls (during FORMAL_SAMPLING only) ───────
     PAUSE = auto()
@@ -72,6 +79,9 @@ class SamplingAction(Enum):
     SYSTEM_NEXT_POINT = auto()
     SYSTEM_ALL_DONE = auto()
     SYSTEM_RETURN_COMPLETE = auto()
+    SYSTEM_START_EXTRACTION = auto()
+    SYSTEM_PIPE_EXTRACTED = auto()
+    SYSTEM_PIPE_RELEASED = auto()
 
 
 # Type alias for state-change callbacks
@@ -85,7 +95,7 @@ StateCallback = Callable[
 
 
 class SamplingStateMachine:
-    """15-step finite state machine for the grain sampling workflow.
+    """Finite state machine for sampling and removing pipes at each point.
 
     Typical usage::
 
@@ -175,11 +185,21 @@ class SamplingStateMachine:
             # Step 13 -> 5: Same point, next depth level
             (SamplingState.NEXT_CHECK, SamplingAction.SYSTEM_NEXT_DEPTH):
                 SamplingState.PRESS_AND_SUCTION,
-            # Step 13 -> 3: Same warehouse, next point
-            (SamplingState.NEXT_CHECK, SamplingAction.SYSTEM_NEXT_POINT):
+            # Point complete: remove every pipe before navigation/return.
+            (SamplingState.NEXT_CHECK, SamplingAction.SYSTEM_START_EXTRACTION):
+                SamplingState.EXTRACT_PIPE,
+            (SamplingState.EXTRACT_PIPE, SamplingAction.SYSTEM_PIPE_EXTRACTED):
+                SamplingState.PIPE_SUPPORT_PROMPT,
+            (SamplingState.PIPE_SUPPORT_PROMPT, SamplingAction.CONFIRM_PIPE_SUPPORTED):
+                SamplingState.RELEASE_PIPE,
+            (SamplingState.RELEASE_PIPE, SamplingAction.SYSTEM_PIPE_RELEASED):
+                SamplingState.REMOVE_PIPE_PROMPT,
+            (SamplingState.REMOVE_PIPE_PROMPT, SamplingAction.CONFIRM_PIPE_REMOVED):
+                SamplingState.EXTRACT_PIPE,
+            # These exits are valid only after the final removal confirmation.
+            (SamplingState.EXTRACT_PIPE, SamplingAction.SYSTEM_NEXT_POINT):
                 SamplingState.NAVIGATE_TO_POINT,
-            # Step 13 -> 14: All waypoints and depths done
-            (SamplingState.NEXT_CHECK, SamplingAction.SYSTEM_ALL_DONE):
+            (SamplingState.EXTRACT_PIPE, SamplingAction.SYSTEM_ALL_DONE):
                 SamplingState.ALL_DONE_PROMPT,
             # Step 14 -> 15: User confirms return
             (SamplingState.ALL_DONE_PROMPT, SamplingAction.CONFIRM_RETURN):
@@ -328,6 +348,12 @@ class SamplingStateMachine:
                 f"while in state '{self._state.name}'"
             )
 
+        if (action in (SamplingAction.SYSTEM_NEXT_POINT, SamplingAction.SYSTEM_ALL_DONE)
+                and self.current_pipe_index != 0):
+            raise ValueError("取样管尚未全部取出，禁止离开当前点位")
+        if action == SamplingAction.CONFIRM_PIPE_REMOVED and self.current_pipe_index <= 0:
+            raise ValueError("没有待取出的管节")
+
         # Update tracking metadata before changing state
         self._update_tracking(prev_state, action, next_state)
 
@@ -373,12 +399,15 @@ class SamplingStateMachine:
 
         # Advance to the next waypoint (different point in same warehouse)
         elif (
-            prev == SamplingState.NEXT_CHECK
+            prev == SamplingState.EXTRACT_PIPE
             and action == SamplingAction.SYSTEM_NEXT_POINT
         ):
             self.current_waypoint_index += 1
             self.current_depth_index = 0
             self.current_pipe_index = 0
+
+        elif action == SamplingAction.CONFIRM_PIPE_REMOVED:
+            self.current_pipe_index -= 1
 
     def _emit(
         self,

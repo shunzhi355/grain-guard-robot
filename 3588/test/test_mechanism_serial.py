@@ -81,6 +81,16 @@ def stack():
     chassis.close()
 
 
+@pytest.mark.parametrize("direction", ["extract_prepare", "extract"])
+def test_runtime_forwards_extraction_to_lift_only(stack, direction):
+    port, _, local, runtime = stack
+    local.lift_drive = MagicMock()
+    local.move_lift = MagicMock(return_value={"target_position": 123})
+    assert runtime.execute("move_lift", direction=direction, distance_cm=20) == {"target_position": 123}
+    local.move_lift.assert_called_once_with(direction, 20.0)
+    assert port.writes == []
+
+
 @pytest.mark.parametrize("action,args,payloads,pca_channel,pca_value", [
     ("tighten", {}, [(1, 1)], 6, 1300),
     ("untighten", {}, [(2, 1)], 6, 1900),

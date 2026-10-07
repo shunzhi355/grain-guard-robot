@@ -1,4 +1,4 @@
-"""Workflow orchestrator — bridges the state machine and ROS bridge.
+"""Workflow orchestrator — bridges the state machine and local robot daemon.
 
 Runs bridge operations in background threads so the UI stays responsive.
 When a bridge operation completes, it automatically transitions the FSM.
@@ -46,7 +46,7 @@ PRESS_STEP_CM: float = PRESS_SEGMENT_CM
 
 
 class WorkflowOrchestrator:
-    """Connects the 15-step state machine to the ROS bridge.
+    """Connects sampling and pipe removal stages to the local robot bridge.
 
     Listens for state changes and automatically triggers the appropriate
     bridge action (navigate, suction, convey, etc.) in a background thread.
@@ -98,6 +98,7 @@ class WorkflowOrchestrator:
         self._mechanism_connected: bool = False  # placeholder: no hardware
         self._grain: str = ""  # grain variety reported to the mechanism at task start
         self._mechanism_retry_interval: float = 0.5  # backoff between mechanism retries
+        self._pipe_clamped = False  # True only after a completed clamp command.
 
         # ── Depth live display callback (task D) ────────────
         self.depth_callback: Optional[Callable[[float], None]] = None
@@ -244,6 +245,10 @@ class WorkflowOrchestrator:
         # ── Operation logging (task A) ─────────────────────
         self._log_on_transition(prev, current, action)
 
+        if current in (SamplingState.INIT, SamplingState.ARRIVED_PROMPT,
+                       SamplingState.STOPPED):
+            self._pipe_clamped = False
+
         # ── Depth live display (task D) ────────────────────
         if self.depth_callback is not None:
             depth_m = float(self._fsm.current_pipe_index) * 1.0
@@ -275,6 +280,12 @@ class WorkflowOrchestrator:
 
         elif current == SamplingState.REPEAT_UNTIL_DEPTH:
             self._run_async(self._handle_repeat_until_depth)
+
+        elif current == SamplingState.EXTRACT_PIPE:
+            self._run_async(self._handle_extract_pipe)
+
+        elif current == SamplingState.RELEASE_PIPE:
+            self._run_async(self._handle_release_pipe)
 
         if current == SamplingState.NEXT_CHECK:
             self._run_async(self._handle_next_check)
@@ -375,6 +386,10 @@ class WorkflowOrchestrator:
         # Nave arrive (ARRIVED_PROMPT)
         elif current == SamplingState.ARRIVED_PROMPT:
             self._log_sampling_event("nave_arrive", "到达扦样点位")
+        elif current == SamplingState.PIPE_SUPPORT_PROMPT:
+            self._log_sampling_event("pipe_extracted", f"第{self._fsm.current_pipe_index}节上提到位")
+        elif action == SamplingAction.CONFIRM_PIPE_REMOVED:
+            self._log_sampling_event("pipe_removed", f"管节已取出，剩余{self._fsm.current_pipe_index}节")
         # Waypoint complete (upon reaching ALL_DONE_PROMPT)
         elif current == SamplingState.ALL_DONE_PROMPT:
             self._log_sampling_event("waypoint_complete", "所有点位完成")
@@ -430,12 +445,9 @@ class WorkflowOrchestrator:
     def _handle_press_and_suction(self) -> None:
         """Step 5: press pipe + suction, auto-advance with depth check.
 
-        With the mechanism connected the full down-press cycle for one pipe
-        section is: clamp -> press -> unclamp -> lift -> clamp, then start
-        suction.  Every step waits its per-grain duration (interruptible, so
-        STOP/emergency aborts mid-cycle); press/lift use a fixed delay since
-        the servo is not yet wired.  The placeholder path keeps the
-        ``time.sleep`` mock behaviour.
+        Clamp only if the preceding stage has not already clamped, then
+        press -> unclamp -> return to the saved encoder origin -> clamp.
+        Every step waits its per-grain duration and can be interrupted.
         """
         import math
         target_m = self._fsm.get_target_depth()
@@ -453,13 +465,15 @@ class WorkflowOrchestrator:
             # 正常下压循环：夹紧 → 下压(精确距离) → 松开 → 上升 → 再夹紧。
             # press/lift 走 move_lift 编码器闭环精确距离控制（单次 step_cm cm，
             # 状态机 REPEAT_UNTIL_DEPTH 循环累加直到目标深度）。
-            press_cycle = (
-                ("clamp", self._bridge.call_clamp, d["clamp"]),
+            press_cycle = []
+            if not self._pipe_clamped:
+                press_cycle.append(("clamp", self._bridge.call_clamp, d["clamp"]))
+            press_cycle.extend((
                 ("press", lambda: self._bridge.call_move_lift("down_cycle", step_cm), d["servo"]),
                 ("unclamp", self._bridge.call_unclamp, d["unclamp"]),
                 ("lift", lambda: self._bridge.call_move_lift("return", step_cm), d["servo"]),
                 ("clamp", self._bridge.call_clamp, d["clamp"]),  # 再夹紧，准备下一次下压
-            )
+            ))
             if not self._run_mechanism_sequence(press_cycle):
                 return  # failure/interruption already stopped the FSM
             if not self._call_mechanism(
@@ -619,10 +633,54 @@ class WorkflowOrchestrator:
                     self._fsm.current_waypoint_index + 1, self._fsm.total_waypoints)
         if self._fsm.current_depth_index + 1 < self._fsm.max_depth:
             self._fsm.transition(SamplingAction.SYSTEM_NEXT_DEPTH)
-        elif self._fsm.current_waypoint_index + 1 < self._fsm.total_waypoints:
-            self._fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
         else:
-            self._fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
+            self._fsm.transition(SamplingAction.SYSTEM_START_EXTRACTION)
+
+    def _handle_extract_pipe(self) -> None:
+        """Reverse the press cycle for one pipe; never move to a point with pipes in."""
+        if self._fsm.current_state != SamplingState.EXTRACT_PIPE:
+            return
+        if self._fsm.current_pipe_index == 0:
+            if self._fsm.current_waypoint_index + 1 < self._fsm.total_waypoints:
+                self._fsm.transition(SamplingAction.SYSTEM_NEXT_POINT)
+            else:
+                self._fsm.transition(SamplingAction.SYSTEM_ALL_DONE)
+            return
+        if self._mechanism_connected:
+            d = self._get_mechanism_durations()
+            if not self._call_mechanism("lift health", self._bridge.call_lift_health):
+                return
+            # Reverse of clamp -> down_cycle -> unclamp -> return -> clamp.
+            # Keep the final grip until the operator confirms support.
+            if not self._run_mechanism_sequence([
+                ("unclamp", self._bridge.call_unclamp, d["unclamp"]),
+                ("move_lift", lambda: self._bridge.call_move_lift("extract_prepare", PRESS_STEP_CM), d["servo"]),
+                ("clamp", self._bridge.call_clamp, d["clamp"]),
+                ("move_lift", lambda: self._bridge.call_move_lift("extract", PRESS_STEP_CM), d["servo"]),
+            ]):
+                return
+        elif not self._wait_interruptible(0.5):
+            return
+        if self._fsm.current_state == SamplingState.EXTRACT_PIPE:
+            self._fsm.transition(SamplingAction.SYSTEM_PIPE_EXTRACTED)
+
+    def _handle_release_pipe(self) -> None:
+        """Operator is supporting the raised pipe; loosen its joint and release."""
+        if self._fsm.current_state != SamplingState.RELEASE_PIPE:
+            return
+        if self._mechanism_connected:
+            d = self._get_mechanism_durations()
+            steps = []
+            # The first/bottom pipe was inserted without a threaded continuation.
+            if self._fsm.current_pipe_index > 1:
+                steps.append(("untighten", self._bridge.call_untighten, d["untighten"]))
+            steps.append(("unclamp", self._bridge.call_unclamp, d["unclamp"]))
+            if not self._run_mechanism_sequence(steps):
+                return
+        elif not self._wait_interruptible(0.5):
+            return
+        if self._fsm.current_state == SamplingState.RELEASE_PIPE:
+            self._fsm.transition(SamplingAction.SYSTEM_PIPE_RELEASED)
 
     def _handle_task_completed(self) -> None:
         """Step final: report task COMPLETED to the cloud.
@@ -687,11 +745,15 @@ class WorkflowOrchestrator:
         for name, call, duration in steps:
             if not self._call_mechanism(name, call):
                 return False  # final failure already stopped the FSM
-            if not self._wait_interruptible(float(duration)):
+            if not self._wait_interruptible(float(duration)) or not self._fsm.is_running:
                 logger.warning(
                     "Mechanism sequence interrupted at step '%s'", name
                 )
+                if self._mechanism_connected:
+                    self._bridge.call_emergency_stop()
                 return False
+            if name in ("clamp", "unclamp"):
+                self._pipe_clamped = name == "clamp"
         return True
 
     def _call_mechanism(

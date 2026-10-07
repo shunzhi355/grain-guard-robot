@@ -73,6 +73,24 @@ from utils.sampling_params import (
 
 logger = logging.getLogger(__name__)
 
+
+def _press_cycle_depths(distance_mm: float) -> list[float]:
+    """Bounded insertion path; extraction traverses these targets in reverse."""
+    down_mm, up_mm = PRESS_DOWN_CM * 10.0, PRESS_UP_CM * 10.0
+    if (not all(math.isfinite(v) for v in (down_mm, up_mm, PRESS_PAUSE_S))
+            or not down_mm > up_mm >= 0 or PRESS_PAUSE_S < 0):
+        raise ValueError("往复参数要求 down > up >= 0，pause >= 0")
+    depths = []
+    progress = 0.0
+    while progress < distance_mm - 1e-9:
+        bottom = min(progress + down_mm, distance_mm)
+        depths.append(bottom)
+        progress = bottom
+        if bottom < distance_mm - 1e-9 and up_mm > 0:
+            progress = bottom - up_mm
+            depths.append(progress)
+    return depths
+
 # ---------------------------------------------------------------------------
 # PCA9685 寄存器 / I2C 常量（复用 dipan/pca9685/pca9685_driver.py 的取值与公式）
 # ---------------------------------------------------------------------------
@@ -471,6 +489,8 @@ class _BaseMechanismController:
         # exercise exactly the same safety state machine as real hardware.
         self._lift_motion_lock = threading.Lock()
         self._lift_cycle_origin: int | None = None
+        self._lift_extraction_targets: tuple[int, ...] | None = None
+        self._lift_extraction_ready = False
 
     # -- 低层：脉宽写入（子类实现） ---------------------------------------
     def _write_hw(self, channel: int, pulse_us: float) -> None:
@@ -619,6 +639,8 @@ class _BaseMechanismController:
                     self._lift_cycle_origin,
                 )
                 self._lift_cycle_origin = None
+                self._lift_extraction_targets = None
+                self._lift_extraction_ready = False
         self._stop_flag.clear()
 
     # -- 品种参数 ---------------------------------------------------------
@@ -849,7 +871,8 @@ class _BaseMechanismController:
         ----------
         direction : str
             ``up``/``down`` 为单程；``down_cycle`` 保存原点并往复下压，
-            ``return`` 回到本轮保存的编码器原点。
+            ``return`` 回到本轮保存的编码器原点；``extract_prepare`` 松夹时
+            保存上方原点并下降，``extract`` 夹紧后沿往复下压的反向轨迹上提。
         distance_cm : float
             移动距离（厘米），必须 > 0。
         duration_s : float | None
@@ -863,8 +886,9 @@ class _BaseMechanismController:
         if not math.isfinite(distance_cm) or not distance_cm > 0:
             raise ValueError("distance_cm 必须大于 0")
         normalized_direction = str(direction).strip().lower()
-        if normalized_direction not in {"up", "down", "down_cycle", "return"}:
-            raise ValueError("direction 必须是 up/down/down_cycle/return")
+        if normalized_direction not in {"up", "down", "down_cycle", "return",
+                                        "extract_prepare", "extract"}:
+            raise ValueError("direction 必须是 up/down/down_cycle/return/extract_prepare/extract")
         distance_mm = float(distance_cm) * 10.0
         if duration_s is None:
             rpm = max(1, int(self.lift_rpm))
@@ -880,10 +904,7 @@ class _BaseMechanismController:
                     raise RuntimeError(
                         "上一次自动下压尚未完成绝对回程，拒绝覆盖原点"
                     )
-                down_mm, up_mm = PRESS_DOWN_CM * 10.0, PRESS_UP_CM * 10.0
-                if (not all(math.isfinite(v) for v in (down_mm, up_mm, PRESS_PAUSE_S))
-                        or not down_mm > up_mm >= 0 or PRESS_PAUSE_S < 0):
-                    raise ValueError("往复参数要求 down > up >= 0，pause >= 0")
+                depths = _press_cycle_depths(distance_mm)
                 limits = getattr(self.lift_drive.config, "limits", None)
                 max_distance = float(getattr(limits, "max_distance_mm", 300.0))
                 if distance_mm > max_distance:
@@ -901,29 +922,23 @@ class _BaseMechanismController:
                 progress = 0.0
                 leg = 0
                 try:
-                    while progress < distance_mm - 1e-9:
-                        bottom = min(progress + down_mm, distance_mm)
-                        targets = [bottom]
-                        # 末程停在段终点，禁止超过目标深度。
-                        if bottom < distance_mm - 1e-9 and up_mm > 0:
-                            targets.append(bottom - up_mm)
-                        for depth in targets:
-                            if self._stop_flag.is_set():
-                                raise RuntimeError("往复下压被急停中断")
-                            target = origin - sign * round(depth * counts)
-                            actual_mm = abs(target - self.lift_drive.read_position()) / counts
-                            leg += 1
-                            logger.info("LIFT_CYCLE_LEG leg=%d depth_mm=%.3f target=%d", leg, depth, target)
-                            result = self.lift_drive.move_to_position(
-                                target, max(actual_mm, 0.001) * secs / distance_mm,
-                                tolerance_mm=tolerance_mm,
-                            )
-                            logger.info("LIFT_CYCLE_LEG_DONE leg=%d result=%s", leg, result)
-                            if self._stop_flag.is_set():
-                                raise RuntimeError("往复下压被急停中断")
-                            progress = depth
-                            if progress < distance_mm - 1e-9 and self._stop_flag.wait(PRESS_PAUSE_S):
-                                raise RuntimeError("往复下压被急停中断")
+                    for depth in depths:
+                        if self._stop_flag.is_set():
+                            raise RuntimeError("往复下压被急停中断")
+                        target = origin - sign * round(depth * counts)
+                        actual_mm = abs(target - self.lift_drive.read_position()) / counts
+                        leg += 1
+                        logger.info("LIFT_CYCLE_LEG leg=%d depth_mm=%.3f target=%d", leg, depth, target)
+                        result = self.lift_drive.move_to_position(
+                            target, max(actual_mm, 0.001) * secs / distance_mm,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        logger.info("LIFT_CYCLE_LEG_DONE leg=%d result=%s", leg, result)
+                        if self._stop_flag.is_set():
+                            raise RuntimeError("往复下压被急停中断")
+                        progress = depth
+                        if progress < distance_mm - 1e-9 and self._stop_flag.wait(PRESS_PAUSE_S):
+                            raise RuntimeError("往复下压被急停中断")
                     logger.info("LIFT_CYCLE_COMPLETE origin=%d depth_mm=%.3f legs=%d", origin, progress, leg)
                     return result
                 except Exception:
@@ -934,6 +949,8 @@ class _BaseMechanismController:
                         logger.exception("往复下压失败后的停机失败")
                     raise
             elif normalized_direction == "return":
+                if self._lift_extraction_targets is not None:
+                    raise RuntimeError("取管上提未完成，禁止使用下压回程")
                 if self._lift_cycle_origin is None:
                     raise RuntimeError("没有已保存的下压起点，拒绝自动回程")
                 counts_per_mm = float(self.lift_drive.counts_per_mm)
@@ -963,6 +980,64 @@ class _BaseMechanismController:
                                    "duration_s": secs, "x2p": True})
                 )
                 return result
+            elif normalized_direction in {"extract_prepare", "extract"}:
+                counts = float(self.lift_drive.counts_per_mm)
+                sign = int(getattr(self.lift_drive.config, "encoder_forward_sign", 1))
+                if not math.isfinite(counts) or counts <= 0 or sign not in (-1, 1):
+                    raise ValueError("编码器比例或方向无效")
+                if normalized_direction == "extract_prepare":
+                    if self._lift_cycle_origin is not None:
+                        raise RuntimeError("上次升降尚未完成，拒绝覆盖原点")
+                    limits = getattr(self.lift_drive.config, "limits", None)
+                    if distance_mm > float(getattr(limits, "max_distance_mm", 300.0)):
+                        raise ValueError("取管总行程超过伺服单段行程限制")
+                    depths = _press_cycle_depths(distance_mm)
+                    origin = int(self.lift_drive.read_position())
+                    targets = (origin,) + tuple(
+                        origin - sign * round(depth * counts) for depth in depths
+                    )
+                    self._lift_cycle_origin = origin
+                    self._lift_extraction_targets = targets
+                    self._lift_extraction_ready = False
+                    path = (targets[-1],)
+                else:
+                    targets = self._lift_extraction_targets
+                    if targets is None or not self._lift_extraction_ready:
+                        raise RuntimeError("没有已完成的取管下降准备，拒绝自动上提或重放")
+                    if abs(targets[-1] - targets[0]) != round(distance_mm * counts):
+                        raise ValueError("取管上提距离必须与下降准备一致")
+                    # A failed/uncertain ascent cannot be issued a second time.
+                    self._lift_extraction_ready = False
+                    path = tuple(reversed(targets[:-1]))
+                try:
+                    for leg, target in enumerate(path):
+                        if self._stop_flag.is_set():
+                            raise RuntimeError("取管升降被急停中断")
+                        actual_mm = abs(target - self.lift_drive.read_position()) / counts
+                        logger.info("LIFT_EXTRACTION_LEG phase=%s leg=%d target=%d",
+                                    normalized_direction, leg + 1, target)
+                        result = self.lift_drive.move_to_position(
+                            target, max(actual_mm, 0.001) * secs / distance_mm,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        if self._stop_flag.is_set():
+                            raise RuntimeError("取管升降被急停中断")
+                        if leg + 1 < len(path) and self._stop_flag.wait(PRESS_PAUSE_S):
+                            raise RuntimeError("取管升降被急停中断")
+                    if normalized_direction == "extract_prepare":
+                        self._lift_extraction_ready = True
+                    else:
+                        self._lift_cycle_origin = None
+                        self._lift_extraction_targets = None
+                    return result
+                except Exception:
+                    self._lift_extraction_ready = False
+                    logger.exception("LIFT_EXTRACTION_FAILED; 原点保留，禁止自动重放")
+                    try:
+                        self.lift_drive.stop()
+                    except Exception:
+                        logger.exception("取管失败后的停机失败")
+                    raise
             else:
                 command_direction = normalized_direction
 

@@ -1,4 +1,4 @@
-"""Guidance page — 15-step sampling workflow controller.
+"""Guidance page — sampling and pipe removal workflow controller.
 
 Displays step-by-step instructions, context-sensitive action buttons,
 safety controls (pause / resume / stop), and progress tracking for the
@@ -103,6 +103,26 @@ _STATE_META: Dict[SamplingState, Tuple[str, str, Tuple[str, ...]]] = {
         "系统正在判断下一步操作…",
         (),
     ),
+    SamplingState.EXTRACT_PIPE: (
+        "正在上提取样管",
+        "当前点位采样已完成，正在松夹下降、夹紧并反向上提，请远离运动机构…",
+        (),
+    ),
+    SamplingState.PIPE_SUPPORT_PROMPT: (
+        "请托住取样管",
+        "管节已上提到位，夹具保持夹紧；请托住待取出的管节，确认后将拧松接头并松夹",
+        ("CONFIRM_PIPE_SUPPORTED",),
+    ),
+    SamplingState.RELEASE_PIPE: (
+        "正在松开取样管",
+        "请保持托住管节，正在拧松接头并松开夹具…",
+        (),
+    ),
+    SamplingState.REMOVE_PIPE_PROMPT: (
+        "请取出当前管节",
+        "请取出已松开的管节，离开运动机构后点击确认；全部管节取出后才能离开当前点位",
+        ("CONFIRM_PIPE_REMOVED",),
+    ),
     SamplingState.ALL_DONE_PROMPT: (
         "所有点位已完成",
         "所有点位采样任务已全部完成，请确认返航",
@@ -132,6 +152,8 @@ _BUTTON_ACTION_MAP: Dict[str, SamplingAction] = {
     "CONFIRM_WASTE_DISCHARGED": SamplingAction.CONFIRM_WASTE_DISCHARGED,
     "CONFIRM_DONE": SamplingAction.CONFIRM_DONE,
     "CONFIRM_RETURN": SamplingAction.CONFIRM_RETURN,
+    "CONFIRM_PIPE_SUPPORTED": SamplingAction.CONFIRM_PIPE_SUPPORTED,
+    "CONFIRM_PIPE_REMOVED": SamplingAction.CONFIRM_PIPE_REMOVED,
 }
 
 _BUTTON_LABELS: Dict[str, str] = {
@@ -140,6 +162,8 @@ _BUTTON_LABELS: Dict[str, str] = {
     "CONFIRM_WASTE_DISCHARGED": "废粮已排完",
     "CONFIRM_DONE": "确认",
     "CONFIRM_RETURN": "确认返航",
+    "CONFIRM_PIPE_SUPPORTED": "已托住管子，开始松管",
+    "CONFIRM_PIPE_REMOVED": "已取出管子",
 }
 
 _BUTTON_STYLES: Dict[str, str] = {
@@ -148,6 +172,8 @@ _BUTTON_STYLES: Dict[str, str] = {
     "CONFIRM_WASTE_DISCHARGED": "btn_primary",
     "CONFIRM_DONE": "btn_success",
     "CONFIRM_RETURN": "btn_primary",
+    "CONFIRM_PIPE_SUPPORTED": "btn_primary",
+    "CONFIRM_PIPE_REMOVED": "btn_success",
 }
 
 
@@ -157,7 +183,7 @@ _BUTTON_STYLES: Dict[str, str] = {
 class GuidancePage(QWidget):
     _state_changed_signal = Signal(object, object)  # state, action
     home_requested = Signal()
-    """Guidance page — drives the 15-step sampling workflow and reacts to
+    """Guidance page — drives the sampling workflow and reacts to
     :class:`SamplingStateMachine` state changes.
 
     Centred layout: kicker → title (40pt) → status pill → detail →
@@ -540,6 +566,10 @@ class GuidancePage(QWidget):
                 SamplingState.CONVEY_1,
                 SamplingState.CONVEY_DONE,
                 SamplingState.NEXT_CHECK,
+                SamplingState.EXTRACT_PIPE,
+                SamplingState.PIPE_SUPPORT_PROMPT,
+                SamplingState.RELEASE_PIPE,
+                SamplingState.REMOVE_PIPE_PROMPT,
                 SamplingState.ALL_DONE_PROMPT,
                 SamplingState.RETURN,
             ]
@@ -603,11 +633,18 @@ class GuidancePage(QWidget):
                     f"当前深度约 {depth_m:.0f}m，请插入第 {current + 1} 节管"
                     f"（共需 {total} 节），完成后点击下方按钮"
                 )
+
             else:
                 self._detail.setText(
                     f"当前深度已达到目标 {target_m:.1f}m（{total} 节管），"
                     f"点击下方按钮继续"
                 )
+
+        if state in (SamplingState.PIPE_SUPPORT_PROMPT, SamplingState.REMOVE_PIPE_PROMPT) and self._fsm is not None:
+            self._detail.setText(
+                f"{detail_text}\n当前待取：第 {self._fsm.current_pipe_index} 节管"
+                f"，剩余 {self._fsm.current_pipe_index} 节"
+            )
 
         # ── Status pill ─────────────────────────────────────
         in_formal = state == SamplingState.FORMAL_SAMPLING
