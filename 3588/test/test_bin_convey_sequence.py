@@ -111,7 +111,7 @@ def test_formal_sampling_failure_does_not_start_conveyor():
 
     orch._handle_formal_sampling()
     assert fsm.current_state == SamplingState.STOPPED
-    assert bridge.call_start_suction.call_count == 3
+    assert bridge.call_start_suction.call_count == 1
     bridge.call_start_convey.assert_not_called()
     bridge.call_emergency_stop.assert_called_once()
 

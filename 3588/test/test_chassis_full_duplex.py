@@ -7,6 +7,7 @@ import time
 import pytest
 
 from grain_sampling_devices import chassis_protocol as wire
+from grain_sampling_devices import mechanism_protocol as mechanism
 from grain_sampling_devices.chassis_serial import ChassisSerial, ChassisError
 from grain_sampling_interhost.chassis_controller import ChassisController
 
@@ -26,7 +27,7 @@ def eventually(predicate):
 
 
 class DuplexPort:
-    """No command replies. Only explicitly injected periodic reports reach RX."""
+    """Periodic mode reports and matching mechanism replies share RX."""
     def __init__(self):
         self.rx = bytearray()
         self.writes = []
@@ -50,6 +51,12 @@ class DuplexPort:
 
     def write(self, packet):
         self.writes.append(packet)
+        frame = wire.Parser().feed(packet)[0]
+        if frame.kind == mechanism.RELIABLE_FRAME_TYPE:
+            command, device = frame.payload
+            reply = mechanism.REPLY_STRUCT.pack(frame.session, frame.sequence,
+                                                 command, device, 0)
+            self.inject(wire.encode(mechanism.REPLY_TYPE, 0, frame.sequence, reply))
         return len(packet)
 
     def close(self):
@@ -88,10 +95,12 @@ def test_pending_rx_does_not_block_mechanism_tx():
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(controller.mechanism_command, 1, 6)
             try:
-                future.result(timeout=0.3)
-                assert [(f.kind, f.payload) for f in port.frames()] == [(0x36, b"\x01\x06")]
+                eventually(lambda: any(f.kind == mechanism.RELIABLE_FRAME_TYPE for f in port.frames()))
+                assert not future.done()
+                assert [(f.kind, f.payload) for f in port.frames()] == [(mechanism.RELIABLE_FRAME_TYPE, b"\x01\x06")]
             finally:
                 release.set()
+            future.result(timeout=1)
     finally:
         release.set()
         controller.close()
@@ -105,7 +114,7 @@ def test_pending_tx_does_not_block_ch8_rx_and_manual_blocks_next_start():
 
     def delayed_write(packet):
         frame = wire.Parser().feed(packet)[0]
-        if frame.kind == 0x36 and frame.payload == b"\x01\x06":
+        if frame.kind == mechanism.RELIABLE_FRAME_TYPE and frame.payload == b"\x01\x06":
             entered.set()
             assert release.wait(2)
         return write(packet)
@@ -173,7 +182,7 @@ def test_reset_write_failure_keeps_latch_and_disconnects(failure):
 
 def test_receive_io_error_reconnects_without_replaying_mechanism_start():
     controller, old = connected_controller()
-    controller.mechanism_command(1, 2)
+    controller.link.mechanism_command(1, 2)
     replacement = DuplexPort()
     controller.serial_factory = lambda: replacement
 
@@ -187,7 +196,38 @@ def test_receive_io_error_reconnects_without_replaying_mechanism_start():
         eventually(lambda: controller.link is not None and controller.link.serial is replacement)
         assert old.closed and controller.epoch is None
         assert [(f.kind, f.payload) for f in replacement.frames()] == [
-            (wire.STREAM_CONTROL, bytes((wire.AUTO_STOP,))), (0x36, b"\x03\x00")]
+            (wire.STREAM_CONTROL, bytes((wire.AUTO_STOP,)))]
+    finally:
+        controller.close()
+
+
+def test_pending_mechanism_is_retried_with_same_id_after_usb_reconnect():
+    controller, old = connected_controller()
+    replacement = DuplexPort()
+    replacement.inject(report())
+    controller.serial_factory = lambda: replacement
+    old_write = old.write
+
+    def lost_connection(packet):
+        frame = wire.Parser().feed(packet)[0]
+        if frame.kind == mechanism.RELIABLE_FRAME_TYPE:
+            old.writes.append(packet)  # MCU may have received it before USB reset.
+            raise OSError("FT232 disconnected")
+        return old_write(packet)
+
+    old.write = lost_connection
+    controller.start()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            sequence = pool.submit(controller.mechanism_command, 1, 2).result(timeout=4)
+        first = [f for f in old.frames() if f.kind == mechanism.RELIABLE_FRAME_TYPE]
+        retried = [f for f in replacement.frames() if f.kind == mechanism.RELIABLE_FRAME_TYPE]
+        assert len(first) == len(retried) == 1
+        assert (first[0].session, first[0].sequence, first[0].payload) == (
+            retried[0].session, retried[0].sequence, retried[0].payload)
+        assert sequence == first[0].sequence
+        assert not any(f.payload == b"\x03\x00" for f in replacement.frames())
+        assert controller.status()["last_mechanism_reply"]["attempts"] == 2
     finally:
         controller.close()
 

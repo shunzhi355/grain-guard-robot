@@ -1,7 +1,7 @@
 """Non-ROS, single-owner 3588 to STM32 chassis control.
 
-TX commands share a lock. A separate RX worker only drains unsolicited CH8
-reports, without holding the TX/state lock. No command waits for a reply.
+TX commands share a lock. A separate RX worker dispatches CH8 status and
+mechanism replies without holding the TX/state lock.
 Loss of fresh velocity commands revokes chassis motion locally.
 """
 from __future__ import annotations
@@ -15,9 +15,14 @@ import time
 
 from grain_sampling_devices import chassis_protocol as stm32
 from grain_sampling_devices import mechanism_protocol as mechanism
-from grain_sampling_devices.chassis_serial import ChassisSerial, DEFAULT_SERIAL_PORT
+from grain_sampling_devices.chassis_serial import (
+    ChassisError, ChassisSerial, DEFAULT_SERIAL_PORT, MechanismDisconnectedError,
+    MechanismRejectedError, MechanismTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
+MECHANISM_RETRY_WINDOW_S = 10.0
+MECHANISM_RETRY_DELAY_S = 0.1
 
 
 class ChassisController:
@@ -28,6 +33,7 @@ class ChassisController:
         self.timeout_s = timeout_s
         self.serial_factory = serial_factory or self._open_serial
         self.lock = threading.RLock()
+        self._mechanism_idle = threading.Condition(self.lock)
         self.running = threading.Event()
         self.worker: threading.Thread | None = None
         self.receiver: threading.Thread | None = None
@@ -43,6 +49,11 @@ class ChassisController:
         self.last_stop_reason = "startup"
         self._mcu_boot: int | None = None
         self._last_status_received_at = float("-inf")
+        self.last_mechanism_reply: dict | None = None
+        self._serial_session: int | None = None
+        self._serial_sequence = 0
+        self._pending_mechanism = None
+        self._ever_connected = False
 
     def _open_serial(self):
         import serial
@@ -60,6 +71,11 @@ class ChassisController:
 
     def close(self):
         self.running.clear()
+        with self.lock:
+            self._pending_mechanism = None
+            self._mechanism_idle.notify_all()
+            if self.link is not None:
+                self.link.fail_pending("controller closed")
         if self.worker is not None:
             self.worker.join(timeout=1)
         if self.receiver is not None:
@@ -99,26 +115,114 @@ class ChassisController:
                 logger.exception("STM32 mechanism stop write failed")
 
     def mechanism_command(self, command: int, device: int):
-        """Immediate, serialized send; no queued actions survive a reconnect."""
+        """Keep one request pending across transient USB loss; resend its same ID."""
         mechanism.command_payload(command, device)
-        with self.lock:
-            if self.link is None:
-                raise RuntimeError("STM32 mechanism serial link unavailable")
-            # STOP on a bin means powered closing, unlike a conveyor STOP.
-            moving = command == mechanism.START or (
-                command == mechanism.STOP and device in mechanism.BIN_DEVICES.values()
-            )
-            if moving and (self.estop_latched or self.epoch is not None or self.mode != "auto"):
-                raise RuntimeError("STM32 mechanism requires stopped chassis, auto mode and no estop")
-            try:
+        if command == mechanism.STOP_ALL:
+            with self.lock:
+                self._pending_mechanism = None
+                self._mechanism_idle.notify_all()
+                if self.link is None:
+                    raise RuntimeError("STM32 mechanism serial link unavailable")
+                self.link.fail_pending("STOP_ALL canceled pending mechanism action")
                 return self.link.mechanism_command(command, device)
-            except (OSError, RuntimeError):
-                self._stop_mechanisms_locked()
-                self._disconnect_locked()
-                raise
+        moving = command == mechanism.START or (
+            command == mechanism.STOP and device in mechanism.BIN_DEVICES.values()
+        )
+        token = object()
+        with self._mechanism_idle:
+            while self._pending_mechanism is not None:
+                self._mechanism_idle.wait()
+            if self.link is None and not self.running.is_set():
+                raise RuntimeError("STM32 mechanism serial link unavailable")
+            if moving and (self.estop_latched or self.epoch is not None or
+                           self.mode == "manual"):
+                raise RuntimeError("STM32 mechanism requires stopped chassis, auto mode and no estop")
+            if self.link is not None:
+                self._serial_session = self.link.session
+                sequence = self.link.reserve_sequence()
+                self._serial_sequence = sequence
+            else:
+                if self._serial_session is None:
+                    self._serial_session = secrets.randbelow(0xffffffff) + 1
+                self._serial_sequence = (self._serial_sequence + 1) & 0xffffffff
+                sequence = self._serial_sequence
+            self._pending_mechanism = token
+        deadline = self.clock() + MECHANISM_RETRY_WINDOW_S
+        attempts = 0
+        last_error = "no reply"
+        try:
+            while self.clock() < deadline:
+                with self.lock:
+                    if self._pending_mechanism is not token or self.estop_latched:
+                        raise RuntimeError("STM32 mechanism action canceled")
+                    link = self.link
+                    if moving and self.epoch is not None:
+                        raise RuntimeError("chassis started moving during mechanism action")
+                if link is None and not self.running.is_set():
+                    raise MechanismDisconnectedError(
+                        f"STM32 mechanism link cannot reconnect: {last_error}"
+                    )
+                if link is None or (moving and link.mode_telemetry.mode() != "auto"
+                                    and self.mode != "auto"):
+                    time.sleep(MECHANISM_RETRY_DELAY_S)
+                    continue
+                attempts += 1
+                try:
+                    link.mechanism_command(command, device, confirm=True,
+                                           sequence=sequence)
+                except MechanismRejectedError:
+                    raise
+                except (MechanismTimeoutError, MechanismDisconnectedError, OSError,
+                        RuntimeError) as exc:
+                    last_error = str(exc)
+                    logger.warning("STM32 mechanism retry command=%d device=%d sequence=%d attempt=%d: %s",
+                                   command, device, sequence, attempts, exc)
+                    if isinstance(exc, (OSError, ChassisError)) and not isinstance(exc, MechanismTimeoutError):
+                        with self.lock:
+                            if self.link is link:
+                                self._disconnect_locked()
+                    time.sleep(MECHANISM_RETRY_DELAY_S)
+                    continue
+                with self.lock:
+                    if self._pending_mechanism is not token:
+                        raise RuntimeError("STM32 mechanism action canceled")
+                    self.last_mechanism_reply = {
+                        "command": command, "device": device,
+                        "sequence": sequence, "accepted": True,
+                        "attempts": attempts,
+                    }
+                logger.info("STM32 mechanism accepted command=%d device=%d sequence=%d attempts=%d",
+                            command, device, sequence, attempts)
+                return sequence
+            raise MechanismTimeoutError(
+                f"STM32 mechanism retry timeout after {MECHANISM_RETRY_WINDOW_S:.1f}s "
+                f"command={command} device={device} sequence={sequence} "
+                f"attempts={attempts} last_error={last_error}"
+            )
+        except Exception as exc:
+            with self.lock:
+                self.last_mechanism_reply = {
+                    "command": command, "device": device,
+                    "sequence": sequence, "accepted": False, "error": str(exc),
+                    "attempts": attempts,
+                }
+                if self._pending_mechanism is token:
+                    self._stop_mechanisms_locked()
+            logger.error("STM32 mechanism unconfirmed command=%d device=%d: %s",
+                         command, device, exc)
+            raise
+        finally:
+            with self.lock:
+                if self._pending_mechanism is token:
+                    self._pending_mechanism = None
+                    self._mechanism_idle.notify_all()
 
     def estop(self):
         with self.lock:
+            self._pending_mechanism = None
+            self._mechanism_idle.notify_all()
+            if self.link is not None:
+                self.link.fail_pending("emergency stop")
             self._stop_locked("estop")
             self.estop_latched = True
             if self.link is not None:
@@ -203,6 +307,8 @@ class ChassisController:
                     "motion_epoch": self.epoch or 0, "estop_latched": self.estop_latched,
                     "obstacle_stop": self.obstacle, "obstacle": self.obstacle,
                     "last_motion_age_ms": age, "last_stop_reason": self.last_stop_reason,
+                    "last_mechanism_reply": self.last_mechanism_reply,
+                    "mechanism_pending": self._pending_mechanism is not None,
                     "faults": state["faults"] if state else None}
 
     def _disconnect_locked(self):
@@ -216,6 +322,10 @@ class ChassisController:
         self._mcu_boot = None
         self._last_status_received_at = float("-inf")
         if link is not None:
+            self._ever_connected = True
+            self._serial_session = link.session
+            self._serial_sequence = link.sequence
+            link.fail_pending("serial disconnected")
             try:
                 link.serial.close()
             except OSError:
@@ -243,11 +353,16 @@ class ChassisController:
             with self.lock:
                 try:
                     if self.link is None:
-                        self.link = ChassisSerial(self.serial_factory(), clock=self.clock)
+                        first_connection = not self._ever_connected
+                        if self._serial_session is None:
+                            self._serial_session = secrets.randbelow(0xffffffff) + 1
+                        self.link = ChassisSerial(self.serial_factory(), clock=self.clock,
+                                                  session=self._serial_session,
+                                                  sequence=self._serial_sequence)
                         self.link.stream_control(stm32.AUTO_STOP)
-                        # Cancel MCU timers/pending starts from the previous
-                        # connection. Never replay a mechanism START.
-                        self.link.mechanism_command(mechanism.STOP_ALL, 0)
+                        if first_connection and self._pending_mechanism is None:
+                            self.link.mechanism_command(mechanism.STOP_ALL, 0)
+                        self._ever_connected = True
                     # Read cached reports only; this worker never reads the UART.
                     mode = self.link.mode_telemetry.mode()
                     status, received_at = self.link.mode_telemetry.snapshot()

@@ -792,9 +792,10 @@ class WorkflowOrchestrator:
 
         Returns ``True`` on success, ``False`` when the FSM was stopped.
         """
-        # Relative movement may already have completed before reporting failure.
-        # Replaying it would add a second full stroke.
-        if action in ("press", "lift", "move_lift"):
+        # A missing UART reply does not prove that the MCU missed the frame.
+        # Never replay a physical action after an uncertain outcome.
+        if (getattr(self, "_mechanism_connected", False) and action != "lift health"
+                or action in ("press", "lift", "move_lift")):
             retries = 0
         for attempt in range(retries + 1):
             if not self._fsm.is_running:

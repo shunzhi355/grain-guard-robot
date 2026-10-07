@@ -68,6 +68,9 @@ class FakeLink:
     def mechanism_command(self, command, device):
         self.commands.append(("mechanism", command, device))
 
+    def fail_pending(self, reason):
+        pass
+
     def close(self):
         pass
 

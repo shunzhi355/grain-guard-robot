@@ -18,19 +18,22 @@ class ModeTelemetry:
 
     def feed(self, data):
         for frame in self.parser.feed(data):
-            if frame.kind != p.STATUS or len(frame.payload) != p.STATUS_STRUCT.size:
-                continue
-            status = p.decode_status(frame.payload)
-            # Unsolicited reports may have session=0, including in manual mode.
-            # Only this passive STATUS path ignores the command session token.
-            with self._lock:
-                if self.status is not None and status["boot"] == self.status["boot"]:
-                    delta = (frame.sequence - self.sequence) & 0xffffffff
-                    if not 0 < delta < 0x80000000:
-                        continue  # Replays cannot keep an old displayed mode alive.
-                self.status = status
-                self.sequence = frame.sequence
-                self.received_at = self.clock()
+            self.accept(frame)
+
+    def accept(self, frame):
+        if frame.kind != p.STATUS or len(frame.payload) != p.STATUS_STRUCT.size:
+            return
+        status = p.decode_status(frame.payload)
+        # Unsolicited reports may have session=0, including in manual mode.
+        # Only this passive STATUS path ignores the command session token.
+        with self._lock:
+            if self.status is not None and status["boot"] == self.status["boot"]:
+                delta = (frame.sequence - self.sequence) & 0xffffffff
+                if not 0 < delta < 0x80000000:
+                    return  # Replays cannot keep an old displayed mode alive.
+            self.status = status
+            self.sequence = frame.sequence
+            self.received_at = self.clock()
 
     def snapshot(self):
         """Return one coherent report/time pair; no UART I/O or TX lock."""

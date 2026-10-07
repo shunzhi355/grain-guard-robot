@@ -110,24 +110,28 @@ class MechanismRuntime:
                 logger.exception("Timed conveyor STOP failed")
 
     def _mirrored(self, operation, commands):
-        # These operations only start PWM/timers, so the lock does not span
-        # motion duration. It orders START against emergency STOP_ALL.
+        # A UART reply can take time after USB loss. Do not hold this lock
+        # while waiting: emergency_stop must be able to cancel the pending
+        # request and prevent the local PWM action from starting afterward.
         with self._lock:
             if self.estop_latched:
                 raise RuntimeError("mechanism emergency stop latched")
-            try:
-                if self.serial_command is not None:
-                    for command, device in commands:
-                        self.serial_command(command, device)
+        try:
+            if self.serial_command is not None:
+                for command, device in commands:
+                    self.serial_command(command, device)
+            with self._lock:
+                if self.estop_latched:
+                    raise RuntimeError("mechanism emergency stop latched")
                 return operation()
+        except Exception:
+            # Either output may have started. Stop both and require an
+            # explicit reset, preventing workflow retries from restarting.
+            try:
+                self.emergency_stop()
             except Exception:
-                # Either output may have started. Stop both and require an
-                # explicit reset, preventing workflow retries from restarting.
-                try:
-                    self.emergency_stop()
-                except Exception:
-                    logger.exception("mechanism cleanup after action failure")
-                raise
+                logger.exception("mechanism cleanup after action failure")
+            raise
 
     def set_grain(self, grain: str):
         with self._action_lock:

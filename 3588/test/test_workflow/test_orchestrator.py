@@ -339,7 +339,8 @@ class TestMechanismIntegration:
              patch.object(orch, "_wait_interruptible", return_value=True) as mock_wait:
             orch._handle_open_bin()
         mock_bridge.call_hold_bin_open.assert_called_once_with(1)
-        mock_wait.assert_called_once_with(6.5)
+        assert [call.args[0] for call in mock_wait.call_args_list] == [5.0, 6.5]
+        mock_bridge.call_close_bin.assert_called_once_with(1)
         mock_bridge.call_start_convey.assert_not_called()
         mock_transition.assert_called_with(SamplingAction.SYSTEM_BIN_OPENED)
 
@@ -387,8 +388,8 @@ class TestMechanismIntegration:
         orch._fsm._state = SamplingState.PRESS_AND_SUCTION
         orch._fsm.current_pipe_index = 0
         orch._handle_press_and_suction()
-        # 1 initial attempt + 2 retries
-        assert mock_bridge.call_clamp.call_count == 3
+        # A physical command may have executed despite a lost reply.
+        assert mock_bridge.call_clamp.call_count == 1
         assert orch._fsm.current_state == SamplingState.STOPPED
         # press/suction never started, FSM never auto-advanced past STOPPED
         mock_bridge.call_press.assert_not_called()

@@ -1,6 +1,6 @@
 # 底盘串口控制与拨杆状态回传
 
-当前无 ROS 守护进程还通过同一串口发送 `0x36` 机构动作命令，保留 PCA9685 输出。机构最终编号、STOP/关仓区别及本地执行时长见 [MECHANISM_SERIAL.md](MECHANISM_SERIAL.md)。下文底盘运动帧与遥控状态格式保持不变，ROS 节点相关段落为历史入口说明。
+当前无 ROS 守护进程还通过同一串口发送 `0x38` 可靠机构动作命令，保留 `0x36` 单独调试帧及 PCA9685 输出。机构最终编号、STOP/关仓区别及本地执行时长见 [MECHANISM_SERIAL.md](MECHANISM_SERIAL.md)。下文底盘运动帧与遥控状态格式保持不变，ROS 节点相关段落为历史入口说明。
 
 ## 当前行为
 
@@ -19,10 +19,12 @@ CRC、长度、幅值和同一发送会话内的递增序号仍检查，重复�
 断流后新的有效运动帧可恢复自动输出。档位反馈不等于某条运动指令的执行确认。
 `/chassis/status` 增加真实 `rc_mode`；`execution_confirmed` 仍为 false。
 
+机构指令另有 `0x37` 接受回执。当前无 ROS 守护进程的唯一串口接收线程用同一解析器分发 `STATUS` 和机构回执，发送机构 START/STOP 后按会话及序号等待最多 400 ms；超时则在 10 秒窗口内用相同会话号和序号补发，USB 重连后继续。单片机对 `0x38` 重复帧只补回执，不重复执行动作。明确拒绝或持续无回执才使步骤失败；底盘运动帧仍不等待 ACK。机构回执仅确认 MCU 接受指令，不确认机械到位。
+
 ## 必须更新固件
 
-实际固件工程位于 `D:\Project\底盘\dipan`，输出 `MDK-ARM/dipan/dipan.hex`。
-需烧录新 HEX 才能启用档位回传。STREAM_EFFORT/STREAM_CONTROL 与此前可用版本保持一致，
+实际固件工程位于 `D:\Project\下位机构\机构\MDK-ARM`，输出 `dipan/dipan.hex`。
+需烧录新 HEX 才能启用机构回执；工控机与单片机应成套更新。STREAM_EFFORT/STREAM_CONTROL 与此前可用版本保持一致，
 仍不兼容更早的 SET_EFFORT 固件。
 旧固件不会执行新运动帧；程序无法自动检测固件版本。默认115200/8N1。
 USB-TTL TX→PA3，GND共地；要接收回传，必须连接 STM32 PA2→USB-TTL RX（3.3V TTL）。

@@ -461,8 +461,8 @@ class RobotServer:
             return {"ok": True, "request_id": request_id}
         if kind == "mechanism":
             chassis = self.chassis.status()
-            if chassis["motion_armed"] or chassis["chassis_link"] != "online" or chassis["rc_mode"] != "auto":
-                raise RuntimeError("chassis must be stopped, online and in auto mode")
+            if chassis["motion_armed"] or chassis["rc_mode"] == "manual":
+                raise RuntimeError("chassis must be stopped and in auto mode")
             name = request.get("name")
             if name == "set_grain":
                 self.mechanism.set_grain(str(request.get("grain", "")))

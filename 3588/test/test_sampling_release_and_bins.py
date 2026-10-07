@@ -230,10 +230,11 @@ orch.enable_mechanism()
 orch._run_async = lambda fn: fn() if fn == orch._handle_open_bin else None
 orch._log_sampling_event = lambda *args: None
 def wait(seconds):
-    assert seconds == 6.5
     assert fsm.current_state == S.OPEN_BIN
     frames = Parser().feed(b''.join(port.packets))
-    assert [f.payload for f in frames] == [b'\x01\x05', b'\x01\x05', b'\x02\x03', b'\x02\x04']
+    opening = [b'\x01\x05', b'\x01\x05', b'\x02\x03', b'\x02\x04']
+    assert (seconds, [f.payload for f in frames]) in (
+        (5.0, opening), (6.5, opening + [b'\x02\x05']))
     assert frames[0].sequence != frames[1].sequence
     return True
 orch._wait_interruptible = wait
@@ -248,7 +249,7 @@ try:
     button.click()
     app.processEvents()
     assert fsm.current_state == S.FORMAL_SAMPLING
-    assert len(port.packets) == 4
+    assert len(port.packets) == 5
 finally:
     page.close()
     runtime.close()

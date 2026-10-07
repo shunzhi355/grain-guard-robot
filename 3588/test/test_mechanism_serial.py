@@ -19,17 +19,36 @@ from grain_sampling_workflow.state_machine import SamplingAction, SamplingState,
 
 
 class SerialRecorder:
-    in_waiting = 0
-
     def __init__(self):
         self.writes = []
+        self.rx = bytearray()
+        self.reader = None
         self.closed = False
         self.short = False
+
+    @property
+    def in_waiting(self):
+        return len(self.rx)
+
+    def read(self, size):
+        data = bytes(self.rx[:size])
+        del self.rx[:size]
+        return data
 
     def write(self, packet):
         assert not self.closed
         self.writes.append(packet)
-        return 1 if self.short else len(packet)
+        if self.short:
+            return 1
+        if self.reader is not None:
+            frame = wire.Parser().feed(packet)[0]
+            if frame.kind == mcu.RELIABLE_FRAME_TYPE:
+                command, device = frame.payload
+                reply = mcu.REPLY_STRUCT.pack(frame.session, frame.sequence,
+                                               command, device, 0)
+                self.rx.extend(wire.encode(mcu.REPLY_TYPE, 0, frame.sequence, reply))
+                self.reader.poll_mode()  # Simulate the one production RX worker.
+        return len(packet)
 
     def close(self):
         self.closed = True
@@ -73,6 +92,7 @@ def stack():
     port = SerialRecorder()
     chassis = ChassisController()
     chassis.link = ChassisSerial(port)
+    port.reader = chassis.link
     chassis.mode = "auto"
     local = MechanismController(mock_mode=True)
     runtime = MechanismRuntime(local, serial_command=chassis.mechanism_command)
@@ -110,7 +130,7 @@ def test_runtime_sends_semantic_actions_and_retains_pca(
     port, _, local, runtime = stack
     runtime.execute(action, **args)
     frames = port.frames()
-    assert [(f.kind, tuple(f.payload)) for f in frames] == [(0x36, p) for p in payloads]
+    assert [(f.kind, tuple(f.payload)) for f in frames] == [(mcu.RELIABLE_FRAME_TYPE, p) for p in payloads]
     assert local.pca9685.register_history[pca_channel][-1] == pca_value
     if action in ("start_convey", "convey", "stop_convey"):
         assert local.pca9685.register_history[0] == local.pca9685.register_history[1]
@@ -154,6 +174,67 @@ def test_bin_i2c_failure_stops_both_output_paths(stack, monkeypatch):
     assert runtime.estop_latched and local._stop_flag.is_set()
 
 
+def test_emergency_stop_interrupts_wait_for_missing_uart_reply(stack):
+    port, _, local, runtime = stack
+    original_write = port.write
+    started = threading.Event()
+
+    def drop_replies(packet):
+        frame = wire.Parser().feed(packet)[0]
+        if frame.kind == mcu.RELIABLE_FRAME_TYPE:
+            port.writes.append(packet)
+            started.set()
+            return len(packet)
+        return original_write(packet)
+
+    port.write = drop_replies
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(runtime.execute, "start_convey")
+        assert started.wait(1)
+        runtime.emergency_stop()
+        with pytest.raises(RuntimeError, match="canceled"):
+            pending.result(timeout=1)
+    assert b"\x03\x00" in [frame.payload for frame in port.frames()]
+    assert 1200 not in local.pca9685.register_history.get(0, [])
+
+
+def test_flow_waits_for_reply_and_retries_same_start_before_local_output(stack):
+    port, chassis, local, runtime = stack
+    original_write = port.write
+    first_sent = threading.Event()
+    retry_sent = threading.Event()
+    reliable_packets = []
+
+    def drop_first_reply(packet):
+        frame = wire.Parser().feed(packet)[0]
+        if frame.kind == mcu.RELIABLE_FRAME_TYPE:
+            reliable_packets.append(packet)
+            port.writes.append(packet)
+            if len(reliable_packets) == 1:
+                first_sent.set()
+            else:
+                command, device = frame.payload
+                payload = mcu.REPLY_STRUCT.pack(frame.session, frame.sequence,
+                                                command, device, 0)
+                port.rx.extend(wire.encode(mcu.REPLY_TYPE, 0, frame.sequence, payload))
+                port.reader.poll_mode()
+                retry_sent.set()
+            return len(packet)
+        return original_write(packet)
+
+    port.write = drop_first_reply
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(runtime.execute, "start_convey")
+        assert first_sent.wait(1)
+        assert 1200 not in local.pca9685.register_history.get(0, [])
+        assert not pending.done()
+        assert retry_sent.wait(2)
+        pending.result(timeout=1)
+    assert reliable_packets == [reliable_packets[0]] * 2
+    assert local.pca9685.register_history[0][-1] == 1200
+    assert chassis.status()["last_mechanism_reply"]["attempts"] == 2
+
+
 @pytest.mark.parametrize("grain", ["稻谷", "黄豆"])
 def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(stack, grain):
     port, _, local, runtime = stack
@@ -167,6 +248,10 @@ def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(s
         runtime.execute("start_convey")
         return True
 
+    def close_bin(depth):
+        runtime.execute("close_bin", depth=("shallow", "mid", "deep")[depth])
+        return True
+
     def stop_convey():
         runtime.execute("stop_convey")
         return True
@@ -176,6 +261,7 @@ def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(s
         return True
 
     bridge.call_hold_bin_open.side_effect = open_bin
+    bridge.call_close_bin.side_effect = close_bin
     bridge.call_start_convey.side_effect = start_convey
     bridge.call_stop_convey.side_effect = stop_convey
     bridge.call_close_all_bins.side_effect = close_all_bins
@@ -191,32 +277,32 @@ def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(s
     orch.set_convey_duration(convey_sec)
     waits = []
     opening = [b"\x01\x03", b"\x01\x03", b"\x02\x04", b"\x02\x05"]
+    selected_close = [b"\x02\x03"]
     closing = [b"\x02\x03", b"\x02\x04", b"\x02\x05"]
 
     def wait(seconds):
         waits.append(seconds)
         frames = [f.payload for f in port.frames()]
         if fsm.current_state == SamplingState.OPEN_BIN:
-            assert seconds == 6.5
-            assert frames == opening
+            assert (seconds, frames) in ((5.0, opening), (6.5, opening + selected_close))
         elif seconds == 7:
             assert fsm.current_state == SamplingState.FORMAL_SAMPLING
-            assert frames == opening
+            assert frames == opening + selected_close
         elif seconds == convey_sec:
             assert fsm.current_state == SamplingState.CONVEY_1
-            assert frames == opening + [b"\x01\x02"]
+            assert frames == opening + selected_close + [b"\x01\x02"]
         elif seconds == 6.5:
-            assert frames == opening + [b"\x01\x02"] + closing
+            assert frames == opening + selected_close + [b"\x01\x02"] + closing
             assert all(local.pca9685.register_history[ch][-1] == 1800
                        for ch in (2, 3, 4))
         elif seconds == 0.5:
-            assert frames == opening + [b"\x01\x02"] + closing + [b"\x02\x02"]
+            assert frames == opening + selected_close + [b"\x01\x02"] + closing + [b"\x02\x02"]
         return True
 
     orch._wait_interruptible = wait
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    assert waits == [6.5, 7, convey_sec, 6.5, 0.5]
-    assert [f.payload for f in port.frames()] == opening + [b"\x01\x02"] + closing + [b"\x02\x02"]
+    assert waits == [5.0, 6.5, 7, convey_sec, 6.5, 0.5]
+    assert [f.payload for f in port.frames()] == opening + selected_close + [b"\x01\x02"] + closing + [b"\x02\x02"]
     assert fsm.current_state == SamplingState.CONVEY_DONE
 
 
@@ -349,7 +435,9 @@ def test_emergency_stop_and_shutdown_send_all_stop_and_latch(stack):
     assert port.frames()[-1].payload == b"\x03\x00"
 
 
-def test_short_write_latches_without_starting_pca_or_replaying(stack):
+def test_short_write_retries_until_link_recovers_without_starting_pca(stack, monkeypatch):
+    from grain_sampling_interhost import chassis_controller as module
+    monkeypatch.setattr(module, "MECHANISM_RETRY_WINDOW_S", 0.2)
     port, chassis, local, runtime = stack
     port.short = True
     with pytest.raises(ChassisError, match="short serial write"):
@@ -357,7 +445,7 @@ def test_short_write_latches_without_starting_pca_or_replaying(stack):
     assert runtime.estop_latched
     assert chassis.link is None
     assert True not in local.pca9685.level_history[10]
-    assert [f.payload for f in port.frames()] == [b"\x01\x06", b"\x03\x00"]
+    assert [f.payload for f in port.frames()] == [b"\x01\x06"]
     with pytest.raises(RuntimeError, match="latched"):
         runtime.execute("clamp")
 
@@ -454,10 +542,10 @@ def test_shared_lock_and_sequence_for_concurrent_chassis_and_mechanism_writes(st
     assert len(frames) == 24
     assert len({f.session for f in frames}) == 1 and frames[0].session != 0
     assert [f.sequence for f in frames] == list(range(1, 25))
-    assert {f.kind for f in frames} == {wire.STREAM_CONTROL, 0x36}
+    assert {f.kind for f in frames} == {wire.STREAM_CONTROL, mcu.RELIABLE_FRAME_TYPE}
 
 
-def test_reconnect_neutralizes_mechanisms_without_replaying_start(monkeypatch):
+def test_reconnect_preserves_acknowledged_mechanism_state(monkeypatch):
     from grain_sampling_interhost import chassis_controller as module
 
     ports = []
@@ -469,13 +557,15 @@ def test_reconnect_neutralizes_mechanisms_without_replaying_start(monkeypatch):
 
     chassis = ChassisController(serial_factory=connect)
     monkeypatch.setattr(module.time, "sleep", lambda _: chassis.running.clear())
-    for _ in range(2):
+    for connection in range(2):
         chassis.running.set()
         chassis._loop()
-        assert [(f.kind, f.payload) for f in ports[-1].frames()] == [
-            (wire.STREAM_CONTROL, b"\x06"), (0x36, b"\x03\x00")]
+        expected = [(wire.STREAM_CONTROL, b"\x06")]
+        if connection == 0:
+            expected.append((0x36, b"\x03\x00"))
+        assert [(f.kind, f.payload) for f in ports[-1].frames()] == expected
         chassis.mode = "auto"
-        chassis.mechanism_command(1, 2)
+        chassis.link.mechanism_command(1, 2)
         with chassis.lock:
             chassis._disconnect_locked()
     assert len(ports) == 2
@@ -490,6 +580,7 @@ def test_production_server_injects_shared_uart(monkeypatch):
     chassis = ChassisController()
     port = SerialRecorder()
     chassis.link = ChassisSerial(port)
+    port.reader = chassis.link
     chassis.mode = "auto"
     server = RobotServer(bind_ip="127.0.0.1", allowed_peer="127.0.0.1",
         cert="", key="", ca="", ipc_path="", chassis=chassis)
