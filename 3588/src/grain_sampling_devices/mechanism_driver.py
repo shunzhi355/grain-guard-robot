@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 
 
 def _press_cycle_depths(distance_mm: float) -> list[float]:
-    """Bounded insertion path; extraction traverses these targets in reverse."""
+    """Bounded reciprocating insertion path."""
     down_mm, up_mm = PRESS_DOWN_CM * 10.0, PRESS_UP_CM * 10.0
     if (not all(math.isfinite(v) for v in (down_mm, up_mm, PRESS_PAUSE_S))
             or not down_mm > up_mm >= 0 or PRESS_PAUSE_S < 0):
@@ -872,7 +872,7 @@ class _BaseMechanismController:
         direction : str
             ``up``/``down`` 为单程；``down_cycle`` 保存原点并往复下压，
             ``return`` 回到本轮保存的编码器原点；``extract_prepare`` 松夹时
-            保存上方原点并下降，``extract`` 夹紧后沿往复下压的反向轨迹上提。
+            保存上方 0 位并直接下降，``extract`` 夹紧后直接上升到保存的 0 位。
         distance_cm : float
             移动距离（厘米），必须 > 0。
         duration_s : float | None
@@ -991,11 +991,8 @@ class _BaseMechanismController:
                     limits = getattr(self.lift_drive.config, "limits", None)
                     if distance_mm > float(getattr(limits, "max_distance_mm", 300.0)):
                         raise ValueError("取管总行程超过伺服单段行程限制")
-                    depths = _press_cycle_depths(distance_mm)
                     origin = int(self.lift_drive.read_position())
-                    targets = (origin,) + tuple(
-                        origin - sign * round(depth * counts) for depth in depths
-                    )
+                    targets = (origin, origin - sign * round(distance_mm * counts))
                     self._lift_cycle_origin = origin
                     self._lift_extraction_targets = targets
                     self._lift_extraction_ready = False
@@ -1008,7 +1005,7 @@ class _BaseMechanismController:
                         raise ValueError("取管上提距离必须与下降准备一致")
                     # A failed/uncertain ascent cannot be issued a second time.
                     self._lift_extraction_ready = False
-                    path = tuple(reversed(targets[:-1]))
+                    path = (targets[0],)  # One direct ascent to the saved 0 position.
                 try:
                     for leg, target in enumerate(path):
                         if self._stop_flag.is_set():
@@ -1021,8 +1018,6 @@ class _BaseMechanismController:
                             tolerance_mm=tolerance_mm,
                         )
                         if self._stop_flag.is_set():
-                            raise RuntimeError("取管升降被急停中断")
-                        if leg + 1 < len(path) and self._stop_flag.wait(PRESS_PAUSE_S):
                             raise RuntimeError("取管升降被急停中断")
                     if normalized_direction == "extract_prepare":
                         self._lift_extraction_ready = True

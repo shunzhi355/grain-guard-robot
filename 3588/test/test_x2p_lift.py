@@ -401,7 +401,7 @@ def test_stop_during_pause_prevents_next_leg():
 
 @pytest.mark.parametrize("sign", [1, -1])
 @pytest.mark.parametrize("distance", [0.5, 5.5, 20.0])
-def test_extraction_reverses_insertion_targets_and_returns_to_origin(sign, distance):
+def test_extraction_descends_once_then_ascends_directly_to_saved_zero(sign, distance):
     lift = _FakeCycleLift()
     lift.config = type("Config", (), {"encoder_forward_sign": sign})()
     ctrl = _cycle_controller(lift)
@@ -414,12 +414,27 @@ def test_extraction_reverses_insertion_targets_and_returns_to_origin(sign, dista
     assert lift.position == inserted[-1]
     assert ctrl._lift_cycle_origin == origin
     ctrl.move_lift("extract", distance)
-    assert [entry[0] for entry in lift.absolute_calls] == inserted[::-1] + [origin]
+    assert [entry[0] for entry in lift.absolute_calls] == [inserted[-1], origin]
     assert lift.position == origin
     assert ctrl._lift_cycle_origin is None
     assert ctrl._lift_extraction_targets is None
     assert not ctrl._lift_extraction_ready
     assert not lift.distance_calls
+
+
+def test_direct_extraction_ignores_press_reciprocation_parameters(monkeypatch):
+    monkeypatch.setattr("grain_sampling_devices.mechanism_driver.PRESS_DOWN_CM", 1.0)
+    monkeypatch.setattr("grain_sampling_devices.mechanism_driver.PRESS_UP_CM", 2.0)
+    lift = _FakeCycleLift(position=1234)
+    ctrl = _cycle_controller(lift)
+    ctrl.move_lift("extract_prepare", 20)
+    # Simulated arrival error must not shift the saved upper zero.
+    lift.position += round(1.0 * lift.counts_per_mm)
+    ctrl.move_lift("extract", 20)
+    assert [entry[0] for entry in lift.absolute_calls] == [
+        1234 - round(200 * lift.counts_per_mm), 1234,
+    ]
+    assert ctrl._lift_cycle_origin is None
 
 
 @pytest.mark.parametrize("phase", ["extract_prepare", "extract"])

@@ -105,7 +105,7 @@ _STATE_META: Dict[SamplingState, Tuple[str, str, Tuple[str, ...]]] = {
     ),
     SamplingState.EXTRACT_PIPE: (
         "正在上提取样管",
-        "当前点位采样已完成，正在松夹下降、夹紧并反向上提，请远离运动机构…",
+        "当前点位采样已完成，正在松开、下降到 20cm、夹紧并直接上升到 0 位，请远离运动机构…",
         (),
     ),
     SamplingState.PIPE_SUPPORT_PROMPT: (

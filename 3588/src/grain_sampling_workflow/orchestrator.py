@@ -637,7 +637,7 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_START_EXTRACTION)
 
     def _handle_extract_pipe(self) -> None:
-        """Reverse the press cycle for one pipe; never move to a point with pipes in."""
+        """Unclamp, descend 20 cm, clamp, then ascend directly to the saved 0."""
         if self._fsm.current_state != SamplingState.EXTRACT_PIPE:
             return
         if self._fsm.current_pipe_index == 0:
@@ -650,7 +650,7 @@ class WorkflowOrchestrator:
             d = self._get_mechanism_durations()
             if not self._call_mechanism("lift health", self._bridge.call_lift_health):
                 return
-            # Reverse of clamp -> down_cycle -> unclamp -> return -> clamp.
+            # 松开 → 直接下降到 20cm → 夹紧 → 直接上升到本轮 0 位。
             # Keep the final grip until the operator confirms support.
             if not self._run_mechanism_sequence([
                 ("unclamp", self._bridge.call_unclamp, d["unclamp"]),

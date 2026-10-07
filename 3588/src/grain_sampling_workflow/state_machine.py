@@ -34,7 +34,7 @@ class SamplingState(Enum):
     ALL_DONE_PROMPT = auto()    # 14: 所有点位完成，提示确认返航
     RETURN = auto()             # 15: 自主导航回到起始点，完成
 
-    EXTRACT_PIPE = auto()       # 松夹下降 → 夹紧 → 反向上提一节
+    EXTRACT_PIPE = auto()       # 松夹 → 下降到20cm → 夹紧 → 直接上升到0位
     PIPE_SUPPORT_PROMPT = auto() # 上提完成，等待人工托住管节
     RELEASE_PIPE = auto()       # 拧松接头 → 松夹
     REMOVE_PIPE_PROMPT = auto() # 等待人工取出当前管节
