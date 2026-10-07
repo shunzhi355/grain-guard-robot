@@ -26,7 +26,7 @@ def test_waste_select_sample_convey_close_all_then_stop(grain, depth):
     fsm._state = SamplingState.DISCHARGE_WASTE
     fsm.current_depth_index = depth
     bridge = MagicMock()
-    for name in ("hold_bin_open", "start_suction", "stop_suction",
+    for name in ("hold_bin_open", "close_bin", "start_suction", "stop_suction",
                  "start_convey", "close_all_bins", "stop_convey"):
         getattr(bridge, "call_" + name).side_effect = (
             lambda *args, name=name: events.append((name, args)) or True
@@ -43,7 +43,7 @@ def test_waste_select_sample_convey_close_all_then_stop(grain, depth):
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
     assert events == [
         ("hold_bin_open", (depth,)),
-        ("wait", 6.5),
+        ("wait", 5.0), ("close_bin", (depth,)), ("wait", 6.5),
         ("start_suction", ()), ("wait", 7), ("stop_suction", ()),
         ("start_convey", ()), ("wait", params["convey_duration"]),
         ("close_all_bins", ()), ("wait", 6.5),
@@ -52,7 +52,7 @@ def test_waste_select_sample_convey_close_all_then_stop(grain, depth):
     assert fsm.current_state == SamplingState.CONVEY_DONE
     bridge.call_open_bin.assert_not_called()
     bridge.call_convey.assert_not_called()
-    bridge.call_close_bin.assert_not_called()
+    bridge.call_close_bin.assert_called_once_with(depth)
 
 
 def test_ui_waits_for_mcu_bin_closing_then_enters_formal_sampling():
@@ -72,8 +72,9 @@ def test_ui_waits_for_mcu_bin_closing_then_enters_formal_sampling():
 
     orch._wait_interruptible = wait
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    assert waits == [6.5]
+    assert waits == [5.0, 6.5]
     bridge.call_hold_bin_open.assert_called_once_with(0)
+    bridge.call_close_bin.assert_called_once_with(0)
     bridge.call_start_convey.assert_not_called()
     assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
@@ -86,7 +87,7 @@ def test_stop_during_open_delay_never_starts_conveyor():
     orch.enable_mechanism()
 
     def stop_during_wait(seconds):
-        assert seconds == 6.5
+        assert seconds == 5.0
         fsm.transition(SamplingAction.STOP)
         return False
 
@@ -94,6 +95,7 @@ def test_stop_during_open_delay_never_starts_conveyor():
     orch._handle_open_bin()
     assert fsm.current_state == SamplingState.STOPPED
     bridge.call_start_convey.assert_not_called()
+    bridge.call_close_bin.assert_not_called()
     bridge.call_emergency_stop.assert_called_once()
 
 
@@ -289,11 +291,13 @@ def test_open_stage_waits_for_slower_closing_doors(monkeypatch):
     )
     bridge = MagicMock()
     fsm = MagicMock()
+    fsm.current_depth_index = 0
     orch = WorkflowOrchestrator(fsm, bridge, cloud_client=MagicMock())
     orch.enable_mechanism()
     orch._wait_interruptible = MagicMock(return_value=True)
     orch._handle_open_bin()
-    orch._wait_interruptible.assert_called_once_with(7.5)
+    assert [call.args[0] for call in orch._wait_interruptible.call_args_list] == [5.0, 7.5]
+    bridge.call_close_bin.assert_called_once_with(0)
 
 
 def test_close_all_bridge_uses_registered_service():

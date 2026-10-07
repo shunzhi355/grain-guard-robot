@@ -568,7 +568,7 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def _handle_open_bin(self) -> None:
-        """Open the selected bin, wait for its door, then begin formal sampling."""
+        """Open the selected bin for five seconds, close it, then sample."""
         depth = self._fsm.current_depth_index
         if self._mechanism_connected:
             if not self._call_mechanism(
@@ -576,22 +576,33 @@ class WorkflowOrchestrator:
             ):
                 return  # final failure already stopped the FSM
             params = get_grain_params(self._grain)
-            # UART firmware opens in 5 s and closes in 6 s. Account for
-            # both output paths before formal sampling starts.
-            wait_sec = max(
+            open_sec = max(
                 BIN_OPEN_WAIT_SEC,
                 float(params["open_duration"]),
                 mcu.BIN_OPEN_DURATION_SEC,
+            )
+            close_sec = max(
                 float(params["close_duration"]) + MECHANISM_SETTLE_MARGIN,
                 mcu.BIN_CLOSE_DURATION_SEC + MECHANISM_SETTLE_MARGIN,
             )
-        else:
-            wait_sec = BIN_OPEN_WAIT_SEC
-        if not self._wait_interruptible(wait_sec):
-            if self._mechanism_connected:
+            if not self._wait_interruptible(open_sec):
                 self._bridge.call_emergency_stop()
-            return
-        logger.info("Open bin depth=%d; formal sampling starts after %.1f sec", depth, wait_sec)
+                return
+            if not self._call_mechanism(
+                "close_bin", lambda: self._bridge.call_close_bin(depth)
+            ):
+                return
+            if not self._wait_interruptible(close_sec):
+                self._bridge.call_emergency_stop()
+                return
+            logger.info(
+                "Open bin depth=%d for %.1f sec, close for %.1f sec; formal sampling starts",
+                depth, open_sec, close_sec,
+            )
+        else:
+            if not self._wait_interruptible(BIN_OPEN_WAIT_SEC):
+                return
+            logger.info("Open bin depth=%d; formal sampling starts after %.1f sec", depth, BIN_OPEN_WAIT_SEC)
         self._fsm.transition(SamplingAction.SYSTEM_BIN_OPENED)
 
     def _handle_close_bin(self) -> None:
@@ -732,7 +743,8 @@ class WorkflowOrchestrator:
         params = get_grain_params(self._grain)
         settle = MECHANISM_SETTLE_MARGIN
         return {
-            "clamp": float(params.get("clamp_duration", 3.0)) + settle,
+            "clamp": max(float(params.get("clamp_duration", 3.0)),
+                         mcu.CLAMP_DURATION_SEC if self._mechanism_connected else 0.0) + settle,
             "unclamp": float(params.get("unclamp_duration", 3.0)) + settle,
             "tighten": float(params.get("tighten_duration", 3.0)) + settle,
             "untighten": float(params.get("untighten_duration", 3.0)) + settle,

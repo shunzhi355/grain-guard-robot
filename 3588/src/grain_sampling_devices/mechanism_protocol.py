@@ -13,6 +13,7 @@ BIN_DEVICES = {"shallow": BIN_SHALLOW, "mid": BIN_MID, "deep": BIN_DEEP}
 # Local firmware timings from robot/mechanism.h; UART does not carry duration.
 BIN_OPEN_DURATION_SEC = 5.0
 BIN_CLOSE_DURATION_SEC = 6.0
+CLAMP_DURATION_SEC = 3.0
 UNCLAMP_DURATION_SEC = 4.0
 
 

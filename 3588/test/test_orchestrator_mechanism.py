@@ -236,7 +236,7 @@ def test_press_cycle_durations_from_grain_config(monkeypatch):
 
     # 5 步等待 = [clamp, servo(press), unclamp, servo(lift), clamp(再夹紧)]
     # 每步 = 动作时长 + 停稳余量 0.5s
-    assert durations == [3.0, 2.5, 2.0, 2.5, 3.0]
+    assert durations == [3.5, 2.5, 2.0, 2.5, 3.5]
     assert bridge.calls == [
         "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
@@ -268,7 +268,7 @@ def test_add_pipe_durations_from_grain_config(monkeypatch):
     orch._handle_repeat_until_depth()
 
     # 时长 = 品种配置 + 停稳余量 0.5s
-    assert durations == [4.5, 2.0, 3.0]
+    assert durations == [4.5, 2.0, 3.5]
     assert bridge.calls == ["tighten", "unclamp", "clamp"]
 
 
@@ -280,9 +280,9 @@ def test_unknown_grain_falls_back_to_defaults(monkeypatch):
 
     orch._handle_press_and_suction()
 
-    # clamp 2.0 + 停稳余量 0.5 = 2.5；servo(press/lift) 回退 clamp=2.0 → 2.5；
+    # MCU clamp 3.0 + 停稳余量 0.5 = 3.5；servo(press/lift) 回退 clamp=2.0 → 2.5；
     # unclamp 5.0 + 0.5 = 5.5
-    assert durations == [2.5, 2.5, 5.5, 2.5, 2.5]
+    assert durations == [3.5, 2.5, 5.5, 2.5, 3.5]
     assert bridge.calls == [
         "lift_health", "clamp", "move_lift:down_cycle:20", "unclamp", "move_lift:return:20",
         "clamp", "start_suction",
