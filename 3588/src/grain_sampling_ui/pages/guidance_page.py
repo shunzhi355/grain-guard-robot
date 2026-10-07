@@ -90,7 +90,7 @@ _STATE_META: Dict[SamplingState, Tuple[str, str, Tuple[str, ...]]] = {
     ),
     SamplingState.OPEN_BIN: (
         "开启对应仓口",
-        "废粮已排完，正在打开对应仓门；等待 5 秒后进入正式采样…",
+        "废粮已排完，正在发送两次开仓指令并关闭其他仓门；仓门动作结束后进入正式采样…",
         (),
     ),
     SamplingState.CONVEY_DONE: (

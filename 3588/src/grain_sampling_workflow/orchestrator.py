@@ -23,6 +23,7 @@ from grain_sampling_workflow.state_machine import (
 )
 from grain_sampling_workflow.mechanism_config import get_grain_params
 from grain_sampling_workflow.robot_bridge import RobotBridge as SamplingBridge
+from grain_sampling_devices import mechanism_protocol as mcu
 from grain_sampling_cloud.http_client import CloudConnectionError, CloudHttpClient, CloudProtocolError
 from grain_sampling_cloud.protocol import ApiPath, DetectionResult, OrderInfo, ReportStatus, StatusReportRequest
 
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 #: 否则下一步会与仍在转的机构冲突。
 MECHANISM_SETTLE_MARGIN: float = 0.5
 
-#: 开仓指令发出后，UI 保持开仓阶段至少 5 秒，再进入正式采样。
+#: 开仓指令发出后至少等待 5 秒；另须覆盖其他仓门的关仓时间。
 BIN_OPEN_WAIT_SEC: float = 5.0
 
 #: 单次下压/上升距离（厘米）。X2P 伺服单次 move_lift ≤ 30cm
@@ -540,7 +541,8 @@ class WorkflowOrchestrator:
                     "close_all_bins", self._bridge.call_close_all_bins
                 ):
                     return
-                close_sec = float(get_grain_params(self._grain)["close_duration"])
+                close_sec = max(float(get_grain_params(self._grain)["close_duration"]),
+                                mcu.BIN_CLOSE_DURATION_SEC) + MECHANISM_SETTLE_MARGIN
                 if not self._wait_interruptible(close_sec):
                     return
                 if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
@@ -574,12 +576,14 @@ class WorkflowOrchestrator:
             ):
                 return  # final failure already stopped the FSM
             params = get_grain_params(self._grain)
-            # The default door pulse lasts 5 s.  Longer configured door
-            # movements must also finish before formal sampling starts.
+            # UART firmware opens in 5 s and closes in 6 s. Account for
+            # both output paths before formal sampling starts.
             wait_sec = max(
                 BIN_OPEN_WAIT_SEC,
                 float(params["open_duration"]),
+                mcu.BIN_OPEN_DURATION_SEC,
                 float(params["close_duration"]) + MECHANISM_SETTLE_MARGIN,
+                mcu.BIN_CLOSE_DURATION_SEC + MECHANISM_SETTLE_MARGIN,
             )
         else:
             wait_sec = BIN_OPEN_WAIT_SEC

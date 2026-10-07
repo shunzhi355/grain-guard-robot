@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import threading
 import logging
+import time
 
 from grain_sampling_devices.mechanism_driver import MechanismController
 from grain_sampling_devices import mechanism_protocol as mcu
@@ -27,6 +28,8 @@ class MechanismRuntime:
         self._lock = threading.RLock()
         self._action_lock = threading.Lock()
         self._convey_timer = None
+        self._grip_action: str | None = None
+        self._unclamp_finish_at = 0.0
 
     def start(self):
         # The real reciprocating press defaults to 30 r/min.  Allow a bounded
@@ -70,6 +73,7 @@ class MechanismRuntime:
     def emergency_stop(self):
         with self._lock:
             self.estop_latched = True
+            self._grip_action = None
             self._cancel_convey_timer()
             try:
                 self._serial_stop_all()
@@ -145,6 +149,47 @@ class MechanismRuntime:
             )
             self.grain = grain
             self.estop_latched = False
+            self._grip_action = None
+
+    def _wait_for_unclamp(self):
+        """Return motion requires a completed release on both output paths.
+
+        There is no jaw-position feedback. This checks the release command,
+        its configured/MCU duration, and completion of the local clamp timer.
+        """
+        with self._lock:
+            if self._grip_action != "unclamp":
+                raise RuntimeError("回零前没有松夹动作，禁止带管上升")
+            finish_at = self._unclamp_finish_at
+        deadline = finish_at + 1.0
+        while True:
+            with self._lock:
+                if self.estop_latched or self._grip_action != "unclamp":
+                    raise RuntimeError("松夹等待已停止，禁止回零")
+            with self.controller._lock:
+                if self.controller._stop_flag.is_set():
+                    raise RuntimeError("松夹等待被急停中断")
+                active = self.controller._clamp_timer is not None
+            remaining = finish_at - time.monotonic()
+            if remaining <= 0 and not active:
+                logger.info("UNCLAMP_COMPLETE_BEFORE_RETURN")
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("松夹定时动作未结束，禁止回零")
+            if self.controller._stop_flag.wait(min(0.05, max(remaining, 0.001))):
+                raise RuntimeError("松夹等待被急停中断")
+
+    @staticmethod
+    def _bin_commands(action: str, depth: str):
+        device = mcu.BIN_DEVICES[depth]
+        if action == "close_bin":
+            return ((mcu.STOP, device),)
+        # Two immediate opening frames, each with its own UART sequence.
+        commands = [(mcu.START, device), (mcu.START, device)]
+        if action == "hold_bin_open":
+            commands.extend((mcu.STOP, other) for other in mcu.BIN_DEVICES.values()
+                            if other != device)
+        return tuple(commands)
 
     def execute(self, action: str, **args):
         with self._action_lock:
@@ -161,10 +206,9 @@ class MechanismRuntime:
             depth = args.get("depth")
             if depth not in DEPTHS:
                 raise ValueError("invalid bin depth")
-            # Bin doors are wired to the RK3588 I2C PCA9685 only.
             return self._mirrored(
                 lambda: getattr(self.controller, action)(depth=depth),
-                (),
+                self._bin_commands(action, depth),
             )
         if action == "move_lift":
             direction = args.get("direction")
@@ -174,6 +218,16 @@ class MechanismRuntime:
                 raise ValueError("invalid lift movement")
             if self.controller.lift_drive is None:
                 raise RuntimeError("X2P lift unavailable")
+            if direction == "down_cycle":
+                # A previous pipe's release cannot authorize this pipe's return.
+                with self._lock:
+                    self._grip_action = None
+            if direction == "return":
+                try:
+                    self._wait_for_unclamp()
+                except Exception:
+                    self.emergency_stop()
+                    raise
             return self.controller.move_lift(direction, distance)
         durations = get_grain_params(self.grain)
         if action == "convey":
@@ -213,9 +267,19 @@ class MechanismRuntime:
                 # Firmware has no reverse-twist action. Stop MCU tightening
                 # and leave the existing PCA9685 reverse action in place.
                 "untighten": ((mcu.STOP, mcu.TIGHTEN),),
-                "open_bin_default": (),
+                "open_bin_default": self._bin_commands("open_bin", "mid"),
             }
-            return self._mirrored(lambda: method(duration=durations[key]), commands[action])
+            result = self._mirrored(lambda: method(duration=durations[key]), commands[action])
+            if action in ("clamp", "unclamp"):
+                with self._lock:
+                    if not self.estop_latched:
+                        self._grip_action = action
+                        if action == "unclamp":
+                            self._unclamp_finish_at = time.monotonic() + max(
+                                float(durations[key]),
+                                mcu.UNCLAMP_DURATION_SEC if self.serial_command is not None else 0.0,
+                            )
+            return result
         direct = {
             "start_suction": self.controller.fan,
             "stop_suction": lambda: self.controller.actuate(7, "stop"),
@@ -230,7 +294,7 @@ class MechanismRuntime:
         commands = {
             "start_convey": ((mcu.START, mcu.CONVEY),),
             "stop_convey": ((mcu.STOP, mcu.CONVEY),),
-            "close_all_bins": (),
+            "close_all_bins": tuple((mcu.STOP, device) for device in mcu.BIN_DEVICES.values()),
         }
         if action in commands:
             if action in ("start_convey", "stop_convey"):

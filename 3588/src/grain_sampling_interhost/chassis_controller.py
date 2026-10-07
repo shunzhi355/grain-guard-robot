@@ -101,12 +101,13 @@ class ChassisController:
     def mechanism_command(self, command: int, device: int):
         """Immediate, serialized send; no queued actions survive a reconnect."""
         mechanism.command_payload(command, device)
-        if device in mechanism.BIN_DEVICES.values():
-            raise ValueError("bin doors are controlled by the RK3588 I2C PCA9685")
         with self.lock:
             if self.link is None:
                 raise RuntimeError("STM32 mechanism serial link unavailable")
-            moving = command == mechanism.START
+            # STOP on a bin means powered closing, unlike a conveyor STOP.
+            moving = command == mechanism.START or (
+                command == mechanism.STOP and device in mechanism.BIN_DEVICES.values()
+            )
             if moving and (self.estop_latched or self.epoch is not None or self.mode != "auto"):
                 raise RuntimeError("STM32 mechanism requires stopped chassis, auto mode and no estop")
             try:
