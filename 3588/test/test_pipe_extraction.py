@@ -51,7 +51,7 @@ def test_every_pipe_removed_before_next_point_or_return(points, hardware):
             call("extract_prepare", 20), call("extract", 20),
         ]
         bridge.call_untighten.assert_called_once()  # Bottom pipe has no added joint.
-        assert bridge.call_unclamp.call_count == 4
+        assert bridge.call_unclamp.call_count == 3  # Initial release + one per removed pipe.
     else:
         bridge.call_move_lift.assert_not_called()
 
@@ -72,6 +72,54 @@ def test_exact_removal_order_and_operator_waits():
     assert not orch._pipe_clamped
     assert fsm.current_state == S.REMOVE_PIPE_PROMPT
     assert fsm.current_pipe_index == 2
+
+
+@pytest.mark.parametrize("pipes", [2, 3, 6])
+def test_confirmed_removal_lowers_next_pipe_without_repeating_release(pipes):
+    orch, fsm, bridge = make_flow(pipes=pipes)
+    orch._handle_next_check()
+    for remaining in range(pipes, 0, -1):
+        assert fsm.current_state == S.PIPE_SUPPORT_PROMPT
+        fsm.transition(A.CONFIRM_PIPE_SUPPORTED)
+        assert fsm.current_state == S.REMOVE_PIPE_PROMPT
+        assert orch._pipe_clamped is False
+        bridge.reset_mock()
+        fsm.transition(A.CONFIRM_PIPE_REMOVED)
+        if remaining > 1:
+            assert bridge.method_calls == [
+                call.call_lift_health(), call.call_move_lift("extract_prepare", 20),
+                call.call_clamp(), call.call_move_lift("extract", 20),
+            ]
+            bridge.call_unclamp.assert_not_called()
+            assert fsm.current_state == S.PIPE_SUPPORT_PROMPT
+        else:
+            assert fsm.current_state == S.NAVIGATE_TO_POINT
+            assert bridge.method_calls == []
+
+
+@pytest.mark.parametrize("grip", [None, True, False])
+def test_extraction_skips_initial_unclamp_only_when_release_is_known(grip):
+    orch, fsm, bridge = make_flow()
+    orch._pipe_clamped = grip
+    orch._handle_next_check()
+    assert bridge.call_unclamp.call_count == (0 if grip is False else 1)
+    assert fsm.current_state == S.PIPE_SUPPORT_PROMPT
+    assert orch._pipe_clamped is True
+
+
+def test_interrupted_unclamp_does_not_mark_grip_released():
+    orch, fsm, bridge = make_flow()
+    orch._pipe_clamped = True
+    def stop_while_releasing(seconds):
+        assert orch._pipe_clamped is None
+        fsm.stop()
+        return False
+    orch._wait_interruptible = stop_while_releasing
+    orch._handle_next_check()
+    assert orch._pipe_clamped is None
+    assert fsm.current_state == S.STOPPED
+    bridge.call_unclamp.assert_called_once()
+    bridge.call_move_lift.assert_not_called()
 
 
 def test_next_depth_does_not_start_removal():
@@ -206,7 +254,15 @@ def test_production_bridge_runtime_and_lift_complete_insert_then_extract(monkeyp
             assert lift.position == 1234
             fsm.transition(A.CONFIRM_PIPE_SUPPORTED)
             assert fsm.current_state == S.REMOVE_PIPE_PROMPT
+            command_index = len(commands)
             fsm.transition(A.CONFIRM_PIPE_REMOVED)
+            if remaining > 1:
+                assert commands[command_index:] == [
+                    ("lift_health", {}),
+                    ("move_lift", {"direction": "extract_prepare", "distance_cm": 20}),
+                    ("clamp", {}),
+                    ("move_lift", {"direction": "extract", "distance_cm": 20}),
+                ]
         assert fsm.current_state == S.ALL_DONE_PROMPT
         assert fsm.current_pipe_index == 0
         assert not runtime.requires_mechanical_reset()

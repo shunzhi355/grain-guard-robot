@@ -98,7 +98,8 @@ class WorkflowOrchestrator:
         self._mechanism_connected: bool = False  # placeholder: no hardware
         self._grain: str = ""  # grain variety reported to the mechanism at task start
         self._mechanism_retry_interval: float = 0.5  # backoff between mechanism retries
-        self._pipe_clamped = False  # True only after a completed clamp command.
+        # None means unknown; True/False follow completed clamp/unclamp actions.
+        self._pipe_clamped: Optional[bool] = None
 
         # ── Depth live display callback (task D) ────────────
         self.depth_callback: Optional[Callable[[float], None]] = None
@@ -247,7 +248,7 @@ class WorkflowOrchestrator:
 
         if current in (SamplingState.INIT, SamplingState.ARRIVED_PROMPT,
                        SamplingState.STOPPED):
-            self._pipe_clamped = False
+            self._pipe_clamped = None
 
         # ── Depth live display (task D) ────────────────────
         if self.depth_callback is not None:
@@ -652,12 +653,17 @@ class WorkflowOrchestrator:
                 return
             # 松开 → 直接下降到 20cm → 夹紧 → 直接上升到本轮 0 位。
             # Keep the final grip until the operator confirms support.
-            if not self._run_mechanism_sequence([
-                ("unclamp", self._bridge.call_unclamp, d["unclamp"]),
+            steps = []
+            # Release already finished before the preceding removal prompt.
+            # Reuse that state when lowering for the next pipe.
+            if self._pipe_clamped is not False:
+                steps.append(("unclamp", self._bridge.call_unclamp, d["unclamp"]))
+            steps.extend([
                 ("move_lift", lambda: self._bridge.call_move_lift("extract_prepare", PRESS_STEP_CM), d["servo"]),
                 ("clamp", self._bridge.call_clamp, d["clamp"]),
                 ("move_lift", lambda: self._bridge.call_move_lift("extract", PRESS_STEP_CM), d["servo"]),
-            ]):
+            ])
+            if not self._run_mechanism_sequence(steps):
                 return
         elif not self._wait_interruptible(0.5):
             return
@@ -743,6 +749,8 @@ class WorkflowOrchestrator:
         the FSM has already been stopped in that case.
         """
         for name, call, duration in steps:
+            if name in ("clamp", "unclamp"):
+                self._pipe_clamped = None  # In-progress movement is not confirmed.
             if not self._call_mechanism(name, call):
                 return False  # final failure already stopped the FSM
             if not self._wait_interruptible(float(duration)) or not self._fsm.is_running:
