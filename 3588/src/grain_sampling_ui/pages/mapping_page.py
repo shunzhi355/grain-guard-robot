@@ -37,7 +37,7 @@ from grain_sampling_workflow.map_save import (
     snapshot_map,
 )
 
-PCD_DIR = os.path.expanduser("~/fastlio2_ws/src/S-FAST_LIO/PCD")
+PCD_DIR = os.path.expanduser(os.getenv("SFAST_PCD_DIR", "~/fastlio2_ws/src/S-FAST_LIO/PCD"))
 _logger = logging.getLogger(__name__)
 
 

@@ -3,6 +3,7 @@ import secrets
 import struct
 import threading
 import time
+from contextlib import nullcontext
 
 from . import chassis_protocol as p
 from . import mechanism_protocol as mechanism
@@ -91,12 +92,15 @@ class ChassisSerial:
         return self.send(p.STREAM_CONTROL, bytes((kind,)))
 
     def mechanism_command(self, command, device, *, confirm=False, timeout=0.4,
-                          sequence=None):
+                          sequence=None, write_guard=None):
         """Send once; caller can resend the same sequence after a lost reply."""
         payload = mechanism.command_payload(command, device)
         if not confirm:
-            return self.send(mechanism.FRAME_TYPE, payload)
-        with self._tx_lock:
+            with (write_guard if write_guard is not None else nullcontext()):
+                return self.send(mechanism.FRAME_TYPE, payload)
+        # Optional supervisor guard covers only the write, never the ACK wait.
+        # This orders a checked action before/after ESTOP without blocking RX.
+        with (write_guard if write_guard is not None else nullcontext()), self._tx_lock:
             if sequence is None:
                 self.sequence = (self.sequence + 1) & 0xffffffff
                 sequence = self.sequence

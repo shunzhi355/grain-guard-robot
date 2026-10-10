@@ -159,6 +159,7 @@ class MotionController:
         *,
         monitor_interval_s: float = 0.10,
         output: Callable[[str], None] | None = print,
+        cancel_check: Callable[[], None] | None = None,
     ):
         self.drive = drive
         self.config = config or ControllerConfig()
@@ -172,6 +173,9 @@ class MotionController:
             raise ValueError("monitor_interval_s必须是大于0的有限数字")
         self.monitor_interval_s = monitor_interval_s
         self.output = output
+        # Optional local supervisor interlock. It must raise when revoked;
+        # stop() deliberately never calls it, so cleanup remains possible.
+        self.cancel_check = cancel_check
         self.state = MotionState.UNKNOWN
         # Position-table parameters are invariant for the lifetime of this
         # controller. A completed move already performs a verified stop, so
@@ -180,6 +184,10 @@ class MotionController:
         self._position_static_ready = False
         self._position_forced_inputs = 0
         self._position_static_rpm: int | None = None
+
+    def _check_cancelled(self) -> None:
+        if self.cancel_check is not None:
+            self.cancel_check()
 
     def _emit(self, message: str) -> None:
         if self.output is not None:
@@ -234,6 +242,7 @@ class MotionController:
         last_status = 0
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
+            self._check_cancelled()
             self._check_not_faulted()
             last_status = self._status()
             if last_status == DriveStatus.RUN:
@@ -459,6 +468,7 @@ class MotionController:
         )
 
     def _enable_and_verify(self, additional_forced_inputs: int = 0) -> None:
+        self._check_cancelled()
         self.drive.servo_on(additional_forced_inputs)
         self._wait_enabled(ENABLE_VERIFY_TIMEOUT_S)
         self.state = MotionState.RUNNING
@@ -784,6 +794,7 @@ class MotionController:
         for attempt in range(3):
             if attempt:
                 time.sleep(0.10)
+            self._check_cancelled()
             value = self.drive.read_registers(Register.POSITION_SEGMENT)[0]
             readbacks.append(value)
             if value == 1:
@@ -852,6 +863,7 @@ class MotionController:
         start_position = 0
         phase = "prepare"
         try:
+            self._check_cancelled()
             forced_inputs = self._prepare_position_move(rpm)
             phase = "write_target"
             self.drive.write_signed32(Register.PR1_PULSES, signed_pulses)
@@ -880,6 +892,7 @@ class MotionController:
             # non-zero.  Board testing proved mode 6 + DI2/CTRG was ignored,
             # while this path moved the encoder on the same 5 mm command.
             phase = "trigger_segment"
+            self._check_cancelled()
             self.drive.write_register(Register.POSITION_SEGMENT, 1)
             phase = "verify_segment"
             self._verify_position_segment_selected()
@@ -887,6 +900,7 @@ class MotionController:
             deadline = time.monotonic() + timeout
             settled = 0
             while time.monotonic() < deadline:
+                self._check_cancelled()
                 actual = self._actual_speed()
                 peak = max(peak, abs(actual))
                 position = self.drive.read_signed32(

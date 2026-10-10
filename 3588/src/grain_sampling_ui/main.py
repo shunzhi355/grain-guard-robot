@@ -512,13 +512,21 @@ class MainWindow(QMainWindow):
         # Local tasks keep a legacy 'id' field; prefer it over 'order_id'
         order_id = task_data.get("id") or task_data.get("order_id")
         fake_navigation = _env_flag("GRAIN_SAMPLING_UI_FAKE_NAVIGATION")
+        local_operator = False
+        if _env_flag("GRAIN_LOCAL_RUNTIME"):
+            from grain_sampling_workflow.robot_bridge import RobotClient
+            try:
+                local_operator = RobotClient().request("status").get("test_navigation_mode") is True
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._alarm_bar.set_alarm(f"联想本机硬件服务未就绪：{exc}")
+                return
 
         # ── Warehouse-based map switching ──
         warehouse = task_data.get("warehouse", "")
         skip_mapping = bool(task_data.get("skip_mapping")) and _env_flag(
             "GRAIN_SAMPLING_UI_SKIP_MAPPING"
         )
-        if skip_mapping:
+        if skip_mapping or local_operator:
             logger.warning("Skipping map relocalization for commissioning task %s", order_id)
         elif fake_navigation:
             logger.info("Fake navigation: map relocalization is not required for task %s", order_id)
@@ -613,6 +621,7 @@ class MainWindow(QMainWindow):
 
         # Attach to guidance page
         self._guidance_page.set_fake_navigation_mode(fake_navigation)
+        self._guidance_page._local_operator_navigation = local_operator
         self._guidance_page.attach_orchestrator(fsm, orchestrator)
 
         # Persist the running task so a reboot can detect & abandon it.
@@ -750,6 +759,19 @@ class MainWindow(QMainWindow):
             if self._ros_value is not None:
                 self._ros_value.setText("\u672a\u8fd0\u884c")
 
+    @Slot(dict)
+    def _on_local_runtime_status(self, status: dict) -> None:
+        """Do not label a local socket or simulated peer as running navigation."""
+        if status.get("runtime") != "lenovo-local":
+            return
+        simulation = status.get("simulation") is True
+        self._net_value.setText("模拟硬件" if simulation else "本机直连")
+        self._update_dot(self._net_dot, QColor("#D4A72C" if simulation else "#2EA043"))
+        self.setWindowTitle("粮食扦样机器人 — 联想本机" + ("模拟（无硬件）" if simulation else "直连"))
+        operator = status.get("test_navigation_mode") is True
+        self._ros_value.setText("人工到位" if operator else "定位输入" if status.get("lenovo_online") else "未就绪")
+        self._update_dot(self._ros_dot, QColor("#D4A72C" if operator else "#8B949E"))
+
     def set_speed(self, speed_ms: float) -> None:
         """Update robot speed display in the status bar."""
         if self._speed_value is not None:
@@ -779,6 +801,8 @@ class MainWindow(QMainWindow):
             return
         self._ros_thread = RobotEventThread()
         self._ros_thread.connection_changed.connect(self.set_connected)
+        if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
+            self._ros_thread.local_runtime_updated.connect(self._on_local_runtime_status)
         self._ros_thread.error.connect(self._alarm_bar.set_alarm)
         self._ros_thread.safety_status_updated.connect(self._on_safety_status)
         self._ros_thread.rc_mode_updated.connect(self._on_rc_mode_mirror)
@@ -788,7 +812,11 @@ class MainWindow(QMainWindow):
         )
         self._map_page.set_ros_thread(self._ros_thread)
         if self._mapping_page is not None:
-            slam_bridge = SlamBridge()
+            if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
+                from grain_sampling_local.slam import LocalSlamBridge
+                slam_bridge = LocalSlamBridge()
+            else:
+                slam_bridge = SlamBridge()
             self._slam_bridge = slam_bridge
             self._mapping_page.set_slam_bridge(slam_bridge)
         self._setup_rc_control()
@@ -813,6 +841,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         """Clean up on window close."""
+        if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
+            from grain_sampling_workflow.robot_bridge import RobotClient
+            try:
+                RobotClient().request("estop")
+            except (OSError, RuntimeError, ValueError):
+                logger.exception("Local UI shutdown stop unconfirmed")
         self.stop_ros()
         super().closeEvent(event)
 

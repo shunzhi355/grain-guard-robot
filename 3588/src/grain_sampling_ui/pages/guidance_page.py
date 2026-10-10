@@ -157,6 +157,7 @@ _BUTTON_ACTION_MAP: Dict[str, SamplingAction] = {
 }
 
 _BUTTON_LABELS: Dict[str, str] = {
+    "CONFIRM_LOCAL_ARRIVAL": "确认静止到位",
     "CONFIRM_READY": "已就绪",
     "CONFIRM_PIPE_ADDED": "已加管",
     "CONFIRM_WASTE_DISCHARGED": "废粮已排完",
@@ -453,6 +454,16 @@ class GuidancePage(QWidget):
     @Slot()
     def _on_user_action(self, button_name: str) -> None:
         """Handle a user action button click."""
+        if button_name == "CONFIRM_LOCAL_ARRIVAL" and getattr(self, "_local_operator_navigation", False):
+            from grain_sampling_workflow.robot_bridge import RobotClient
+            try:
+                client = RobotClient()
+                status = client.request("status")
+                goal_id = (status.get("navigation") or {}).get("goal_id")
+                client.request("test_arrive", goal_id=goal_id)
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._detail.setText(f"到位确认失败：{exc}")
+            return
         if self._fsm is None:
             return
         action = _BUTTON_ACTION_MAP.get(button_name)
@@ -609,6 +620,12 @@ class GuidancePage(QWidget):
             return
 
         title_text, detail_text, button_names = meta
+        if getattr(self, "_local_operator_navigation", False) and state in (
+            SamplingState.NAVIGATE_TO_POINT, SamplingState.RETURN,
+        ):
+            title_text = "联想本机机构联调：等待到位确认"
+            detail_text = "此模式不驱动底盘。确认底盘静止、现场安全后继续；不代表自主导航通过。"
+            button_names = ("CONFIRM_LOCAL_ARRIVAL",)
         if getattr(self, "_fake_navigation_mode", False) and state in (
             SamplingState.NAVIGATE_TO_POINT, SamplingState.RETURN,
         ):

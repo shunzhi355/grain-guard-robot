@@ -1,0 +1,17 @@
+{
+  "stm32_port": "",
+  "x2p_port": "",
+  "x2p_slave": 2,
+  "lift_rpm": 30,
+  "forward_sign": 1,
+  "navigation_mode": "operator",
+  "suction_policy": "required",
+  "acknowledge_legacy_untighten": false,
+  "runtime_dir": "",
+  "odom_topic": "/Odometry",
+  "cloud_topic": "/cloud_registered_body",
+  "localization_valid_topic": "/grain/localization_valid",
+  "map_frame": "camera_init",
+  "map_id": "",
+  "ros_image": "grain-nav:noetic-x86"
+}
