@@ -160,6 +160,41 @@ def test_reset_returns_without_reply_and_only_new_status_can_relatch():
         controller.close()
 
 
+def test_confirmed_reset_ignores_old_estop_and_waits_for_new_clear_status():
+    controller, port = connected_controller()
+    controller.start()
+    try:
+        port.inject(report(flags=6, sequence=2))
+        eventually(lambda: controller.link.mode_telemetry.sequence == 2)
+        controller.estop_latched = True
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reset = pool.submit(controller.clear_estop, confirm_status=True)
+            eventually(lambda: any(f.payload == bytes((wire.CLEAR_ESTOP,))
+                                   for f in port.frames()))
+            port.inject(report(flags=6, sequence=3))
+            eventually(lambda: controller.link.mode_telemetry.sequence == 3)
+            assert not reset.done() and controller.estop_latched
+            port.inject(report(flags=4, sequence=4))
+            reset.result(timeout=1)
+        assert not controller.estop_latched
+    finally:
+        controller.close()
+
+
+def test_confirmed_reset_times_out_without_fresh_safe_status():
+    controller, port = connected_controller()
+    controller.start()
+    try:
+        port.inject(report(flags=6, sequence=2))
+        eventually(lambda: controller.link.mode_telemetry.sequence == 2)
+        controller.estop_latched = True
+        with pytest.raises(RuntimeError, match="not confirmed"):
+            controller.clear_estop(confirm_status=True, timeout_s=0.2)
+        assert controller.estop_latched
+    finally:
+        controller.close()
+
+
 @pytest.mark.parametrize("failure", ["short", "io"])
 def test_reset_write_failure_keeps_latch_and_disconnects(failure):
     controller, port = connected_controller()

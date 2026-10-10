@@ -66,6 +66,26 @@ def test_ui_heartbeat_loss_stops_conveyor(stack):
         service.local_request({"action": "mechanism", "name": "clamp"})
 
 
+def test_operator_reset_waits_for_mcu_clear_status(stack):
+    service, _, _ = stack
+    service.trip("operator emergency stop")
+    assert service.chassis.estop_latched
+    assert service.local_request({
+        "action": "clear_estop", "mechanical_reset_confirmed": True,
+    })["ok"]
+    assert not service.chassis.estop_latched
+    assert not service.latched
+    task(service)
+
+
+def test_host_estop_latch_is_not_reported_as_current_mcu_fault(stack):
+    service, stm32, _ = stack
+    assert not stm32.estop
+    service.chassis.estop_latched = True
+    with pytest.raises(RuntimeError, match="local chassis emergency-stop latch active"):
+        service.check()
+
+
 def test_disk_full_cannot_prevent_emergency_stop(stack, monkeypatch):
     service, stm32, _ = stack
     task(service)

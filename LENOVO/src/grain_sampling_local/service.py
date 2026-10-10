@@ -111,10 +111,15 @@ class LocalRobotService:
             # position segment. Other MCU faults and ESTOP still cancel it.
             faults = (state["faults"] if require_rc_auto else
                       state["faults"] & ~STM32_RC_FAULT)
-            if self.chassis.estop_latched or state["flags"] & 2 or faults:
+            if state["flags"] & 2 or faults:
                 raise RuntimeError(
                     f"STM32 emergency stop/fault: flags={state['flags']} "
                     f"faults={state['faults']}"
+                )
+            if self.chassis.estop_latched:
+                raise RuntimeError(
+                    "local chassis emergency-stop latch active; "
+                    "inspect the robot and use Fault Reset before a new task"
                 )
             if require_rc_auto and link.mode_telemetry.mode() != "auto":
                 raise RuntimeError(
@@ -357,7 +362,7 @@ class LocalRobotService:
                 if state["rc_mode"] != "auto" or state["faults"] != 0 or state["motion_armed"]:
                     raise RuntimeError("reset requires online fresh auto RC and no faults/motion")
                 self.mechanism.controller.lift_drive.stop()
-                self.chassis.clear_estop()
+                self.chassis.clear_estop(confirm_status=True)
                 self.mechanism.reset(self.mechanism.grain, mechanical_reset_confirmed=True)
                 with self.chassis.lock:
                     self._baseline_link = self.chassis.link

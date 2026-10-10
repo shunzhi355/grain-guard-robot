@@ -231,14 +231,21 @@ class ChassisController:
                 except (OSError, RuntimeError):
                     self._disconnect_locked()
 
-    def clear_estop(self):
-        """Send reset once and release the local latch; never wait for MCU ACK."""
+    def clear_estop(self, *, confirm_status: bool = False, timeout_s: float = 1.5):
+        """Send reset once; optionally require a fresh cleared MCU status.
+
+        CLEAR_ESTOP is one-way, so an accepted write is not proof that the MCU
+        accepted the reset. The Lenovo UI uses passive STATUS confirmation;
+        the legacy 3588 caller keeps its previous non-waiting behavior.
+        """
         with self.lock:
             if self.link is None or self.mode != "auto":
                 raise RuntimeError("STM32 link and auto mode required for reset")
-            # Do not reapply a cached pre-reset estop report. New unsolicited
-            # reports can still latch a real MCU emergency stop.
-            _, self._last_status_received_at = self.link.mode_telemetry.snapshot()
+            link = self.link
+            before, received_before = link.mode_telemetry.snapshot()
+            self._last_status_received_at = received_before
+            if confirm_status:
+                self.estop_latched = True
             self._stop_locked("local estop reset")
             if self.link is None:
                 raise RuntimeError("STM32 reset write failed")
@@ -247,7 +254,31 @@ class ChassisController:
             except (OSError, RuntimeError):
                 self._disconnect_locked()
                 raise
-            self.estop_latched = False
+            if not confirm_status:
+                self.estop_latched = False
+                return
+        deadline = time.monotonic() + timeout_s
+        last = before
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.link is not link:
+                    raise RuntimeError("STM32 disconnected during emergency-stop reset")
+                state, received = link.mode_telemetry.snapshot()
+                if state is not None and received > received_before:
+                    last = state
+                    if before is not None and state["boot"] != before["boot"]:
+                        raise RuntimeError("STM32 rebooted during emergency-stop reset")
+                    if (not state["flags"] & 2 and not state["faults"]
+                            and link.mode_telemetry.mode() == "auto"):
+                        self._last_status_received_at = received
+                        self.estop_latched = False
+                        return
+            time.sleep(0.01)
+        raise RuntimeError(
+            "STM32 emergency-stop reset not confirmed by a fresh safe status: "
+            f"flags={last['flags'] if last else None} "
+            f"faults={last['faults'] if last else None}"
+        )
 
     def set_obstacle(self, blocked: bool):
         with self.lock:
