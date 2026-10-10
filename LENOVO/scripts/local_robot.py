@@ -52,7 +52,7 @@ def create_service(config, *, simulate):
     except Exception:
         client.close()
         raise
-    motion.cancel_check = service.check_stationary
+    motion.cancel_check = service.check_lift_motion
     return service, peers
 
 
@@ -113,10 +113,17 @@ def main(argv=None):
     if args.command == "ui":
         if not args.check_qt:
             from grain_sampling_workflow.robot_bridge import RobotClient
-            status = RobotClient(str(config.socket_path)).request("status", client_role="ui")
-            if status.get("runtime") != "lenovo-local":
-                raise RuntimeError("refusing to attach Lenovo UI to a different robot daemon")
+            try:
+                status = RobotClient(str(config.socket_path)).request("status", client_role="ui")
+            except OSError as exc:
+                # Keep the operator console visible while the hardware daemon
+                # is starting or has stopped. Task creation checks again.
+                print(f"Lenovo local hardware service offline: {exc}", file=sys.stderr)
+            else:
+                if status.get("runtime") != "lenovo-local":
+                    raise RuntimeError("refusing to attach Lenovo UI to a different robot daemon")
             os.environ["GRAIN_SAMPLING_UI_ENABLE_MECHANISM"] = "1"
+            os.environ["GRAIN_LOCAL_NAV_MODE"] = config.navigation_mode
             # RobotBridge has an explicit operator-confirmation mode in the
             # local daemon. Do not use FakeNavigationBridge's second socket.
             os.environ["GRAIN_SAMPLING_UI_FAKE_NAVIGATION"] = "0"

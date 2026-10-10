@@ -125,7 +125,8 @@ def ui_methods():
     names = {"_on_rc_mode_mirror", "_expire_rc_mode_mirror", "_update_manual_mode_ui"}
     methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
     clock = [0.0]
-    namespace = {"time": SimpleNamespace(monotonic=lambda: clock[0]), "QColor": lambda value: value}
+    namespace = {"time": SimpleNamespace(monotonic=lambda: clock[0]),
+                 "QColor": lambda value: value, "Slot": lambda *_: lambda fn: fn}
     exec(compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"), namespace)
     window = SimpleNamespace(_rc_control=None, _rc_mode_mirror=None, _rc_mode_updated_at=float("-inf"),
                              _manual_btn=MagicMock(), _mode_dot=MagicMock(),
@@ -148,3 +149,14 @@ def test_ui_detects_disappearing_ros_publisher():
     methods["_expire_rc_mode_mirror"](window)
     window._mode_value.setText.assert_called_with("未知")
     assert window._rc_mode_mirror is None
+
+
+def test_ui_repaints_rc_style_only_when_displayed_state_changes():
+    window, methods, _ = ui_methods()
+    for _ in range(50):
+        methods["_on_rc_mode_mirror"](window, "auto")
+    assert window._manual_btn.style().unpolish.call_count == 1
+    assert window._mode_value.setText.call_count == 1
+    methods["_on_rc_mode_mirror"](window, "manual")
+    assert window._manual_btn.style().unpolish.call_count == 2
+    window._mode_value.setText.assert_called_with("手动")

@@ -70,7 +70,8 @@ def main():
         config.write_text(json.dumps({"runtime_dir": directory, "suction_policy": "external"}), encoding="utf-8")
         os.environ.update(GRAIN_LOCAL_RUNTIME="1", GRAIN_ROBOT_SOCKET=str(runtime / "control.sock"),
                           GRAIN_SAMPLING_UI_ENABLE_MECHANISM="1", GRAIN_SAMPLING_UI_FAKE_NAVIGATION="0",
-                          GRAIN_SAMPLING_UI_SKIP_MAPPING="1", GRAIN_LOCAL_PREVIEW=str(runtime / "preview.json"))
+                          GRAIN_SAMPLING_UI_SKIP_MAPPING="1", GRAIN_LOCAL_NAV_MODE="operator",
+                          GRAIN_LOCAL_PREVIEW=str(runtime / "preview.json"))
         client = RobotClient()
         with (args.output / "daemon.log").open("w", encoding="utf-8") as log:
             # The only child entry point is hard-coded --simulate. Physical port

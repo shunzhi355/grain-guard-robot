@@ -1,5 +1,6 @@
 import importlib.util
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -88,6 +89,68 @@ def test_uart_failure_is_not_replayed(stack):
         service.local_request({"action": "mechanism", "name": "clamp"})
     assert service.latched
     assert len([frame for frame in stm32.frames if frame["kind"] == 0x38]) == 1
+
+
+def test_rc_dropout_during_lift_matches_3588_policy(stack):
+    service, stm32, servo = stack
+    task(service)
+    servo.leg_time_s = 0.8
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        move = pool.submit(service.local_request, {
+            "action": "mechanism", "name": "move_lift",
+            "args": {"direction": "down", "distance_cm": 2.0},
+        })
+        wait_for(lambda: servo.triggers == 1)
+        stm32.mode = 0
+        stm32.faults = 1  # firmware FAULT_RC, not an independent ESTOP
+        wait_for(lambda: service.chassis.link.mode_telemetry.snapshot()[0]["faults"] == 1)
+        time.sleep(0.15)
+        assert not service.latched
+        stm32.mode = 2
+        stm32.faults = 0
+        wait_for(lambda: service.chassis.link.mode_telemetry.snapshot()[0]["faults"] == 0)
+        assert move.result(timeout=3)["ok"]
+    assert not service.latched
+    assert servo.triggers == 1
+
+
+@pytest.mark.parametrize("stop", ["estop", "non_rc_fault"])
+def test_hard_stop_still_cancels_running_lift(stack, stop):
+    service, stm32, servo = stack
+    task(service)
+    servo.leg_time_s = 2.0
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        move = pool.submit(service.local_request, {
+            "action": "mechanism", "name": "move_lift",
+            "args": {"direction": "down", "distance_cm": 2.0},
+        })
+        wait_for(lambda: servo.triggers == 1)
+        if stop == "estop":
+            stm32.estop = True
+        else:
+            stm32.faults = 2
+        wait_for(lambda: service.latched)
+        with pytest.raises(RuntimeError, match="STM32 emergency stop/fault"):
+            move.result(timeout=3)
+    assert servo.triggers == 1
+
+
+def test_mcu_fault_takes_priority_over_rc_mode_error(stack):
+    service, stm32, _ = stack
+    stm32.mode = 0
+    stm32.faults = 1
+    wait_for(lambda: service.chassis.link.mode_telemetry.snapshot()[0]["faults"] == 1)
+    with pytest.raises(RuntimeError, match="STM32 emergency stop/fault:.*faults=1"):
+        service.check()
+
+
+def test_new_action_still_requires_auto_rc(stack):
+    service, stm32, servo = stack
+    stm32.mode = 0
+    wait_for(lambda: service.chassis.link.mode_telemetry.snapshot()[0]["mode"] == 0)
+    with pytest.raises(RuntimeError, match="fresh RC automatic mode required"):
+        service.local_request({"action": "mechanism", "name": "clamp"})
+    assert servo.triggers == 0
 
 
 def test_operator_navigation_never_arms_base(stack):

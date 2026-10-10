@@ -14,6 +14,8 @@ from grain_sampling_devices import mechanism_protocol as m
 from grain_sampling_interhost.server import RobotServer
 from .mechanism import SerialWorkflowRuntime
 
+STM32_RC_FAULT = 1  # chassis.h: FAULT_RC; only ignored during an active lift.
+
 
 def finite(value):
     return type(value) in (int, float) and math.isfinite(value)
@@ -92,20 +94,69 @@ class LocalRobotService:
         self.event("service_started", simulation=self.simulation, navigation_mode=self.config.navigation_mode,
                    hardware_backend="stm32+x2p", pca9685=False)
 
-    def check(self):
+    def _check_hardware(self, *, require_rc_auto):
         if self.latched or self.mechanism.estop_latched:
             raise RuntimeError(self.last_error or "local hardware safety latch active")
         with self.chassis.lock:
             link = self.chassis.link
-            state, _ = link.mode_telemetry.snapshot() if link else (None, 0)
+            state, received = link.mode_telemetry.snapshot() if link else (None, 0)
             if link is not self._baseline_link or not link:
                 raise RuntimeError("STM32 disconnected/re-enumerated; no automatic action replay")
             if not state or state["boot"] != self._baseline_boot:
                 raise RuntimeError("STM32 rebooted")
-            if link.mode_telemetry.mode() != "auto":
-                raise RuntimeError("fresh RC automatic mode required")
-            if self.chassis.estop_latched or state["flags"] & 2 or state["faults"]:
-                raise RuntimeError("STM32 emergency stop/fault")
+            # During a mechanism stroke, mirror the 3588 policy: RC mode and
+            # its dedicated fault bit do not cancel an already-started X2P
+            # position segment. Other MCU faults and ESTOP still cancel it.
+            faults = (state["faults"] if require_rc_auto else
+                      state["faults"] & ~STM32_RC_FAULT)
+            if self.chassis.estop_latched or state["flags"] & 2 or faults:
+                raise RuntimeError(
+                    f"STM32 emergency stop/fault: flags={state['flags']} "
+                    f"faults={state['faults']}"
+                )
+            if require_rc_auto and link.mode_telemetry.mode() != "auto":
+                raise RuntimeError(
+                    "fresh RC automatic mode required: "
+                    f"reported_mode={state['mode']} "
+                    f"rc_age_ms={state['rc_age_ms']} "
+                    f"status_age_ms={round((time.monotonic() - received) * 1000)} "
+                    f"flags={state['flags']} faults={state['faults']}"
+                )
+
+    def check(self):
+        """Require fresh automatic RC before starting an action/navigation."""
+        self._check_hardware(require_rc_auto=True)
+
+    def check_lift_motion(self):
+        """Keep hard faults, ESTOP and disconnect cancellation during X2P motion."""
+        self._check_hardware(require_rc_auto=False)
+        if self.chassis.epoch is not None:
+            raise RuntimeError("chassis must be disarmed during mechanism operation")
+
+    def _stm32_safety_snapshot(self):
+        """Capture the last passive MCU report before ESTOP changes its state.
+
+        A blank RC mode alone cannot distinguish a receiver dropout from a
+        stopped UART reader. Keep this read-only and bounded for the stop path.
+        """
+        with self.chassis.lock:
+            link = self.chassis.link
+            state, received = (link.mode_telemetry.snapshot() if link else
+                               (None, float("-inf")))
+            age_ms = (round((time.monotonic() - received) * 1000)
+                      if received != float("-inf") else None)
+            return {
+                "link_same_as_start": link is not None and link is self._baseline_link,
+                "rx_thread_alive": bool(self.chassis.receiver and self.chassis.receiver.is_alive()),
+                "status_age_ms": age_ms,
+                "rc_mode": link.mode_telemetry.mode() if link else "",
+                "reported_mode": state["mode"] if state else None,
+                "rc_age_ms": state["rc_age_ms"] if state else None,
+                "flags": state["flags"] if state else None,
+                "faults": state["faults"] if state else None,
+                "boot": state["boot"] if state else None,
+                "boot_same_as_start": bool(state and state["boot"] == self._baseline_boot),
+            }
 
     def check_stationary(self):
         self.check()
@@ -154,7 +205,8 @@ class LocalRobotService:
             self._epoch = None
             self._task_active = False
         if first:
-            self.event("safety_latched", reason=reason)
+            self.event("safety_latched", reason=reason,
+                       stm32=self._stm32_safety_snapshot())
         self.chassis.estop()
         self._stop_link = self.chassis.link
         try:
@@ -171,7 +223,10 @@ class LocalRobotService:
                         self.send_mechanism(m.STOP_ALL, 0)
                         self._stop_link = self.chassis.link
                 elif self._task_active or self._goal is not None:
-                    self.check()
+                    if self._mechanism_gate.locked() and self._goal is None:
+                        self.check_lift_motion()
+                    else:
+                        self.check()
                     if time.monotonic() - self._ui_at > 1.5:
                         raise RuntimeError("workflow/UI heartbeat lost")
                     if self._epoch is not None:

@@ -32,6 +32,9 @@ class RobotEventThread(QThread):
         self._connected = False
         self._last_error = ""
         self._last_safety_message = None
+        self._last_local_view = None
+        self._last_rc_mode = None
+        self._last_rc_emit_at = float("-inf")
 
     def run(self):
         while self._running:
@@ -39,6 +42,8 @@ class RobotEventThread(QThread):
                 status = (self.client.request("status", client_role="ui")
                           if os.getenv("GRAIN_LOCAL_RUNTIME") == "1"
                           else self.client.request("status"))
+                if os.getenv("GRAIN_LOCAL_RUNTIME") == "1" and status.get("runtime") != "lenovo-local":
+                    raise RuntimeError("连接到的不是联想本机硬件服务")
                 self._last_error = ""
                 connected = (status.get("runtime") == "lenovo-local"
                              or bool(status.get("lenovo_online")))
@@ -46,9 +51,21 @@ class RobotEventThread(QThread):
                     self._connected = connected
                     self.connection_changed.emit(connected)
                 if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
-                    self.local_runtime_updated.emit(status)
+                    # The socket request is the 100 ms UI heartbeat, but the
+                    # Qt widget state rarely changes. Avoid marshalling a
+                    # nested dict and repainting pixmaps ten times a second.
+                    local_view = (status.get("simulation"),
+                                  status.get("test_navigation_mode"),
+                                  status.get("lenovo_online"))
+                    if local_view != self._last_local_view:
+                        self._last_local_view = local_view
+                        self.local_runtime_updated.emit(status)
                 chassis = status.get("chassis") or {}
-                self.rc_mode_updated.emit(chassis.get("rc_mode", "unknown"))
+                mode = chassis.get("rc_mode", "unknown")
+                now = time.monotonic()
+                if mode != self._last_rc_mode or now - self._last_rc_emit_at >= 0.5:
+                    self._last_rc_mode, self._last_rc_emit_at = mode, now
+                    self.rc_mode_updated.emit(mode)
                 safety_message = chassis_safety_message(chassis)
                 if status.get("runtime") == "lenovo-local" and status.get("safety_latched"):
                     safety_message = safety_message or f"本机安全锁定：{status.get('last_error', '')}"
@@ -62,10 +79,14 @@ class RobotEventThread(QThread):
                 if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
                     self._local_preview()
             except (OSError, RuntimeError, ValueError) as exc:
+                self._last_local_view = None
+                self._last_rc_mode = None
+                self._last_rc_emit_at = float("-inf")
                 if self._connected:
                     self._connected = False
                     self.connection_changed.emit(False)
-                message = str(exc)
+                message = (f"本机硬件服务未就绪：{exc}"
+                           if os.getenv("GRAIN_LOCAL_RUNTIME") == "1" else str(exc))
                 if message != self._last_error:
                     self._last_error = message
                     self.error.emit(message)

@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self._rc_timer: Optional[QTimer] = None
         self._rc_mode_mirror: Optional[str] = None
         self._rc_mode_updated_at = float("-inf")
+        self._rendered_rc_state: Optional[tuple[bool, bool]] = None
         self._rc_mirror_timer: Optional[QTimer] = None
         self._rc_mirror_started = False
         self._manual_btn: Optional[QPushButton] = None
@@ -429,13 +430,14 @@ class MainWindow(QMainWindow):
         if self._rc_mirror_started:
             return
         self._rc_mirror_started = True
-        if self._ros_thread is not None:
-            self._ros_thread.rc_mode_updated.connect(self._on_rc_mode_mirror)
+        # start_ros() owns the single signal connection. Connecting here too
+        # delivered each 100 ms status twice and repeatedly repolished Qt.
         self._rc_mirror_timer = QTimer(self)
         self._rc_mirror_timer.timeout.connect(self._expire_rc_mode_mirror)
         self._rc_mirror_timer.start(250)
         self._update_manual_mode_ui()
 
+    @Slot(str)
     def _on_rc_mode_mirror(self, mode: str) -> None:
         """Handle STM32 mode feedback from the robot daemon."""
         self._rc_mode_mirror = mode if mode in ("manual", "auto") else None
@@ -467,6 +469,11 @@ class MainWindow(QMainWindow):
             # STM32 mode feedback from the local robot daemon.
             manual = self._rc_mode_mirror == "manual"
             running = self._rc_mode_mirror in ("manual", "auto")
+
+        rendered = (manual, running)
+        if rendered == getattr(self, "_rendered_rc_state", None):
+            return
+        self._rendered_rc_state = rendered
 
         # Nav panel button reflects the debounced CH5 mode
         if self._manual_btn is not None:
@@ -516,7 +523,12 @@ class MainWindow(QMainWindow):
         if _env_flag("GRAIN_LOCAL_RUNTIME"):
             from grain_sampling_workflow.robot_bridge import RobotClient
             try:
-                local_operator = RobotClient().request("status").get("test_navigation_mode") is True
+                local_status = RobotClient().request("status")
+                if local_status.get("runtime") != "lenovo-local":
+                    raise RuntimeError("连接到的不是联想本机硬件服务")
+                local_operator = local_status.get("test_navigation_mode") is True
+                if local_operator != (os.getenv("GRAIN_LOCAL_NAV_MODE") == "operator"):
+                    raise RuntimeError("界面与硬件服务的导航模式不一致")
             except (OSError, RuntimeError, ValueError) as exc:
                 self._alarm_bar.set_alarm(f"联想本机硬件服务未就绪：{exc}")
                 return
