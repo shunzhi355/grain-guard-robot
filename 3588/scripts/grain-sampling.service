@@ -1,0 +1,24 @@
+[Unit]
+Description=Grain Sampling Robot 3588 Hardware Daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=neardi
+Group=neardi
+SupplementaryGroups=dialout i2c
+Environment="HOME=/home/neardi"
+Environment="PYTHONUNBUFFERED=1"
+RuntimeDirectory=grain-robot
+RuntimeDirectoryMode=0700
+ExecStart=/bin/bash "@PROJECT_ROOT@/scripts/start_industrial_pc.sh"
+TimeoutStartSec=30
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
