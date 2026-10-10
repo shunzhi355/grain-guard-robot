@@ -2,7 +2,7 @@
   "stm32_port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AB3N91KX-if00-port0",
   "x2p_port": "/dev/serial/by-id/usb-FTDI_FT231X_USB_UART_D30GLD5V-if00-port0",
   "x2p_slave": 2,
-  "lift_rpm": 30,
+  "lift_rpm": 800,
   "forward_sign": 1,
   "navigation_mode": "operator",
   "suction_policy": "external",
