@@ -81,13 +81,54 @@ def test_disk_full_cannot_prevent_emergency_stop(stack, monkeypatch):
     assert not stm32.active
 
 
-def test_uart_failure_is_not_replayed(stack):
+def test_uart_ack_loss_retries_only_same_request_id(stack):
     service, stm32, _ = stack
     task(service)
     stm32.drop_ack = True
     with pytest.raises(RuntimeError):
         service.local_request({"action": "mechanism", "name": "clamp"})
     assert service.latched
+    frames = [frame for frame in stm32.frames if frame["kind"] == 0x38]
+    assert len(frames) == 3
+    assert len({frame["sequence"] for frame in frames}) == 1
+    assert sum(key[1] == frames[0]["sequence"] for key in stm32.accepted) == 1
+    assert len([event for event in service.events
+                if event["kind"] == "stm32_ack_timeout"]) == 3
+
+
+def test_lost_ack_recovers_without_repeating_clamp_action(stack):
+    service, stm32, _ = stack
+    task(service)
+    stm32.drop_ack = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        action = pool.submit(service.local_request, {
+            "action": "mechanism", "name": "clamp",
+        })
+        wait_for(lambda: len([frame for frame in stm32.frames
+                              if frame["kind"] == 0x38]) == 1)
+        stm32.drop_ack = False
+        assert action.result(timeout=2)["ok"]
+    frames = [frame for frame in stm32.frames if frame["kind"] == 0x38]
+    assert len(frames) == 2
+    assert frames[0]["sequence"] == frames[1]["sequence"]
+    assert sum(key[1] == frames[0]["sequence"] for key in stm32.accepted) == 1
+    assert not service.latched
+    assert any(event["kind"] == "stm32_ack_recovered" for event in service.events)
+
+
+def test_emergency_stop_prevents_ack_retry(stack):
+    service, stm32, _ = stack
+    task(service)
+    stm32.drop_ack = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        action = pool.submit(service.local_request, {
+            "action": "mechanism", "name": "clamp",
+        })
+        wait_for(lambda: len([frame for frame in stm32.frames
+                              if frame["kind"] == 0x38]) == 1)
+        service.trip("operator emergency stop")
+        with pytest.raises(RuntimeError):
+            action.result(timeout=2)
     assert len([frame for frame in stm32.frames if frame["kind"] == 0x38]) == 1
 
 

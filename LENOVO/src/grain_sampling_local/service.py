@@ -11,10 +11,12 @@ import uuid
 from contextlib import contextmanager
 
 from grain_sampling_devices import mechanism_protocol as m
+from grain_sampling_devices.chassis_serial import MechanismTimeoutError
 from grain_sampling_interhost.server import RobotServer
 from .mechanism import SerialWorkflowRuntime
 
 STM32_RC_FAULT = 1  # chassis.h: FAULT_RC; only ignored during an active lift.
+MECHANISM_ACK_ATTEMPTS = 3
 
 
 def finite(value):
@@ -185,11 +187,30 @@ class LocalRobotService:
             except Exception as exc:
                 self.event("stop_unconfirmed", device="stm32", error=str(exc))
             return
-        self.check_stationary()
-        # One attempt only. An ACK timeout is not permission to move twice.
         try:
-            return link.mechanism_command(command, device, confirm=True,
-                                          write_guard=self._write_guard(link))
+            self.check_stationary()
+            # The MCU caches replies by (session, sequence). A lost ACK may
+            # therefore be queried again with exactly the same request ID,
+            # without restarting a timed mechanism action. Never allocate a
+            # new ID after a timeout or retry across a boot/link change.
+            sequence = link.reserve_sequence()
+            for attempt in range(1, MECHANISM_ACK_ATTEMPTS + 1):
+                self.check_stationary()
+                try:
+                    result = link.mechanism_command(
+                        command, device, confirm=True, sequence=sequence,
+                        write_guard=self._write_guard(link),
+                    )
+                except MechanismTimeoutError:
+                    self.event("stm32_ack_timeout", command=command,
+                               device=device, sequence=sequence, attempt=attempt)
+                    if attempt == MECHANISM_ACK_ATTEMPTS:
+                        raise
+                else:
+                    if attempt > 1:
+                        self.event("stm32_ack_recovered", command=command,
+                                   device=device, sequence=sequence, attempts=attempt)
+                    return result
         except Exception as exc:
             self.trip(f"STM32 action unconfirmed: {exc}")
             raise
