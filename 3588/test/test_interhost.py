@@ -332,3 +332,43 @@ def test_bridge_clear_estop_uses_explicit_local_action():
     client = Client()
     assert RobotBridge(client=client).call_clear_estop()
     assert client.actions == [("clear_estop", {"mechanical_reset_confirmed": True})]
+
+
+def test_navigation_test_preflight_clears_latch_without_arming():
+    class Client:
+        def __init__(self):
+            self.actions = []
+            self.latched = True
+
+        def request(self, action, **values):
+            self.actions.append((action, values))
+            if action == "status":
+                return {"safety_latched": self.latched,
+                        "chassis": {"estop_latched": self.latched,
+                                     "motion_armed": False}}
+            if action == "clear_estop":
+                self.latched = False
+                return {"ok": True}
+            raise AssertionError(f"unexpected action: {action}")
+
+    client = Client()
+    bridge = RobotBridge(client=client)
+    assert bridge.call_test_preflight_reset()
+    assert client.actions == [("status", {}),
+                               ("clear_estop", {"mechanical_reset_confirmed": True})]
+    assert client.latched is False
+
+
+def test_navigation_test_preflight_does_not_reset_healthy_state():
+    class Client:
+        def __init__(self):
+            self.actions = []
+
+        def request(self, action, **values):
+            self.actions.append((action, values))
+            return {"safety_latched": False,
+                    "chassis": {"estop_latched": False, "motion_armed": False}}
+
+    client = Client()
+    assert RobotBridge(client=client).call_test_preflight_reset()
+    assert client.actions == [("status", {})]

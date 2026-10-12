@@ -52,6 +52,13 @@ class RobotBridge:
     def call_navigate(self, x: float, y: float) -> bool:
         try:
             initial_status = self.client.request("status")
+            if not self.call_test_preflight_reset(initial_status):
+                return False
+            # A reset never arms the chassis. Re-read status so the navigation
+            # path uses the post-reset localization and safety state.
+            if (initial_status.get("safety_latched")
+                    or (initial_status.get("chassis") or {}).get("estop_latched")):
+                initial_status = self.client.request("status")
             test_mode = initial_status.get("test_navigation_mode") is True
             if test_mode:
                 response = self.client.request("test_goal", pose={"x_m": float(x),
@@ -128,6 +135,24 @@ class RobotBridge:
     def call_clear_estop(self) -> bool:
         """Operator-requested reset; never resumes the canceled task."""
         return self._request("clear_estop", mechanical_reset_confirmed=True)
+
+    def call_test_preflight_reset(self, status: dict[str, Any] | None = None) -> bool:
+        """Clear a prior safety latch before an explicit navigation test.
+
+        This is deliberately scoped to the test-start path. It never arms the
+        chassis or resumes an old goal; the daemon still validates RC mode,
+        faults, serial health, and idle state before accepting the reset.
+        """
+        try:
+            status = status or self.client.request("status")
+            chassis = status.get("chassis") or {}
+            if not status.get("safety_latched") and not chassis.get("estop_latched"):
+                self.last_error = ""
+                return True
+            return self.call_clear_estop()
+        except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+            self.last_error = str(exc)
+            return False
 
     def publish_cmd_vel(self, linear_mps: float = 0.0, angular_rps: float = 0.0) -> bool:
         if linear_mps or angular_rps:
