@@ -48,7 +48,10 @@ def _status_gates(status: dict[str, Any], *, require_local: bool) -> list[Gate]:
         gates.append(_gate("navigation_mode", "PASS", "mode is explicit and compatible with this check"))
 
     pose = status.get("pose") or {}
-    finite_pose = all(math.isfinite(float(pose.get(k))) for k in ("x_m", "y_m", "yaw_rad")) if all(k in pose for k in ("x_m", "y_m", "yaw_rad")) else False
+    try:
+        finite_pose = all(math.isfinite(float(pose[k])) for k in ("x_m", "y_m", "yaw_rad"))
+    except (KeyError, TypeError, ValueError):
+        finite_pose = False
     valid = pose.get("localization_valid") is True
     if finite_pose and valid:
         gates.append(_gate("localization", "PASS", "latest pose is finite and marked valid"))
