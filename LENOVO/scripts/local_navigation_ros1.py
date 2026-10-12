@@ -83,7 +83,12 @@ def main():
     rospy.Subscriber(config.odom_topic, Odometry, odom, queue_size=1)
     rospy.Subscriber(config.cloud_topic, PointCloud2, cloud, queue_size=1)
     rospy.Subscriber(config.localization_valid_topic, Bool, localization, queue_size=1)
-    navigator, sequence = PointNavigator(), 0
+    navigator = PointNavigator(
+        far_forward=config.point_far_forward,
+        near_forward=config.point_near_forward,
+        max_effort_step=config.point_max_effort_step,
+    )
+    sequence = 0
     last_preview = 0.0
     try:
         while not rospy.is_shutdown():

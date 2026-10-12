@@ -314,3 +314,17 @@ def test_point_controller_requires_three_stationary_frames():
     assert navigation.step(goal, pose) == (0, 0, False)
     assert navigation.step(goal, pose) == (0, 0, False)
     assert navigation.step(goal, pose) == (0, 0, True)
+
+
+def test_point_controller_effort_is_configurable_up_to_protocol_limit():
+    navigation = PointNavigator(far_forward=1.0, near_forward=0.8, max_effort_step=0.4)
+    goal = {"goal_id": "drive", "pose": dict(x_m=2.0, y_m=0.0, yaw_rad=0)}
+    pose = dict(x_m=0, y_m=0, yaw_rad=0)
+    assert navigation.step(goal, pose)[:2] == pytest.approx((0.4, 0.0))
+    assert navigation.step(goal, pose)[:2] == pytest.approx((0.8, 0.0))
+    assert navigation.step(goal, pose)[:2] == pytest.approx((1.0, 0.0))
+
+
+def test_point_controller_rejects_effort_above_protocol_limit():
+    with pytest.raises(ValueError, match="0..1"):
+        PointNavigator(far_forward=1.01)

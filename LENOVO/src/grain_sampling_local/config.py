@@ -26,6 +26,12 @@ class LocalConfig:
     map_frame: str = "camera_init"
     map_id: str = ""
     ros_image: str = "grain-nav:noetic-x86"
+    # Normalized point-navigation effort.  These are configuration limits,
+    # not physical speed claims; defaults preserve the previously validated
+    # commissioning behavior while allowing controlled future measurements.
+    point_far_forward: float = 0.55
+    point_near_forward: float = 0.40
+    point_max_effort_step: float = 0.15
 
     @classmethod
     def load(cls, path):
@@ -54,6 +60,14 @@ class LocalConfig:
             raise ValueError("full workflow requires calibrated forward_sign=1; do not invert without recalibrating absolute lift logic")
         if type(self.acknowledge_legacy_untighten) is not bool:
             raise ValueError("acknowledge_legacy_untighten must be boolean")
+        for name in ("point_far_forward", "point_near_forward", "point_max_effort_step"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be in 0..1")
+        if self.point_near_forward > self.point_far_forward:
+            raise ValueError("point_near_forward must be <= point_far_forward")
 
     @property
     def directory(self):
