@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace as dataclass_replace
 from pathlib import Path
 
 
@@ -25,6 +25,8 @@ class LocalConfig:
     localization_valid_topic: str = "/grain/localization_valid"
     map_frame: str = "camera_init"
     map_id: str = ""
+    map_version: int = 0
+    map_manifest: str = ""
     ros_image: str = "grain-nav:noetic-x86"
     # Normalized point-navigation effort.  These are configuration limits,
     # not physical speed claims; defaults preserve the previously validated
@@ -43,11 +45,29 @@ class LocalConfig:
         if not isinstance(value, dict) or set(value) - {field.name for field in fields(cls)}:
             raise ValueError("unknown/non-object local runtime configuration")
         config = cls(**value)
+        if not config.map_manifest:
+            config = dataclass_replace(
+                config,
+                map_manifest=os.environ.get("GRAIN_ACTIVE_MAP_MANIFEST", ""),
+            )
+        if not config.map_id:
+            try:
+                from grain_sampling_workflow.map_manifest import load_active_manifest
+                manifest = load_active_manifest(config.map_manifest or None)
+            except (ImportError, OSError, ValueError):
+                manifest = None
+            if manifest is not None:
+                config = dataclass_replace(
+                    config,
+                    map_id=manifest.map_id,
+                    map_version=manifest.map_version,
+                    map_frame=manifest.frame,
+                )
         config.validate()
         return config
 
     def validate(self):
-        for name in ("stm32_port", "x2p_port", "runtime_dir", "map_frame", "map_id",
+        for name in ("stm32_port", "x2p_port", "runtime_dir", "map_frame", "map_id", "map_manifest",
                      "odom_topic", "cloud_topic", "localization_valid_topic", "ros_image"):
             if not isinstance(getattr(self, name), str):
                 raise ValueError(f"{name} must be a string")
@@ -68,6 +88,8 @@ class LocalConfig:
             raise ValueError("localization_health_mode must be external or odom_stable")
         if type(self.require_pointcloud_for_navigation) is not bool:
             raise ValueError("require_pointcloud_for_navigation must be boolean")
+        if type(self.map_version) is not int or self.map_version < 0:
+            raise ValueError("map_version must be a non-negative integer")
         for name in ("point_far_forward", "point_near_forward", "point_max_effort_step"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(float(value)):

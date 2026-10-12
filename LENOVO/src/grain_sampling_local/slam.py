@@ -1,8 +1,9 @@
-"""In-process local SLAM selection; never contacts the RK3588 map proxy."""
+"""Local SLAM selection with one host/container runtime entry point."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 
 
 class LocalSlamBridge:
@@ -14,7 +15,15 @@ class LocalSlamBridge:
 
     def _get(self):
         if not Path("/opt/ros/noetic/setup.bash").exists():
-            raise RuntimeError("本机 ROS1 在容器内：建图 UI 须在配置好的 Noetic 容器环境启动；不会接管当前雷达任务")
+            checker = Path(__file__).resolve().parents[2] / "scripts" / "start_noetic_slam.sh"
+            container = os.environ.get("GRAIN_NOETIC_CONTAINER", "")
+            if not container or not checker.exists():
+                raise RuntimeError("Noetic runtime unavailable; set GRAIN_NOETIC_CONTAINER to the task-owned container")
+            result = subprocess.run(["bash", str(checker), "--check", "--container", container],
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Noetic container is not ready")
+            raise RuntimeError("UI must run inside the verified Noetic container runtime; use start_noetic_slam.sh")
         if self._bridge is None:
             from grain_sampling_workflow.slam_bridge import SlamBridge
             self._bridge = SlamBridge()

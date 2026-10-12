@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import os
+from pathlib import Path
 import subprocess
 import threading
 from typing import TYPE_CHECKING, Optional
@@ -36,6 +37,7 @@ from grain_sampling_workflow.map_save import (
     copy_fresh_map,
     snapshot_map,
 )
+from grain_sampling_workflow.map_manifest import build_manifest, write_manifest
 
 PCD_DIR = os.path.expanduser(os.getenv("SFAST_PCD_DIR", "~/fastlio2_ws/src/S-FAST_LIO/PCD"))
 _logger = logging.getLogger(__name__)
@@ -46,12 +48,14 @@ class _MapSaveOutcome:
     success: bool
     destination: str | None = None
     error: str | None = None
+    manifest_path: str | None = None
 
 
 class MappingPage(QWidget):
     start_mapping_requested = Signal()
     stop_mapping_requested = Signal()
     save_map_requested = Signal()
+    map_handoff_ready = Signal(str, str, int, str)
     _save_finished = Signal(object)
 
     MAPPING_STATES = {
@@ -419,11 +423,39 @@ class MappingPage(QWidget):
             self._show_save_failure(f"地图保存失败：{detail}")
             return
 
+        saved_name = os.path.basename(outcome.destination)
+        manifest_path = None
+        try:
+            if not os.path.isfile(outcome.destination):
+                # Remote map services return a server-side map id.  Their own
+                # manifest remains authoritative; local mapping writes the
+                # versioned manifest below.
+                self._map_saved_in_session = True
+                self._saved_map_path = outcome.destination
+                self._set_save_feedback(f"地图已保存：{saved_name}", "success")
+                self._refresh_map_list()
+                self._transition_state("saved")
+                self.save_map_requested.emit()
+                return
+            manifest = build_manifest(
+                outcome.destination,
+                Path(outcome.destination).stem.rsplit("_", 2)[0],
+            )
+            manifest_path = str(write_manifest(manifest))
+            if self._slam_bridge is not None and not getattr(self._slam_bridge, "is_remote", False):
+                if not self._slam_bridge.start_relocalization(manifest.pcd_path):
+                    raise RuntimeError(self._slam_bridge.last_error or "新地图重定位启动失败")
+            self.map_handoff_ready.emit(manifest.map_id, manifest.frame,
+                                        manifest.map_version, manifest.pcd_path)
+        except Exception as exc:
+            _logger.exception("Map handoff failed")
+            self._show_save_failure(f"地图已写入但交接失败：{exc}")
+            return
+
         self._map_saved_in_session = True
         self._saved_map_path = outcome.destination
-        saved_name = os.path.basename(outcome.destination)
         self._map_name_input.clear()
-        self._set_save_feedback(f"地图已保存：{saved_name}", "success")
+        self._set_save_feedback(f"地图已保存并已交接：{saved_name}", "success")
         self._refresh_map_list()
         self._transition_state("saved")
         self.save_map_requested.emit()

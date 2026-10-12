@@ -14,6 +14,7 @@ from grain_sampling_devices import mechanism_protocol as m
 from grain_sampling_devices.chassis_serial import MechanismTimeoutError
 from grain_sampling_interhost.server import RobotServer
 from .mechanism import SerialWorkflowRuntime
+from grain_sampling_workflow.map_manifest import load_active_manifest
 
 STM32_RC_FAULT = 1  # chassis.h: FAULT_RC; only ignored during an active lift.
 MECHANISM_ACK_ATTEMPTS = 3
@@ -74,6 +75,13 @@ class LocalRobotService:
                 # Full disk / logging failure must never abort a safety stop.
                 record["log_error"] = str(exc)
                 logging.getLogger(__name__).error("Local event logging failed: %s", exc)
+
+    def _map_identity(self):
+        """Read the active, hash-verified map identity when available."""
+        manifest = load_active_manifest(self.config.map_manifest or None)
+        if manifest is None:
+            return self.config.map_id, self.config.map_version, self.config.map_frame
+        return manifest.map_id, manifest.map_version, manifest.frame
 
     def start(self):
         self.config.directory.mkdir(parents=True, exist_ok=True)
@@ -274,7 +282,7 @@ class LocalRobotService:
             raise RuntimeError("obstacle/cloud unavailable")
         if value["localization_valid"] is not True or not 0 <= now - value["localization_at"] <= 0.5:
             raise RuntimeError("localization quality not confirmed/fresh")
-        if not self.config.map_id:
+        if not self._map_identity()[0]:
             raise RuntimeError("map_id must be configured for autonomous navigation")
 
     def _nav_request(self, request):
@@ -341,11 +349,15 @@ class LocalRobotService:
             if request.get("client_role") == "ui":
                 self._ui_at = time.monotonic()
             inputs = self._inputs if time.monotonic() - self._input_at < 0.3 else None
+            map_id, map_version, map_frame = self._map_identity()
             return {"ok": True, "runtime": "lenovo-local", "simulation": self.simulation,
                     "chassis": self.chassis.status(), "navigation": self.navigation,
                     "lenovo_online": self.config.navigation_mode == "local" and inputs is not None,
                     "test_navigation_mode": self.config.navigation_mode == "operator",
-                    "pose": inputs, "slam": {"map_id": self.config.map_id, "mode": "LOCALIZING" if inputs and inputs["localization_valid"] else "UNKNOWN"},
+                    "pose": inputs, "slam": {"map_id": map_id,
+                        "map_version": map_version,
+                        "frame": map_frame,
+                        "mode": "LOCALIZING" if inputs and inputs["localization_valid"] else "UNKNOWN"},
                     "safety_latched": self.latched, "last_error": self.last_error,
                     "external_suction": self.config.suction_policy == "external",
                     "requires_mechanical_reset": self.mechanism.requires_mechanical_reset()}
@@ -427,7 +439,11 @@ class LocalRobotService:
                     raise ValueError("finite goal coordinates required")
                 if not operator:
                     goal = request["goal"]
-                    if goal.get("map_id") != self.config.map_id or goal.get("frame_id") != "map" or not finite(pose.get("yaw_rad")):
+                    map_id, _, map_frame = self._map_identity()
+                    frame_id = goal.get("frame_id")
+                    if (goal.get("map_id") != map_id
+                            or frame_id not in (map_frame, "map")
+                            or not finite(pose.get("yaw_rad"))):
                         raise ValueError("goal map/frame/yaw mismatch")
                     self._check_navigation_inputs()
                 goal_id = str(uuid.uuid4())
