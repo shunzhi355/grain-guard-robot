@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -96,6 +97,7 @@ class MainWindow(QMainWindow):
         self._page_manager: Optional[PageManager] = None
         self._ros_thread: Optional[RobotEventThread] = None
         self._slam_bridge: Optional[SlamBridge] = None
+        self._navigation_thread: Optional[threading.Thread] = None
 
         # Nav button active-state tracking: QPushButton → set of page names
         self._nav_mappings: list[tuple[QPushButton, set[str]]] = []
@@ -340,6 +342,8 @@ class MainWindow(QMainWindow):
         self._main_page = pages[0][1]
         self._map_page = pages[2][1]
         self._mapping_page = pages[4][1]
+        self._main_page.navigation_requested.connect(self._on_map_goal_requested)
+        self._main_page.navigation_finished.connect(self._on_map_navigation_finished)
 
     # ── Page changed handler (breadcrumb + nav active state) ──
 
@@ -645,6 +649,26 @@ class MainWindow(QMainWindow):
 
         # Navigate to guidance page
         self.page_manager.push("guidance")
+
+    def _on_map_goal_requested(self, x: float, y: float) -> None:
+        """Run the existing navigation adapter for an explicitly selected goal."""
+        if self._navigation_thread is not None and self._navigation_thread.is_alive():
+            self._main_page.set_navigation_result(False, "已有导航任务")
+            return
+
+        def run() -> None:
+            bridge = SamplingBridge()
+            ok = bridge.call_navigate(float(x), float(y))
+            self._main_page.navigation_finished.emit(ok, bridge.last_error)
+
+        self._navigation_thread = threading.Thread(
+            target=run, name="map-goal-navigation", daemon=True
+        )
+        self._navigation_thread.start()
+
+    @Slot(bool, str)
+    def _on_map_navigation_finished(self, ok: bool, message: str) -> None:
+        self._main_page.set_navigation_result(ok, message)
 
     # ── Reboot recovery: unfinished task detection ─────────
 

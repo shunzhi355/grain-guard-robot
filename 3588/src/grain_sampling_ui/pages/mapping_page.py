@@ -367,28 +367,19 @@ class MappingPage(QWidget):
 
         existing = [f for f in os.listdir(PCD_DIR) if f.startswith(f"{name}_") and f.endswith(".pcd")]
         if existing:
-            reply = QMessageBox.warning(
-                self,
-                "名称重复",
-                f"已存在名为「{name}」的地图文件，是否覆盖？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+            self._show_save_failure(f"地图名称已存在：{name}。请使用新名称，历史地图不会被覆盖。")
+            return
 
         source = os.path.join(PCD_DIR, "GlobalMap.pcd")
         before = snapshot_map(source)
         destination = os.path.join(PCD_DIR, new_filename)
-        old_paths = [os.path.join(PCD_DIR, filename) for filename in existing]
-
         self._save_in_progress = True
         self._mapping_state_label.setText("正在保存地图...")
         self._btn_save.setEnabled(False)
         self._btn_toggle.setEnabled(False)
         self._save_thread = threading.Thread(
             target=self._save_map_worker,
-            args=(before, source, destination, old_paths),
+            args=(before, source, destination),
             name="mapping-save",
             daemon=True,
         )
@@ -406,7 +397,6 @@ class MappingPage(QWidget):
         before: MapFileIdentity,
         source: str,
         destination: str,
-        old_paths: list[str],
     ) -> None:
         """Finalize and copy a map without blocking the Qt GUI thread."""
         try:
@@ -414,12 +404,6 @@ class MappingPage(QWidget):
             if not self._slam_bridge.save_current_map(before_identity=before):
                 raise RuntimeError("未检测到本轮生成的新 GlobalMap.pcd")
             copy_fresh_map(source, destination, before)
-            for old_path in old_paths:
-                if old_path != destination:
-                    try:
-                        os.remove(old_path)
-                    except OSError:
-                        _logger.warning("Could not remove replaced map: %s", old_path)
             outcome = _MapSaveOutcome(True, destination=destination)
         except Exception as exc:
             _logger.exception("Map save failed")

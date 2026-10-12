@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from PySide2.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
+from PySide2.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide2.QtGui import (
     QBrush,
     QColor,
@@ -77,6 +77,10 @@ class MapWidget(QWidget):
     Supports pan (left-drag) and zoom (scroll wheel).
     """
 
+    # A click selects a target only.  The caller must explicitly start
+    # navigation through the existing RobotBridge path.
+    goal_selected = Signal(float, float)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("map_widget")
@@ -101,6 +105,9 @@ class MapWidget(QWidget):
         self._offset_y: float = 0.0
         self._panning: bool = False
         self._last_pan_pos: QPoint | None = None
+        self._press_pos: QPoint | None = None
+        self._dragged = False
+        self._goal_target: tuple[float, float] | None = None
 
         # ── UI ──────────────────────────────────────────────
         self._coord_label: QLabel | None = None
@@ -171,6 +178,15 @@ class MapWidget(QWidget):
         self._nav_path = path
         self.update()
 
+    def set_goal_target(self, x: float, y: float) -> None:
+        """Display a selected target without sending a motion request."""
+        self._goal_target = (float(x), float(y))
+        self.update()
+
+    def clear_goal_target(self) -> None:
+        self._goal_target = None
+        self.update()
+
     def reset_view(self) -> None:
         """Reset zoom/pan to default centred on origin."""
         self._zoom = 1.0
@@ -223,6 +239,7 @@ class MapWidget(QWidget):
         self._draw_axes(painter)
         self._draw_nav_path(painter)
         self._draw_waypoints(painter)
+        self._draw_goal_target(painter)
         self._draw_robot(painter)
 
         painter.end()
@@ -325,6 +342,16 @@ class MapWidget(QWidget):
             )
             painter.drawText(r, Qt.AlignmentFlag.AlignCenter, display)
 
+    def _draw_goal_target(self, painter: QPainter) -> None:
+        if self._goal_target is None:
+            return
+        pt = self._world_to_widget(*self._goal_target)
+        painter.setPen(QPen(QColor("#F85149"), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(pt, 8, 8)
+        painter.drawLine(pt.x() - 12, pt.y(), pt.x() + 12, pt.y())
+        painter.drawLine(pt.x(), pt.y() - 12, pt.x(), pt.y() + 12)
+
     def _draw_robot(self, painter: QPainter) -> None:
         """Draw the robot as a blue triangle with a directional arrow."""
         pt = self._world_to_widget(self._robot_x, self._robot_y)
@@ -368,12 +395,16 @@ class MapWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._panning = True
             self._last_pan_pos = event.pos()
+            self._press_pos = event.pos()
+            self._dragged = False
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
 
     def mouseMoveEvent(self, event: Any) -> None:
         if self._panning and self._last_pan_pos is not None:
             delta = event.pos() - self._last_pan_pos
+            if self._press_pos is not None and (event.pos() - self._press_pos).manhattanLength() > 4:
+                self._dragged = True
             self._offset_x -= delta.x() / (CELL_SIZE_PX * self._zoom)
             self._offset_y += delta.y() / (CELL_SIZE_PX * self._zoom)
             self._last_pan_pos = event.pos()
@@ -388,8 +419,14 @@ class MapWidget(QWidget):
 
     def mouseReleaseEvent(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._panning and not self._dragged and self._press_pos is not None:
+                wx, wy = self._widget_to_world(event.pos().x(), event.pos().y())
+                self.set_goal_target(wx, wy)
+                self.goal_selected.emit(wx, wy)
             self._panning = False
             self._last_pan_pos = None
+            self._press_pos = None
+            self._dragged = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
 

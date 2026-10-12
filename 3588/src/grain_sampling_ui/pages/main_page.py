@@ -208,6 +208,9 @@ class MainPage(QWidget):
 
     # ── Signals ───────────────────────────────────────────
     start_task_requested = Signal(str)
+    goal_selected = Signal(float, float)
+    navigation_requested = Signal(float, float)
+    navigation_finished = Signal(bool, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -219,6 +222,9 @@ class MainPage(QWidget):
         self._lbl_task_name: QLabel | None = None
         self._progress_bar: QProgressBar | None = None
         self._lbl_depth: QLabel | None = None
+        self._lbl_goal: QLabel | None = None
+        self._btn_navigate: QPushButton | None = None
+        self._selected_goal: tuple[float, float] | None = None
 
         # ── Workflow state ─────────────────────────────────
         self._orchestrator: WorkflowOrchestrator | None = None
@@ -242,6 +248,7 @@ class MainPage(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         layout.addWidget(self._map_widget, stretch=1)
+        self._map_widget.goal_selected.connect(self._on_goal_selected)
 
         # ── Right: Status panel ──────────────────────────────
         status_panel = self._build_status_panel()
@@ -332,6 +339,19 @@ class MainPage(QWidget):
         )
         outer.addWidget(coord_lbl)
 
+        self._lbl_goal = QLabel("目标点：未选择")
+        self._lbl_goal.setObjectName("selected_goal")
+        self._lbl_goal.setStyleSheet(
+            "font-size: 10pt; color: #8B949E; background: transparent;"
+        )
+        outer.addWidget(self._lbl_goal)
+        self._btn_navigate = QPushButton("开始导航")
+        self._btn_navigate.setObjectName("btn_primary")
+        self._btn_navigate.setEnabled(False)
+        self._btn_navigate.setToolTip("先在地图上单击选择目标，再明确开始导航")
+        self._btn_navigate.clicked.connect(self._on_navigate_clicked)
+        outer.addWidget(self._btn_navigate)
+
         return panel
 
     # ── Signal wiring ───────────────────────────────────────
@@ -370,6 +390,29 @@ class MainPage(QWidget):
         """Handle incoming odometry data."""
         if self._map_widget:
             self._map_widget.update_odometry(x, y, yaw)
+
+    def _on_goal_selected(self, x: float, y: float) -> None:
+        self._selected_goal = (float(x), float(y))
+        if self._lbl_goal is not None:
+            self._lbl_goal.setText(f"目标点：X {x:.2f}  Y {y:.2f}")
+        if self._btn_navigate is not None:
+            self._btn_navigate.setEnabled(True)
+        self.goal_selected.emit(float(x), float(y))
+
+    def _on_navigate_clicked(self) -> None:
+        if self._selected_goal is None:
+            return
+        self._btn_navigate.setEnabled(False)
+        self.navigation_requested.emit(*self._selected_goal)
+
+    def set_navigation_result(self, ok: bool, message: str = "") -> None:
+        if self._lbl_goal is not None:
+            if ok:
+                self._lbl_goal.setText("导航完成")
+            elif message:
+                self._lbl_goal.setText(f"导航未完成：{message}")
+        if self._btn_navigate is not None:
+            self._btn_navigate.setEnabled(self._selected_goal is not None)
 
     def _on_mechanism_status(self, data: dict) -> None:
         """Handle /mechanism/status JSON updates."""
