@@ -237,6 +237,21 @@ def nav_ready(service):
     return token, inputs
 
 
+def test_point_navigation_can_explicitly_disable_cloud_gate(stack):
+    service, _, _ = stack
+    task(service)
+    service.config = replace(service.config, navigation_mode="local", map_id="test-map",
+                             require_pointcloud_for_navigation=False)
+    token = service.local_request({"action": "nav_register"})["token"]
+    now = time.monotonic()
+    inputs = dict(x_m=0, y_m=0, yaw_rad=0, odom_at=now, cloud_at=now - 10,
+                  localization_at=now, localization_valid=True, blocked=True,
+                  frame_id="camera_init")
+    service.local_request(dict(action="nav_inputs", token=token, sequence=1, inputs=inputs))
+    reply = service.local_request({"action": "goal", "goal": {"frame_id": "map", "map_id": "test-map",
+                                                                  "pose": dict(x_m=1, y_m=0, yaw_rad=0)}})
+    assert reply["ok"]
+
 def test_local_navigation_uses_epoch_and_rejects_old_goal(stack):
     service, stm32, _ = stack
     task(service)

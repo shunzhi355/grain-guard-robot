@@ -270,7 +270,7 @@ class LocalRobotService:
             raise RuntimeError("local navigation sensor feed stale")
         if not 0 <= now - value["odom_at"] <= 0.3:
             raise RuntimeError("odometry stale")
-        if not 0 <= now - value["cloud_at"] <= 0.5 or value["blocked"]:
+        if self.config.require_pointcloud_for_navigation and (not 0 <= now - value["cloud_at"] <= 0.5 or value["blocked"]):
             raise RuntimeError("obstacle/cloud unavailable")
         if value["localization_valid"] is not True or not 0 <= now - value["localization_at"] <= 0.5:
             raise RuntimeError("localization quality not confirmed/fresh")

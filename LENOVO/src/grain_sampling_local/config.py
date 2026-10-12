@@ -32,6 +32,10 @@ class LocalConfig:
     point_far_forward: float = 0.55
     point_near_forward: float = 0.40
     point_max_effort_step: float = 0.15
+    # Keep the strict external health contract by default. ``odom_stable``
+    # is an explicit fallback for deployments where Golden has no Bool topic.
+    localization_health_mode: str = "external"
+    require_pointcloud_for_navigation: bool = True
 
     @classmethod
     def load(cls, path):
@@ -60,6 +64,10 @@ class LocalConfig:
             raise ValueError("full workflow requires calibrated forward_sign=1; do not invert without recalibrating absolute lift logic")
         if type(self.acknowledge_legacy_untighten) is not bool:
             raise ValueError("acknowledge_legacy_untighten must be boolean")
+        if self.localization_health_mode not in ("external", "odom_stable"):
+            raise ValueError("localization_health_mode must be external or odom_stable")
+        if type(self.require_pointcloud_for_navigation) is not bool:
+            raise ValueError("require_pointcloud_for_navigation must be boolean")
         for name in ("point_far_forward", "point_near_forward", "point_max_effort_step"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(float(value)):

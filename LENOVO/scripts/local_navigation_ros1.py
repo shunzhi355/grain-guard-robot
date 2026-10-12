@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--allow-point-navigation", action="store_true")
     args = parser.parse_args()
     from grain_sampling_local.config import LocalConfig
+    from grain_sampling_local.localization_health import LocalizationHealthGate
     from grain_sampling_local.navigation import PointNavigator, wrap
     from grain_sampling_workflow.robot_bridge import RobotClient
     config = LocalConfig.load(args.config)
@@ -44,6 +45,14 @@ def main():
               "blocked": True, "frame_id": config.map_frame}
     preview = []
     sensor_fault = threading.Event()
+    health_gate = LocalizationHealthGate(frame_id=config.map_frame)
+    health_pub = None
+    if config.localization_health_mode == "odom_stable":
+        health_pub = rospy.Publisher(config.localization_valid_topic, Bool, queue_size=1, latch=True)
+
+    def publish_health(value):
+        if health_pub is not None:
+            health_pub.publish(Bool(data=bool(value)))
     def odom(msg):
         age = (rospy.Time.now() - msg.header.stamp).to_sec()
         q = msg.pose.pose.orientation
@@ -54,13 +63,21 @@ def main():
         x, y = msg.pose.pose.position.x, msg.pose.pose.position.y
         if not all(math.isfinite(value) for value in (x, y, yaw)):
             return
+        now = time.monotonic()
         with lock:
             if time.monotonic() - inputs["odom_at"] < 0.5 and (math.hypot(x-inputs["x_m"], y-inputs["y_m"]) > 1 or abs(wrap(yaw-inputs["yaw_rad"])) > math.radians(75)):
                 inputs["localization_valid"] = False
                 inputs["odom_at"] = 0.0
                 sensor_fault.set()  # a later Bool heartbeat cannot erase a jump
+                publish_health(False)
                 return
-            inputs.update(x_m=x, y_m=y, yaw_rad=yaw, odom_at=time.monotonic()-age)
+            inputs.update(x_m=x, y_m=y, yaw_rad=yaw, odom_at=now-age)
+            if config.localization_health_mode == "odom_stable":
+                healthy = health_gate.accept(now=now, stamp=now-age, x=x, y=y, yaw=yaw,
+                                             frame_id=msg.header.frame_id)
+                inputs["localization_valid"] = healthy
+                inputs["localization_at"] = now
+                publish_health(healthy)
     def cloud(msg):
         age = (rospy.Time.now() - msg.header.stamp).to_sec()
         if not 0 <= age <= 0.5 or msg.header.frame_id.lstrip("/") not in ("body", "base_link"):
@@ -82,7 +99,8 @@ def main():
             inputs.update(localization_valid=bool(msg.data) and not sensor_fault.is_set(), localization_at=time.monotonic())
     rospy.Subscriber(config.odom_topic, Odometry, odom, queue_size=1)
     rospy.Subscriber(config.cloud_topic, PointCloud2, cloud, queue_size=1)
-    rospy.Subscriber(config.localization_valid_topic, Bool, localization, queue_size=1)
+    if config.localization_health_mode == "external":
+        rospy.Subscriber(config.localization_valid_topic, Bool, localization, queue_size=1)
     navigator = PointNavigator(
         far_forward=config.point_far_forward,
         near_forward=config.point_near_forward,
@@ -92,6 +110,13 @@ def main():
     last_preview = 0.0
     try:
         while not rospy.is_shutdown():
+            with lock:
+                if config.localization_health_mode == "odom_stable":
+                    health_gate.tick(now=time.monotonic())
+                    if not health_gate.valid:
+                        inputs["localization_valid"] = False
+                        inputs["localization_at"] = 0.0
+                        publish_health(False)
             with lock:
                 snapshot, points = dict(inputs), list(preview)
             sequence += 1
