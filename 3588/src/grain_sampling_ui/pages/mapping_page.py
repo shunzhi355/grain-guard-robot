@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 from typing import TYPE_CHECKING, Optional
 
@@ -39,7 +40,7 @@ from grain_sampling_workflow.map_save import (
 )
 from grain_sampling_workflow.map_manifest import build_manifest, write_manifest
 
-PCD_DIR = os.path.expanduser(os.getenv("SFAST_PCD_DIR", "~/fastlio2_ws/src/S-FAST_LIO/PCD"))
+PCD_DIR = os.path.expanduser(os.getenv("GRAIN_MAPPING_PCD_DIR", os.getenv("SFAST_PCD_DIR", "~/.cache/grain-diagnostics/GSR-NAV-UI-SOFTWARE-INTEGRATION-043/maps/current/PCD")))
 _logger = logging.getLogger(__name__)
 
 
@@ -56,6 +57,7 @@ class MappingPage(QWidget):
     stop_mapping_requested = Signal()
     save_map_requested = Signal()
     map_handoff_ready = Signal(str, str, int, str)
+    map_selected = Signal(dict)
     _save_finished = Signal(object)
 
     MAPPING_STATES = {
@@ -137,6 +139,10 @@ class MappingPage(QWidget):
         self._btn_toggle.setObjectName("btn_success")
         self._btn_toggle.clicked.connect(self._on_toggle_mapping)
         layout.addWidget(self._btn_toggle)
+        origin_hint = QLabel("本轮建图启动位作为地图原点；启动时车体保持静止，车头方向定义为 +X。右侧填写唯一地图名。")
+        origin_hint.setWordWrap(True)
+        origin_hint.setObjectName("field_hint")
+        layout.addWidget(origin_hint)
 
         layout.addStretch()
         return card
@@ -172,7 +178,7 @@ class MappingPage(QWidget):
         layout.addLayout(save_row)
 
         # Inline feedback keeps the save workflow non-blocking.
-        self._save_hint = QLabel("保存后可在下方列表中加载。")
+        self._save_hint = QLabel("建图进行中直接点击保存，会结束本轮建图并生成独立地图；停止建图不会保存本轮地图。")
         self._save_hint.setObjectName("field_hint")
         layout.addWidget(self._save_hint)
 
@@ -201,6 +207,11 @@ class MappingPage(QWidget):
         refresh_btn.setFixedHeight(28)
         refresh_btn.clicked.connect(self._refresh_map_list)
         header_row.addWidget(refresh_btn)
+        use_btn = QPushButton("使用选中地图")
+        use_btn.setFixedHeight(28)
+        use_btn.clicked.connect(self._on_use_selected_map)
+        self._use_map_btn = use_btn
+        header_row.addWidget(use_btn)
         layout.addLayout(header_row)
 
         # Map list
@@ -223,10 +234,31 @@ class MappingPage(QWidget):
 
         return card
 
+
+    def _pcd_dir(self) -> str:
+        bridge = self._slam_bridge
+        path = getattr(bridge, "pcd_dir", None) if bridge is not None else None
+        return str(path or PCD_DIR)
+
     # ── Map list refresh ──────────────────────────────────────────────
 
     def _refresh_map_list(self) -> None:
         self._map_list.clear()
+        self._saved_maps = []
+        if self._slam_bridge is not None and hasattr(self._slam_bridge, "list_saved_maps"):
+            maps = self._slam_bridge.list_saved_maps()
+            self._saved_maps = list(maps)
+            for index, entry in enumerate(maps):
+                selected = " [当前选择]" if entry.get("selected") else ""
+                item = QListWidgetItem(f"{entry.get('name', '未命名')}    {entry.get('map_id', '')}{selected}")
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                item.setToolTip(entry.get("preview", entry.get("path", "")))
+                self._map_list.addItem(item)
+            if not maps:
+                item = QListWidgetItem(f"(尚无已保存地图；地图输出目录：{self._pcd_dir()})")
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                self._map_list.addItem(item)
+            return
         if self._slam_bridge is not None and getattr(self._slam_bridge, "is_remote", False):
             maps = self._slam_bridge.list_maps()
             for entry in maps:
@@ -236,12 +268,13 @@ class MappingPage(QWidget):
             if not maps:
                 self._map_list.addItem("(联想主机暂无地图或未连接)")
             return
-        if not os.path.isdir(PCD_DIR):
-            item = QListWidgetItem("(PCD 目录不存在)")
+        pcd_dir = self._pcd_dir()
+        if not os.path.isdir(pcd_dir):
+            item = QListWidgetItem(f"(地图输出目录尚未创建：{pcd_dir})")
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             self._map_list.addItem(item)
             return
-        files = sorted([f for f in os.listdir(PCD_DIR) if f.endswith(".pcd")])
+        files = sorted([f for f in os.listdir(pcd_dir) if f.endswith(".pcd") and not f.startswith(("scans_", "GlobalMap_ikdtree")) and f != "GlobalMap.pcd"])
         if not files:
             item = QListWidgetItem("(暂无地图文件)")
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
@@ -249,13 +282,40 @@ class MappingPage(QWidget):
             return
         from datetime import datetime
         for f in files:
-            path = os.path.join(PCD_DIR, f)
+            path = os.path.join(pcd_dir, f)
             size_mb = os.path.getsize(path) / (1024 * 1024)
             mod_time = os.path.getmtime(path)
             ts = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M")
             item = QListWidgetItem(f"{f}    {size_mb:.1f}MB    {ts}")
             item.setToolTip(path)
             self._map_list.addItem(item)
+
+    @Slot()
+    def _on_use_selected_map(self) -> None:
+        row = self._map_list.currentRow()
+        maps = getattr(self, "_saved_maps", [])
+        if row < 0 or row >= len(maps):
+            self._set_save_feedback("请先在已保存地图列表中选中一张地图。", "danger")
+            return
+        entry = maps[row]
+        if self._slam_bridge is None or not hasattr(self._slam_bridge, "select_saved_map"):
+            self._set_save_feedback("当前地图桥接不支持切换地图。", "danger")
+            return
+        try:
+            self._slam_bridge.select_saved_map(entry)
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            self._set_save_feedback(f"地图选择失败：{exc}", "danger")
+            return
+        local_runtime = os.environ.get("GRAIN_LOCAL_RUNTIME") == "1"
+        self._set_save_feedback(
+            (f"已加载到 Golden：{entry.get('name', entry.get('map_id', '未命名'))}；"
+             "请确认车体位于该图起点，再启动定位并等待 READY。"
+             if local_runtime else
+             f"已选择地图：{entry.get('name', entry.get('map_id', '未命名'))}；请启动该地图定位并等待 READY。"),
+            "success",
+        )
+        self._refresh_map_list()
+        self.map_selected.emit(dict(entry))
 
     # ── Odometry check ────────────────────────────────────────────────
 
@@ -281,6 +341,8 @@ class MappingPage(QWidget):
     def set_slam_bridge(self, bridge: SlamBridge) -> None:  # type: ignore[name-defined]
         """Receive a SlamBridge instance for SLAM service calls."""
         self._slam_bridge = bridge
+        if hasattr(bridge, "mapping_status") and "MAPPING=RUNNING" in bridge.mapping_status():
+            self._transition_state("mapping")
         self._refresh_map_list()
 
     # ── Toggle mapping (start / stop) ─────────────────────────────────
@@ -299,7 +361,9 @@ class MappingPage(QWidget):
             self._transition_state("error")
             return
         # start_mapping() also stops relocalization first (mutually exclusive)
-        if self._slam_bridge.start_mapping():
+        map_name = self._map_name_input.text().strip() or "new_map"
+        if self._slam_bridge.start_mapping(map_name) if not getattr(self._slam_bridge, "is_remote", False) else self._slam_bridge.start_mapping():
+            self._refresh_map_list()
             self._map_saved_in_session = False
             self._saved_map_path = None
             self._transition_state("mapping")
@@ -366,17 +430,29 @@ class MappingPage(QWidget):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         new_filename = f"{name}_{ts}.pcd"
 
-        if not os.path.isdir(PCD_DIR):
-            os.makedirs(PCD_DIR, exist_ok=True)
+        pcd_dir = self._pcd_dir()
+        if not os.path.isdir(pcd_dir):
+            self._show_save_failure("请先启动本轮建图，再保存地图。")
+            return
 
-        existing = [f for f in os.listdir(PCD_DIR) if f.startswith(f"{name}_") and f.endswith(".pcd")]
+        existing = [f for f in os.listdir(pcd_dir) if f.startswith(f"{name}_") and f.endswith(".pcd")]
         if existing:
             self._show_save_failure(f"地图名称已存在：{name}。请使用新名称，历史地图不会被覆盖。")
             return
 
-        source = os.path.join(PCD_DIR, "GlobalMap.pcd")
+        if getattr(self._slam_bridge, "isolated_map_session", False):
+            self._save_in_progress = True
+            self._mapping_state_label.setText("正在完成本轮地图并生成预览...")
+            self._btn_save.setEnabled(False)
+            self._btn_toggle.setEnabled(False)
+            self._save_thread = threading.Thread(target=self._save_isolated_map_worker, args=(name,),
+                                                 daemon=True, name="isolated-map-save")
+            self._save_thread.start()
+            return
+
+        source = os.path.join(pcd_dir, "GlobalMap.pcd")
         before = snapshot_map(source)
-        destination = os.path.join(PCD_DIR, new_filename)
+        destination = os.path.join(pcd_dir, new_filename)
         self._save_in_progress = True
         self._mapping_state_label.setText("正在保存地图...")
         self._btn_save.setEnabled(False)
@@ -388,6 +464,17 @@ class MappingPage(QWidget):
             daemon=True,
         )
         self._save_thread.start()
+
+    def _save_isolated_map_worker(self, name: str) -> None:
+        try:
+            assert self._slam_bridge is not None
+            destination=self._slam_bridge.save_map_package(name)
+            if not destination:
+                raise RuntimeError(self._slam_bridge.last_error or "地图保存失败")
+            self._save_finished.emit(_MapSaveOutcome(True,destination=destination))
+        except Exception as exc:
+            _logger.exception("Isolated map save failed")
+            self._save_finished.emit(_MapSaveOutcome(False,error=str(exc)))
 
     def _save_remote_map_worker(self, name: str) -> None:
         assert self._slam_bridge is not None
@@ -408,6 +495,18 @@ class MappingPage(QWidget):
             if not self._slam_bridge.save_current_map(before_identity=before):
                 raise RuntimeError("未检测到本轮生成的新 GlobalMap.pcd")
             copy_fresh_map(source, destination, before)
+            # Build the versioned preview package off the GUI thread. The helper
+            # preserves the current map and records mapping_start as its origin.
+            package_root = Path(destination).with_suffix("").with_name(Path(destination).stem + ".map")
+            helper = Path(__file__).resolve().parents[4] / "LENOVO" / "scripts" / "task043_build_preview.py"
+            preview_python = os.environ.get("GRAIN_MAP_PREVIEW_PYTHON", str(Path(sys.executable)))
+            ikdtree = str(Path(source).with_name("GlobalMap_ikdtree.pcd"))
+            if helper.exists() and Path(ikdtree).is_file():
+                result = subprocess.run([preview_python, str(helper), str(destination), ikdtree,
+                                         str(package_root), Path(destination).stem.rsplit("_", 2)[0]],
+                                        capture_output=True, text=True, timeout=180)
+                if result.returncode:
+                    raise RuntimeError(result.stderr.strip() or "地图预览生成失败")
             outcome = _MapSaveOutcome(True, destination=destination)
         except Exception as exc:
             _logger.exception("Map save failed")
@@ -437,14 +536,22 @@ class MappingPage(QWidget):
                 self._transition_state("saved")
                 self.save_map_requested.emit()
                 return
-            manifest = build_manifest(
-                outcome.destination,
-                Path(outcome.destination).stem.rsplit("_", 2)[0],
-            )
+            source_path=Path(outcome.destination)
+            map_name=(source_path.parent.parent.name if source_path.name=="GlobalMap.pcd" else
+                      source_path.stem.rsplit("_",2)[0])
+            manifest = build_manifest(outcome.destination,map_name)
             manifest_path = str(write_manifest(manifest))
             if self._slam_bridge is not None and not getattr(self._slam_bridge, "is_remote", False):
-                if not self._slam_bridge.start_relocalization(manifest.pcd_path):
-                    raise RuntimeError(self._slam_bridge.last_error or "新地图重定位启动失败")
+                # New-map handoff is explicit: the startup gate must bind the
+                # new manifest and a physical initial pose before Golden starts.
+                # Saving succeeds independently; the UI reports the pending handoff.
+                if hasattr(self._slam_bridge, "start_relocalization"):
+                    self._slam_bridge.start_relocalization(manifest.pcd_path)
+                    handoff_note = self._slam_bridge.last_error
+                else:
+                    handoff_note = "等待定位启动门控确认"
+            else:
+                handoff_note = ""
             self.map_handoff_ready.emit(manifest.map_id, manifest.frame,
                                         manifest.map_version, manifest.pcd_path)
         except Exception as exc:
@@ -455,7 +562,7 @@ class MappingPage(QWidget):
         self._map_saved_in_session = True
         self._saved_map_path = outcome.destination
         self._map_name_input.clear()
-        self._set_save_feedback(f"地图已保存并已交接：{saved_name}", "success")
+        self._set_save_feedback(f"地图已保存：{saved_name}；等待定位启动确认", "success")
         self._refresh_map_list()
         self._transition_state("saved")
         self.save_map_requested.emit()

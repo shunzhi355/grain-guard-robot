@@ -22,6 +22,7 @@ except ImportError:
 
 from grain_sampling_ui.theme import THEME_COLORS
 from grain_sampling_ui.widgets.map_widget import MapWidget
+from grain_sampling_ui.widgets.navigation_telemetry import NavigationTelemetry
 
 C = THEME_COLORS
 
@@ -145,6 +146,10 @@ class MapPage(QWidget):
     """
     request_preview = Signal(float)
     upload_map = Signal(float)
+    goal_selected = Signal(float, float)
+    navigation_requested = Signal(float, float)
+    cancel_requested = Signal()
+    localization_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -154,6 +159,9 @@ class MapPage(QWidget):
         self._ros_thread = None
         self._current_room_id: str = ""
         self._slice_height_value: float = 1.5
+        self._saved_preview = None
+        self._selected_goal = None
+        self._nav_busy = False
         self._setup_ui()
 
     def set_ros_thread(self, ros_thread) -> None:
@@ -176,7 +184,7 @@ class MapPage(QWidget):
         title.setObjectName("page_title")
         header.addWidget(title)
 
-        subtitle = QLabel("点云切片与廒间边界")
+        subtitle = QLabel("保存地图 · 实时定位 · XY 目标导航")
         subtitle.setObjectName("page_sub")
         header.addWidget(subtitle)
 
@@ -244,17 +252,31 @@ class MapPage(QWidget):
         upload_btn = QPushButton("上传切面")
         upload_btn.clicked.connect(self._show_upload)
         layout.addWidget(upload_btn)
+        self._slice_controls = (label, self._height_spin, hint, gen_btn, upload_btn)
 
         layout.addSpacing(8)
 
         # Panel note
-        self._slice_note = QLabel(
-            f"当前显示 {self._slice_height_value:.1f} m 切面（示例数据）。"
-            "修改高度后点击「生成切面」刷新。"
-        )
+        self._slice_note = QLabel("等待加载当前保存地图预览。")
         self._slice_note.setObjectName("field_hint")
         self._slice_note.setWordWrap(True)
         layout.addWidget(self._slice_note)
+        self._btn_localization = QPushButton("启动定位（地图原点）")
+        self._btn_localization.setObjectName("btn_secondary")
+        self._btn_localization.setToolTip("车体静止在当前活动地图建图起点、车头方向一致时使用")
+        self._btn_localization.clicked.connect(lambda: self.localization_requested.emit())
+        layout.addWidget(self._btn_localization)
+        self.telemetry = NavigationTelemetry()
+        layout.addWidget(self.telemetry)
+        self._btn_navigate = QPushButton("开始导航")
+        self._btn_navigate.setObjectName("btn_primary")
+        self._btn_navigate.setEnabled(False)
+        self._btn_navigate.clicked.connect(self._on_navigate_clicked)
+        layout.addWidget(self._btn_navigate)
+        self.telemetry.readiness_changed.connect(self._refresh_navigation_button)
+        cancel = QPushButton("取消导航")
+        cancel.clicked.connect(lambda: self.cancel_requested.emit())
+        layout.addWidget(cancel)
 
         layout.addStretch()
         return card
@@ -268,6 +290,7 @@ class MapPage(QWidget):
 
         # Map widget
         self._map_widget = MapWidget()
+        self._map_widget.goal_selected.connect(self._on_goal_selected)
         layout.addWidget(self._map_widget, stretch=1)
 
         # Map tag overlay (bottom-left)
@@ -294,9 +317,14 @@ class MapPage(QWidget):
         self._slice_note.setText(f"当前显示 {h:.1f} m 切面。修改高度后点击「生成切面」刷新。")
         self._map_tag.setText(f"切片高度 <strong>{h:.1f}</strong> m · 廒间 —")
 
+        if self._saved_preview:
+            self.map_widget.fit_saved_map()
+            low, high = self._saved_preview["z_slice"]
+            self._slice_note.setText(f"显示已保存地图的 {low:g}–{high:g} m 投影。该图不是任意高度切片。")
+            self.set_saved_preview(self._saved_preview)
+            return
         self.request_preview.emit(h)
-
-        self._slice_note.setText("联想地图服务尚未提供该高度的切面预览")
+        self._slice_note.setText("保存地图预览未就绪，无法生成新切面。")
 
     def _show_upload(self) -> None:
         if self._upload_dialog is None:
@@ -305,6 +333,69 @@ class MapPage(QWidget):
         # Sync current height into the dialog
         self._upload_dialog._height_spin.setValue(self._slice_height_value)
         self._upload_dialog.show()
+
+    def _on_goal_selected(self, x, y):
+        self.set_selected_goal(x, y)
+        self.goal_selected.emit(x, y)
+
+    def clear_selected_goal(self):
+        self._selected_goal = None
+        self.telemetry.set_goal()
+        self.map_widget.clear_goal_target()
+        self.set_navigation_busy(False)
+        self.telemetry.set_result("请重新选点")
+
+    def set_selected_goal(self, x, y):
+        self._selected_goal = (float(x), float(y))
+        self.telemetry.set_goal(x, y)
+        self.map_widget.set_goal_target(x, y)
+        self._refresh_navigation_button()
+
+    def _refresh_navigation_button(self, *_):
+        self._btn_navigate.setEnabled(self._selected_goal is not None
+                                     and self.telemetry.ready and not self._nav_busy)
+
+    def set_localization_feedback(self, message, busy=False):
+        self._btn_localization.setEnabled(not busy)
+        self._btn_localization.setText("定位启动中…" if busy else "启动定位（地图原点）")
+        self._slice_note.setText(str(message))
+
+    def set_navigation_busy(self, busy):
+        self._nav_busy = bool(busy)
+        self._refresh_navigation_button()
+
+    def set_map_availability(self, available, reason=""):
+        """Show whether the rendered map is the map used by localization."""
+        if available:
+            if self._saved_preview:
+                self._slice_note.setText(
+                    "已加载保存地图，投影高度 %g–%g m。机器人显示与点击使用地图米制坐标。"
+                    % tuple(self._saved_preview["z_slice"]))
+            return
+        self._slice_note.setText(reason or "地图不可用：等待 Golden 定位地图与预览同步。")
+
+    def _on_navigate_clicked(self):
+        if self._selected_goal is None or not self.telemetry.ready or self._nav_busy:
+            return
+        self.set_navigation_busy(True)
+        self.telemetry.set_result("正在请求导航")
+        self.navigation_requested.emit(*self._selected_goal)
+
+    def set_navigation_result(self, ok, message=""):
+        self.set_navigation_busy(False)
+        self.telemetry.set_result("到达 XY 目标" if ok else (message or "未完成"))
+
+    def set_saved_preview(self, data):
+        self._saved_preview = data if "error" not in data else None
+        if self._saved_preview:
+            for control in self._slice_controls:
+                control.hide()
+            low, high = data["z_slice"]
+            self._map_tag.setText(f"保存地图 · {data['map_id']} · {data['frame']}")
+            self._slice_note.setText(f"已加载保存地图，投影高度 {low:g}–{high:g} m。机器人显示与点击使用地图米制坐标。")
+        else:
+            self._map_tag.setText("地图预览未就绪")
+            self._slice_note.setText("地图加载失败：" + data.get("error", "未知错误"))
 
     # ── Properties ──────────────────────────────────────────
     @property

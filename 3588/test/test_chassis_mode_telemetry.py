@@ -160,3 +160,33 @@ def test_ui_repaints_rc_style_only_when_displayed_state_changes():
     methods["_on_rc_mode_mirror"](window, "manual")
     assert window._manual_btn.style().unpolish.call_count == 2
     window._mode_value.setText.assert_called_with("手动")
+
+
+def test_rejected_live_reports_are_observable_but_never_refresh_mode():
+    clock=[0.0]
+    telemetry=ModeTelemetry(lambda:clock[0])
+    telemetry.feed(report(mode=2,sequence=100))
+    clock[0]=1.1
+    telemetry.feed(report(mode=2,sequence=99))
+    d=telemetry.diagnostics()
+    assert telemetry.mode()==""
+    assert d["wire_report_age_ms"]==0 and d["report_age_ms"]==1100
+    assert d["reports_seen"]==2 and d["reports_accepted"]==1
+    assert d["last_wire_report"]["sequence"]==99
+    assert d["rejected_reports"][-1]["accepted_sequence"]==100
+    telemetry.feed(report(mode=2,sequence=101))
+    assert telemetry.mode()=="auto"
+
+
+def test_bad_crc_is_distinct_from_wire_status_sequence_rejection():
+    port=MagicMock()
+    link=ChassisSerial(port,clock=lambda:2.0)
+    good=report(mode=2,sequence=1)
+    corrupt=bytearray(good);corrupt[-1]^=1
+    port.in_waiting=len(corrupt+good)
+    port.read.return_value=bytes(corrupt)+good
+    link.poll_mode()
+    d=link.rx_diagnostics()
+    assert d["crc_errors"]==1 and d["reports_accepted"]==1
+    assert d["bytes_received"]==len(corrupt+good)
+    assert d["rejected_reports"]==[]

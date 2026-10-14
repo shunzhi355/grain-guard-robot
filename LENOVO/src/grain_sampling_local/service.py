@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 import uuid
+from pathlib import Path
 from contextlib import contextmanager
 
 from grain_sampling_devices import mechanism_protocol as m
@@ -18,6 +19,10 @@ from grain_sampling_workflow.map_manifest import load_active_manifest
 
 STM32_RC_FAULT = 1  # chassis.h: FAULT_RC; only ignored during an active lift.
 MECHANISM_ACK_ATTEMPTS = 3
+
+
+class TransientStatusLoss(RuntimeError):
+    """Passive status silence requires neutral and a NEW goal, not global reset."""
 
 
 def finite(value):
@@ -77,7 +82,14 @@ class LocalRobotService:
                 logging.getLogger(__name__).error("Local event logging failed: %s", exc)
 
     def _map_identity(self):
-        """Read the active, hash-verified map identity when available."""
+        """Read the task-selected runtime map identity before static defaults."""
+        selected = self.config.directory / "active_runtime_map.json"
+        try:
+            value = json.loads(selected.read_text(encoding="utf-8"))
+            if all(value.get(key) not in (None, "") for key in ("map_id", "map_version", "frame")):
+                return value["map_id"], value["map_version"], value["frame"]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
         manifest = load_active_manifest(self.config.map_manifest or None)
         if manifest is None:
             return self.config.map_id, self.config.map_version, self.config.map_frame
@@ -129,6 +141,8 @@ class LocalRobotService:
                     "local chassis emergency-stop latch active; "
                     "inspect the robot and use Fault Reset before a new task"
                 )
+            if require_rc_auto and time.monotonic() - received >= 1.0:
+                raise TransientStatusLoss("STM32 status timeout; stopped, wait for fresh status and select a new goal")
             if require_rc_auto and link.mode_telemetry.mode() != "auto":
                 raise RuntimeError(
                     "fresh RC automatic mode required: "
@@ -164,6 +178,8 @@ class LocalRobotService:
                 "link_same_as_start": link is not None and link is self._baseline_link,
                 "rx_thread_alive": bool(self.chassis.receiver and self.chassis.receiver.is_alive()),
                 "status_age_ms": age_ms,
+                "serial_rx": link.rx_diagnostics() if link else None,
+                "last_stop_reason": self.chassis.last_stop_reason,
                 "rc_mode": link.mode_telemetry.mode() if link else "",
                 "reported_mode": state["mode"] if state else None,
                 "rc_age_ms": state["rc_age_ms"] if state else None,
@@ -232,7 +248,8 @@ class LocalRobotService:
         with self.lock:
             first = not self.latched
             self.latched = True
-            self.last_error = reason
+            if first or not self.last_error:
+                self.last_error = reason
             if self._goal:
                 self.navigation = {"goal_id": self._goal["goal_id"], "result": "FAILED", "message": reason}
             self._goal = None
@@ -240,7 +257,8 @@ class LocalRobotService:
             self._task_active = False
         if first:
             self.event("safety_latched", reason=reason,
-                       stm32=self._stm32_safety_snapshot())
+                       stm32=self._stm32_safety_snapshot(),
+                       navigation_inputs=self._navigation_diagnostics())
         self.chassis.estop()
         self._stop_link = self.chassis.link
         try:
@@ -248,15 +266,60 @@ class LocalRobotService:
         except Exception as exc:
             self.event("stop_unconfirmed", device="x2p", error=str(exc))
 
+    def _abort_navigation_for_status_gap(self, reason):
+        """No stale output or old-goal replay; keep hardware ESTOP/fault latches."""
+        with self.lock:
+            if self._goal is None:
+                # Another request may already have revoked this goal. Do not
+                # turn a concurrent, already-handled navigation stop into ESTOP.
+                if self._task_active or self._mechanism_gate.locked():
+                    self.trip(str(reason))
+                return
+            if self._mechanism_gate.locked():
+                self.trip(str(reason))
+                return
+            goal_id = self._goal["goal_id"]
+            diagnostics = self._stm32_safety_snapshot()
+            link_before_stop = self.chassis.link
+            self.chassis.stop("STM32 status timeout")
+            submitted = link_before_stop is not None and self.chassis.link is link_before_stop
+            self._goal, self._epoch = None, None
+            self._task_active = False
+            self.last_error = str(reason)
+            self.navigation = {"goal_id": goal_id, "result": "FAILED", "message": str(reason),
+                               "new_goal_required": True, "automatic_resume": False}
+        self.event("navigation_stopped_status_timeout", reason=str(reason),
+                   stm32=diagnostics, stop_request_submitted=submitted,
+                   physical_stop_confirmed=False, old_goal_revoked=True)
+        if not submitted:
+            self.trip("STM32 status timeout; stop write failed/offline")
+
+    def _navigation_diagnostics(self):
+        now = time.monotonic()
+        return {"input_age_ms": round((now - self._input_at) * 1000),
+                "ui_age_ms": round((now - self._ui_at) * 1000),
+                "motion_command_age_ms": None if self.chassis.last_command is None else round((now - self.chassis.last_command) * 1000),
+                "pose": dict(self._inputs) if self._inputs else None}
+
     def _supervise(self):
         while self.running.is_set():
             try:
-                if self.latched:
-                    if self.chassis.link is not None and self.chassis.link is not self._stop_link:
-                        self.chassis.estop()
-                        self.send_mechanism(m.STOP_ALL, 0)
-                        self._stop_link = self.chassis.link
-                elif self._task_active or self._goal is not None:
+                with self.lock:
+                    if not self.latched:
+                        with self.chassis.lock:
+                            link = self.chassis.link
+                            report, received = link.mode_telemetry.snapshot() if link else (None, 0)
+                            reset_detected = bool(report and time.monotonic() - received < .5 and
+                                (link is not self._baseline_link or report["boot"] != self._baseline_boot))
+                        if reset_detected:
+                            self.trip("STM32 rebooted/reconnected; operator reset and new goal required")
+                    if self.latched:
+                        with self.chassis.lock:
+                            if self.chassis.link is not None and self.chassis.link is not self._stop_link:
+                                self.chassis.estop()
+                                self.send_mechanism(m.STOP_ALL, 0)
+                                self._stop_link = self.chassis.link
+                if not self.latched and (self._task_active or self._goal is not None):
                     if self._mechanism_gate.locked() and self._goal is None:
                         self.check_lift_motion()
                     else:
@@ -266,7 +329,10 @@ class LocalRobotService:
                     if self._epoch is not None:
                         self._check_navigation_inputs()
                         if self.chassis.epoch != self._epoch:
-                            raise RuntimeError("local navigation velocity timeout/revoked authorization")
+                            raise RuntimeError("local navigation velocity timeout/revoked authorization: "
+                                               + self.chassis.last_stop_reason)
+            except TransientStatusLoss as exc:
+                self._abort_navigation_for_status_gap(exc)
             except Exception as exc:
                 self.trip(str(exc))
             time.sleep(0.03)
@@ -318,6 +384,12 @@ class LocalRobotService:
             self._inputs = value
             self._input_at = now
             return {"ok": True, "goal": self._goal, "latched": self.latched}
+        if kind == "nav_fault":
+            reason = request.get("reason")
+            if not isinstance(reason, str) or not reason or len(reason) > 256:
+                raise ValueError("bounded navigation fault reason required")
+            self.trip("local navigator fault: " + reason)
+            return {"ok": True}
         if kind == "nav_velocity":
             if not self._goal or request.get("goal_id") != self._goal["goal_id"] or self._epoch is None:
                 raise RuntimeError("no matching authorized local navigation goal")
@@ -329,19 +401,35 @@ class LocalRobotService:
             forward, turn = request.get("forward"), request.get("turn")
             if not all(finite(v) and -1 <= v <= 1 for v in (forward, turn)):
                 raise ValueError("normalized effort must be finite and in [-1,1]")
+            if forward != 0 and turn != 0:
+                raise ValueError("forward and turn must be mutually exclusive")
             self.chassis.command(self._epoch, round(forward * 300), round(turn * 800))
             self._zero_frames = self._zero_frames + 1 if forward == turn == 0 else 0
             if request.get("arrived") is True:
                 pose, goal = self._inputs, self._goal["pose"]
                 error = math.hypot(pose["x_m"] - goal["x_m"], pose["y_m"] - goal["y_m"])
-                yaw_error = abs(math.atan2(math.sin(pose["yaw_rad"] - goal["yaw_rad"]), math.cos(pose["yaw_rad"] - goal["yaw_rad"])))
-                if self._zero_frames < 3 or error > 0.2 or yaw_error > 0.1745:
-                    raise RuntimeError("arrival requires three zero frames and fresh in-tolerance pose")
+                if self._zero_frames < 3 or error > self.config.point_xy_tolerance:
+                    raise RuntimeError("arrival requires three zero frames and fresh in-tolerance XY pose")
                 self.chassis.stop("local navigation arrival")
                 self.navigation = {"goal_id": self._goal["goal_id"], "result": "SUCCEEDED"}
                 self._goal, self._epoch = None, None
             return {"ok": True}
         raise ValueError("unknown local navigation request")
+
+    def _recovery_status(self):
+        with self.chassis.lock:
+            link = self.chassis.link
+            report, received = link.mode_telemetry.snapshot() if link else (None, 0)
+            fresh = bool(report and 0 <= time.monotonic() - received < .5)
+            boot = report["boot"] if fresh else None
+            detected = bool(fresh and (link is not self._baseline_link or boot != self._baseline_boot))
+            required = bool(self.latched or self.chassis.estop_latched or detected)
+            ready = bool(fresh and link.mode_telemetry.mode() == "auto"
+                         and report["faults"] == 0 and self.chassis.epoch is None
+                         and not self._mechanism_gate.locked())
+            return {"mcu_boot": boot, "baseline_boot": self._baseline_boot,
+                    "reset_detected": detected, "reset_required": required,
+                    "reset_ready": ready, "automatic_motion_resume": False}
 
     def local_request(self, request):
         kind = request.get("action")
@@ -352,8 +440,11 @@ class LocalRobotService:
             map_id, map_version, map_frame = self._map_identity()
             return {"ok": True, "runtime": "lenovo-local", "simulation": self.simulation,
                     "chassis": self.chassis.status(), "navigation": self.navigation,
+                    "recovery": self._recovery_status(),
                     "lenovo_online": self.config.navigation_mode == "local" and inputs is not None,
                     "test_navigation_mode": self.config.navigation_mode == "operator",
+                    "localization_health_mode": self.config.localization_health_mode,
+                    "pointcloud_required": self.config.require_pointcloud_for_navigation,
                     "pose": inputs, "slam": {"map_id": map_id,
                         "map_version": map_version,
                         "frame": map_frame,
@@ -364,7 +455,10 @@ class LocalRobotService:
         if kind == "estop":
             self.trip("operator emergency stop")
             return {"ok": True}
-        if kind == "clear_estop":
+        if kind in ("clear_estop", "restore_control"):
+            # ``restore_control`` is the idempotent form used by the UI's
+            # "恢复底盘控制" button: it hands control back even when no latch is
+            # currently set, but keeps every safety precondition below.
             if request.get("mechanical_reset_confirmed") is not True:
                 raise RuntimeError("explicit operator mechanical inspection/reset confirmation required")
             if not self._mechanism_gate.acquire(blocking=False):
@@ -374,16 +468,24 @@ class LocalRobotService:
                 if state["rc_mode"] != "auto" or state["faults"] != 0 or state["motion_armed"]:
                     raise RuntimeError("reset requires online fresh auto RC and no faults/motion")
                 self.mechanism.controller.lift_drive.stop()
+                # The explicit reset will first submit AUTO_STOP. Mark this
+                # handle under the same locks as reconnect supervision, so a
+                # delayed "stop the replacement" pass cannot ESTOP after CLEAR.
+                with self.lock, self.chassis.lock:
+                    self._stop_link = self.chassis.link
                 self.chassis.clear_estop(confirm_status=True)
                 self.mechanism.reset(self.mechanism.grain, mechanical_reset_confirmed=True)
-                with self.chassis.lock:
+                with self.lock, self.chassis.lock:
                     self._baseline_link = self.chassis.link
                     state, _ = self._baseline_link.mode_telemetry.snapshot()
                     self._baseline_boot = state["boot"]
-                self._task_active = False
-                self.latched, self.last_error = False, ""
-                self.event("operator_reset", resumed=False)
-                return {"ok": True}
+                    self._task_active = False
+                    self._goal, self._epoch = None, None
+                    self.latched, self.last_error = False, ""
+                self.event("operator_reset" if kind == "clear_estop" else "operator_take_control",
+                           resumed=False)
+                return {"ok": True, "latched": False, "resumed": False,
+                        "requires_new_goal": True}
             finally:
                 self._mechanism_gate.release()
         if kind == "cancel":
@@ -442,9 +544,8 @@ class LocalRobotService:
                     map_id, _, map_frame = self._map_identity()
                     frame_id = goal.get("frame_id")
                     if (goal.get("map_id") != map_id
-                            or frame_id not in (map_frame, "map")
-                            or not finite(pose.get("yaw_rad"))):
-                        raise ValueError("goal map/frame/yaw mismatch")
+                            or frame_id not in (map_frame, "map")):
+                        raise ValueError("goal map/frame mismatch")
                     self._check_navigation_inputs()
                 goal_id = str(uuid.uuid4())
                 self._goal = {"goal_id": goal_id, "pose": pose}
@@ -465,12 +566,19 @@ class LocalRobotService:
             with self.lock:
                 try:
                     return self._nav_request(request)
+                except TransientStatusLoss as exc:
+                    self._abort_navigation_for_status_gap(exc)
+                    raise
                 except Exception as exc:
                     if self._epoch is not None:
                         self.trip(f"local navigation rejected: {exc}")
                     raise
-        if kind in ("slam", "map_list"):
-            raise RuntimeError("use Lenovo local SLAM bridge; no remote map service")
+        if kind == "map_list":
+            from grain_sampling_local.slam import LocalSlamBridge
+            root = LocalSlamBridge().find_latest_saved_map()
+            return {"ok": True, "maps": ([{"map_id": Path(root).stem, "path": root}] if root else [])}
+        if kind == "slam":
+            raise RuntimeError("mapping is owned by the task043 container bridge; use the Lenovo UI")
         raise ValueError("unknown local action")
 
     def serve(self):

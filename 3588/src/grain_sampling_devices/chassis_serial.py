@@ -16,6 +16,13 @@ class ChassisError(RuntimeError):
     pass
 
 
+class MechanismSubmissionError(ChassisError):
+    """A write may have reached the MCU; preserve its exact retry identity."""
+    def __init__(self, message, command_sequence):
+        super().__init__(message)
+        self.command_sequence = command_sequence
+
+
 class MechanismReplyError(ChassisError):
     pass
 
@@ -44,12 +51,16 @@ class ChassisSerial:
         self._reply_cv = threading.Condition()
         self._pending_replies = {}
         self.clock = clock
+        self.last_rx_at = None
 
     def poll_mode(self):
         """Only UART reader: dispatch STATUS and mechanism replies."""
         available = min(self.serial.in_waiting, 4096)
         if available > 0:
-            for frame in self._parser.feed(self.serial.read(available)):
+            data = self.serial.read(available)
+            if data:
+                self.last_rx_at = self.clock()
+            for frame in self._parser.feed(data):
                 self.mode_telemetry.accept(frame)
                 if frame.kind != mechanism.REPLY_TYPE or len(frame.payload) != mechanism.REPLY_STRUCT.size:
                     continue
@@ -62,6 +73,16 @@ class ChassisSerial:
                         pending[2] = result
                         self._reply_cv.notify_all()
         return self.mode_telemetry.mode()
+
+    def rx_diagnostics(self):
+        parser = self._parser
+        return {**self.mode_telemetry.diagnostics(),
+                "rx_age_ms": None if self.last_rx_at is None else round((self.clock() - self.last_rx_at) * 1000),
+                "bytes_received": parser.bytes_received,
+                "frames_received": parser.frames_received,
+                "crc_errors": parser.crc_errors, "header_errors": parser.header_errors,
+                "buffered_bytes": len(parser.buffer),
+                "last_crc_failure": dict(parser.last_crc_failure) if parser.last_crc_failure else None}
 
     def _write_locked(self, kind, payload):
         self.sequence = (self.sequence + 1) & 0xffffffff
@@ -98,6 +119,13 @@ class ChassisSerial:
         if not confirm:
             with (write_guard if write_guard is not None else nullcontext()):
                 return self.send(mechanism.FRAME_TYPE, payload)
+        sequence = self.begin_mechanism_command(command, device, sequence=sequence,
+                                                write_guard=write_guard)
+        return self.wait_mechanism_reply(sequence, command, device, timeout=timeout)
+
+    def begin_mechanism_command(self, command, device, *, sequence=None, write_guard=None):
+        """Allocate and transmit atomically; leave ACK wait outside caller locks."""
+        payload = mechanism.command_payload(command, device)
         # Optional supervisor guard covers only the write, never the ACK wait.
         # This orders a checked action before/after ESTOP without blocking RX.
         with (write_guard if write_guard is not None else nullcontext()), self._tx_lock:
@@ -111,10 +139,14 @@ class ChassisSerial:
                                  sequence, payload)
                 if self.serial.write(frame) != len(frame):
                     raise ChassisError("short serial write")
-            except Exception:
+            except Exception as exc:
                 with self._reply_cv:
                     self._pending_replies.pop(sequence, None)
-                raise
+                raise MechanismSubmissionError(str(exc), sequence) from exc
+        return sequence
+
+    def wait_mechanism_reply(self, sequence, command, device, *, timeout=0.4):
+        """Wait for an already submitted request, without holding the TX lock."""
         deadline = self.clock() + timeout
         with self._reply_cv:
             try:

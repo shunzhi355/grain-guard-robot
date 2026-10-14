@@ -96,7 +96,7 @@ class RobotBridge:
             frame_id = str(slam.get("frame") or "camera_init")
             response = self.client.request("goal", goal={"frame_id": frame_id,
                 "map_id": map_id, "map_version": slam.get("map_version", 0),
-                "pose": {"x_m": float(x), "y_m": float(y), "yaw_rad": 0.0}})
+                "pose": {"x_m": float(x), "y_m": float(y)}})
             goal_id = response["goal_id"]
             deadline = time.monotonic() + self.NAV_TIMEOUT_SEC
             while time.monotonic() < deadline:
@@ -137,6 +137,10 @@ class RobotBridge:
     def call_clear_estop(self) -> bool:
         """Operator-requested reset; never resumes the canceled task."""
         return self._request("clear_estop", mechanical_reset_confirmed=True)
+
+    def call_restore_control(self) -> bool:
+        """Hand chassis control back to the UI without resuming the old task."""
+        return self._request("restore_control", mechanical_reset_confirmed=True)
 
     def call_test_preflight_reset(self, status: dict[str, Any] | None = None) -> bool:
         """Clear a prior safety latch before an explicit navigation test.

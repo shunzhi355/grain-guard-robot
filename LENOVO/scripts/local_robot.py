@@ -110,6 +110,11 @@ def main(argv=None):
     os.environ["GRAIN_LOCAL_RUNTIME"] = "1"
     os.environ["GRAIN_LOCAL_CONFIG"] = str(args.config.resolve())
     os.environ["GRAIN_LOCAL_PREVIEW"] = str(config.directory / "preview.json")
+    # Navigation follows the validated active map. A newer saved candidate is
+    # retained separately and must not silently replace that coordinate system.
+    from grain_sampling_workflow.saved_map_preview import default_preview_pointer
+    default_preview = default_preview_pointer(config.directory)
+    os.environ.setdefault("GRAIN_SAVED_MAP_PREVIEW", str(default_preview))
     if args.command == "ui":
         if not args.check_qt:
             from grain_sampling_workflow.robot_bridge import RobotClient

@@ -33,7 +33,7 @@ def _socket_status(socket_path: str) -> dict[str, Any]:
     return RobotClient(socket_path).request("status")
 
 
-def _status_gates(status: dict[str, Any], *, require_local: bool) -> list[Gate]:
+def _status_gates(status: dict[str, Any], *, require_local: bool, config: Any = None) -> list[Gate]:
     gates: list[Gate] = []
     if status.get("runtime") == "lenovo-local":
         gates.append(_gate("local_service", "PASS", "Lenovo local daemon identity matches"))
@@ -59,10 +59,37 @@ def _status_gates(status: dict[str, Any], *, require_local: bool) -> list[Gate]:
         gates.append(_gate("localization", "BLOCKED", "pose is missing, invalid, or non-finite"))
 
     slam = status.get("slam") or {}
-    if isinstance(slam.get("map_id"), str) and slam["map_id"]:
+    expected_map = getattr(config, "map_id", "") if config else ""
+    expected_frame = getattr(config, "map_frame", "") if config else ""
+    if (isinstance(slam.get("map_id"), str) and slam["map_id"]
+            and (not expected_map or slam["map_id"] == expected_map)
+            and (not expected_frame or slam.get("frame") == expected_frame)):
         gates.append(_gate("map_identity", "PASS", f"active map_id={slam['map_id']}"))
     else:
-        gates.append(_gate("map_identity", "BLOCKED", "no active map identity"))
+        gates.append(_gate("map_identity", "BLOCKED", "active map identity/frame is missing or differs from configuration"))
+
+    if require_local:
+        health_mode = status.get("localization_health_mode")
+        if health_mode == "odom_stable":
+            gates.append(_gate("localization_health_source", "PASS", "continuous fresh Odometry with frame/jump checks"))
+        else:
+            gates.append(_gate("localization_health_source", "BLOCKED", f"unsupported or missing health source: {health_mode!r}"))
+
+        cloud_required = status.get("pointcloud_required")
+        if cloud_required is False:
+            gates.append(_gate("pointcloud_policy", "PASS", "point cloud is optional in this navigation profile"))
+        else:
+            gates.append(_gate("pointcloud_policy", "BLOCKED", "point cloud is required or its policy is unknown"))
+
+        try:
+            now = time.monotonic()
+            fresh = (0 <= now - float(pose["odom_at"]) <= 0.3
+                     and 0 <= now - float(pose["localization_at"]) <= 0.5
+                     and pose.get("frame_id") == expected_frame)
+        except (KeyError, TypeError, ValueError):
+            fresh = False
+        gates.append(_gate("pose_freshness", "PASS" if fresh else "BLOCKED",
+                           "pose timestamps and frame are current" if fresh else "pose timestamps are stale or frame differs"))
 
     chassis = status.get("chassis") or {}
     if chassis.get("rc_mode") == "auto" and chassis.get("faults", 0) == 0:
@@ -104,7 +131,7 @@ def check_session(config_path: str, *, require_local: bool = False) -> dict[str,
         gates.append(_gate("control_socket", "BLOCKED", f"daemon status unavailable: {exc}"))
     else:
         gates.append(_gate("control_socket", "PASS", socket_path))
-        gates.extend(_status_gates(status, require_local=require_local))
+        gates.extend(_status_gates(status, require_local=require_local, config=config))
     gates.extend(_serial_owner_gates(config))
     passed = all(g.state == "PASS" for g in gates)
     return {

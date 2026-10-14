@@ -13,5 +13,16 @@
   "localization_valid_topic": "/grain/localization_valid",
   "map_frame": "camera_init",
   "map_id": "",
-  "ros_image": "grain-nav:noetic-x86"
+  "ros_image": "grain-nav:noetic-x86",
+  "localization_health_mode": "odom_stable",
+  "require_pointcloud_for_navigation": false,
+  "point_turn_deadzone": 0.18,
+  "point_turn_max": 0.2,
+  "point_xy_tolerance": 0.12,
+  "point_heading_tolerance": 0.2,
+  "point_forward_deadzone": 0.0,
+  "point_forward_min": 0.4,
+  "point_turn_min": 0.18,
+  "point_heading_realign_tolerance": 0.3,
+  "point_arrival_hysteresis": 0.04
 }

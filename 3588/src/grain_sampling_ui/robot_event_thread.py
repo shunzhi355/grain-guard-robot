@@ -5,6 +5,7 @@ import math
 import os
 import json
 import time
+import threading
 from pathlib import Path
 
 from PySide2.QtCore import QThread, Signal
@@ -24,6 +25,8 @@ class RobotEventThread(QThread):
     rc_mode_updated = Signal(str)
     safety_status_updated = Signal(str)
     local_runtime_updated = Signal(dict)
+    saved_map_updated = Signal(dict)
+    navigation_telemetry_updated = Signal(dict)
 
     def __init__(self, parent=None, client=None):
         super().__init__(parent)
@@ -35,6 +38,10 @@ class RobotEventThread(QThread):
         self._last_local_view = None
         self._last_rc_mode = None
         self._last_rc_emit_at = float("-inf")
+        self._telemetry_emit_at = float("-inf")
+        self._preview_check_at = 0.0
+        self._saved_preview_key = None
+        self._saved_preview_loading = False
 
     def run(self):
         while self._running:
@@ -73,12 +80,19 @@ class RobotEventThread(QThread):
                     self._last_safety_message = safety_message
                     self.safety_status_updated.emit(safety_message)
                 pose = status.get("pose") or {}
+                if now - self._telemetry_emit_at >= 0.2:
+                    self._telemetry_emit_at = now
+                    self.navigation_telemetry_updated.emit({"pose": dict(pose),
+                        "navigation": status.get("navigation"), "recovery": status.get("recovery"),
+                        "motion_blocked": bool(status.get("safety_latched") or chassis.get("estop_latched"))})
                 if all(isinstance(pose.get(k), (int, float)) and math.isfinite(pose[k])
                        for k in ("x_m", "y_m", "yaw_rad")):
                     self.odometry_updated.emit(pose["x_m"], pose["y_m"], pose["yaw_rad"])
                 if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
                     self._local_preview()
+                    self._saved_preview(status)
             except (OSError, RuntimeError, ValueError) as exc:
+                self.navigation_telemetry_updated.emit({"pose": {}, "navigation": None})
                 self._last_local_view = None
                 self._last_rc_mode = None
                 self._last_rc_emit_at = float("-inf")
@@ -121,6 +135,59 @@ class RobotEventThread(QThread):
             self.cloud_registered_updated.emit(picture)
         except (OSError, ValueError, KeyError, TypeError):
             return
+
+    def _saved_preview(self, status):
+        """Read saved-map identity without blocking the 100 ms safety heartbeat."""
+        now = time.monotonic()
+        if self._saved_preview_loading or now - self._preview_check_at < 1.0:
+            return
+        self._preview_check_at = now
+        pointer = os.environ.get("GRAIN_SAVED_MAP_PREVIEW")
+        if not pointer:
+            return
+        slam = status.get("slam") or {}
+        from grain_sampling_workflow.saved_map_preview import preview_paths
+        try:
+            pointer_value = json.loads(Path(pointer).read_text(encoding="utf-8"))
+            candidate = pointer_value.get("candidate") is True
+            paths = preview_paths(pointer)
+            key = (slam.get("map_id"), slam.get("frame"), candidate,
+                   tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            key = ("error", str(exc))
+            if key != self._saved_preview_key:
+                self.saved_map_updated.emit({"error": str(exc)})
+                self._saved_preview_key = key
+            return
+        if key == self._saved_preview_key:
+            return
+        self._saved_preview_loading = True
+        self.saved_map_updated.emit({"error": "正在校验保存地图…"})
+        threading.Thread(target=self._load_saved_preview,
+                         args=(pointer, dict(slam), key), daemon=True,
+                         name="saved-map-preview-loader").start()
+
+    def _load_saved_preview(self, pointer, slam, key):
+        from grain_sampling_workflow.saved_map_preview import load_saved_preview, preview_paths
+        try:
+            pointer_value = json.loads(Path(pointer).read_text(encoding="utf-8"))
+            candidate = pointer_value.get("candidate") is True
+            data = load_saved_preview(pointer, map_id=slam.get("map_id"), frame=slam.get("frame"), allow_candidate=candidate)
+            data["candidate"] = candidate
+            data["active_map_match"] = not candidate and data.get("map_id") == slam.get("map_id")
+            image = QImage(data["image_path"])
+            if image.isNull() or (image.width(), image.height()) != (data["width_px"], data["height_px"]):
+                raise ValueError("saved map image unreadable or dimensions differ")
+            signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in preview_paths(pointer))
+            if signature != key[3]:
+                raise ValueError("saved map artifacts changed during validation")
+            data["image"] = image
+            self.saved_map_updated.emit(data)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.saved_map_updated.emit({"error": str(exc)})
+        finally:
+            self._saved_preview_key = key
+            self._saved_preview_loading = False
 
     def get_latest_laser_map(self):
         return None

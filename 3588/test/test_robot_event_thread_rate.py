@@ -35,6 +35,9 @@ def test_local_status_heartbeat_coalesces_unchanged_qt_signals():
         odometry_updated=SimpleNamespace(emit=MagicMock()),
         error=SimpleNamespace(emit=MagicMock()),
         _local_preview=lambda: None,
+        _saved_preview=lambda status: None,
+        _telemetry_emit_at=float("-inf"),
+        navigation_telemetry_updated=SimpleNamespace(emit=MagicMock()),
     )
     calls = [0]
 

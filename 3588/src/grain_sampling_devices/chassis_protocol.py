@@ -34,8 +34,14 @@ def decode_status(payload):
 class Parser:
     def __init__(self):
         self.buffer = bytearray()
+        self.bytes_received = 0
+        self.crc_errors = 0
+        self.header_errors = 0
+        self.frames_received = 0
+        self.last_crc_failure = None
 
     def feed(self, data):
+        self.bytes_received += len(data)
         self.buffer.extend(data)
         frames = []
         while len(self.buffer) >= 2:
@@ -46,6 +52,7 @@ class Parser:
                 break
             version, kind, size = struct.unpack_from("<BBH", self.buffer, 2)
             if version != 1 or size > 128:
+                self.header_errors += 1
                 del self.buffer[0]
                 continue
             total = size + 16
@@ -53,9 +60,15 @@ class Parser:
                 break
             crc = struct.unpack_from("<H", self.buffer, total - 2)[0]
             if binascii.crc_hqx(self.buffer[2:total-2], 0xffff) != crc:
+                self.crc_errors += 1
+                self.last_crc_failure = {"kind": kind, "payload_size": size,
+                    "received_crc": crc,
+                    "computed_crc": binascii.crc_hqx(self.buffer[2:total-2], 0xffff),
+                    "frame_hex": bytes(self.buffer[:total]).hex()}
                 del self.buffer[0]
                 continue
             session, sequence = struct.unpack_from("<II", self.buffer, 6)
+            self.frames_received += 1
             frames.append(Frame(kind, session, sequence, bytes(self.buffer[14:total-2])))
             del self.buffer[:total]
         return frames

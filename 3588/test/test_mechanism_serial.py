@@ -592,3 +592,19 @@ def test_production_server_injects_shared_uart(monkeypatch):
     finally:
         server.mechanism.close()
         chassis.close()
+
+
+def test_stop_between_precheck_and_first_mechanism_send_preserves_sequence_order(stack,monkeypatch):
+    port,chassis,_,_=stack
+    link=chassis.link;original=link.mode_telemetry.mode;inserted=[False]
+    def interleaved_mode():
+        if not inserted[0]:
+            inserted[0]=True
+            chassis.stop("TEST_ONLY interleaved safety stop")
+        return original()
+    monkeypatch.setattr(link.mode_telemetry,"mode",interleaved_mode)
+    seq=chassis.mechanism_command(1,6)
+    frames=port.frames()
+    assert [f.kind for f in frames]==[wire.STREAM_CONTROL,mcu.RELIABLE_FRAME_TYPE]
+    assert [f.sequence for f in frames]==[1,2]
+    assert seq==2

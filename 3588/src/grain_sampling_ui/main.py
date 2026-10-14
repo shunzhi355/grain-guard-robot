@@ -31,13 +31,14 @@ from PySide2.QtWidgets import (
     QSizePolicy,
     QMessageBox,
 )
-from PySide2.QtCore import Qt, QTimer, Slot
+from PySide2.QtCore import Qt, QTimer, Slot, Signal
 from PySide2.QtGui import QFont, QPixmap, QPainter, QColor, QBrush
 
 # ── Internal modules ──────────────────────────────────────
 from grain_sampling_ui.theme import THEME_QSS
 from grain_sampling_ui.page_manager import PageManager
 from grain_sampling_ui.robot_event_thread import RobotEventThread
+from grain_sampling_ui.safety_status import chassis_safety_message
 
 # Page stubs
 from grain_sampling_ui.pages.main_page import MainPage
@@ -82,6 +83,9 @@ def _env_flag(name: str) -> bool:
 class MainWindow(QMainWindow):
     """Top-level window for the grain sampling robot UI."""
 
+    localization_status_received = Signal(dict)
+    localization_confirmation_finished = Signal(bool, str)
+
     # Page name → Chinese breadcrumb used in the status bar
     PAGE_NAMES: dict[str, str] = {
         "main": "主页面",
@@ -98,6 +102,13 @@ class MainWindow(QMainWindow):
         self._ros_thread: Optional[RobotEventThread] = None
         self._slam_bridge: Optional[SlamBridge] = None
         self._navigation_thread: Optional[threading.Thread] = None
+        self._localization_status = {}
+        self._saved_preview_data = {}
+        self._localization_status_loading = False
+        self._localization_confirming = False
+        self._localization_closing = False
+        self.localization_status_received.connect(self._on_localization_status)
+        self.localization_confirmation_finished.connect(self._on_localization_confirmation)
 
         # Nav button active-state tracking: QPushButton → set of page names
         self._nav_mappings: list[tuple[QPushButton, set[str]]] = []
@@ -298,11 +309,16 @@ class MainWindow(QMainWindow):
         estop_btn.clicked.connect(self._on_emergency_stop)
         layout.addWidget(estop_btn)
 
-        reset_btn = QPushButton("故障复位")
-        reset_btn.setObjectName("fault_reset")
-        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_btn.clicked.connect(self._on_clear_estop)
-        layout.addWidget(reset_btn)
+        # Single recovery button: clears the software/STM32 emergency latch when
+        # one is set and always hands chassis control back to this UI so the
+        # chassis can accept a new navigation goal.  It never resumes an old one.
+        self._fault_reset_btn = QPushButton("故障复位")
+        self._fault_reset_btn.setObjectName("fault_reset")
+        self._fault_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fault_reset_btn.setToolTip(
+            "底盘静止、遥控自动档且摇杆回中时：清除急停锁并恢复底盘控制，之后需重新选点导航")
+        self._fault_reset_btn.clicked.connect(self._on_clear_estop)
+        layout.addWidget(self._fault_reset_btn)
 
         parent_layout.addWidget(panel)
 
@@ -342,6 +358,11 @@ class MainWindow(QMainWindow):
         self._main_page = pages[0][1]
         self._map_page = pages[2][1]
         self._mapping_page = pages[4][1]
+        self._main_page.goal_selected.connect(self._on_navigation_goal_selected)
+        self._map_page.goal_selected.connect(self._on_navigation_goal_selected)
+        self._map_page.navigation_requested.connect(self._on_map_goal_requested)
+        self._map_page.cancel_requested.connect(self._on_pause)
+        self._map_page.localization_requested.connect(self._on_start_localization)
         self._main_page.navigation_requested.connect(self._on_map_goal_requested)
         self._main_page.navigation_finished.connect(self._on_map_navigation_finished)
 
@@ -379,15 +400,16 @@ class MainWindow(QMainWindow):
             self._alarm_bar.set_alarm(bridge.last_error)
 
     def _on_clear_estop(self) -> None:
-        """Manual recovery after the operator has inspected the stopped robot."""
+        """Clear any latch and hand chassis control back; never resume the old task."""
+        self._operator_take_control()
+
+    def _operator_take_control(self) -> None:
         bridge = SamplingBridge()
         try:
-            chassis = bridge.client.request("status").get("chassis") or {}
+            status = bridge.client.request("status")
+            chassis = status.get("chassis") or {}
         except (OSError, RuntimeError, ValueError) as exc:
             self._alarm_bar.set_alarm(f"读取底盘状态失败：{exc}")
-            return
-        if not chassis.get("estop_latched"):
-            QMessageBox.information(self, "故障复位", "底盘当前没有急停锁定。")
             return
         if (chassis.get("chassis_link") != "online"
                 or chassis.get("rc_mode") != "auto"
@@ -396,22 +418,46 @@ class MainWindow(QMainWindow):
                 or chassis.get("motion_armed")):
             self._alarm_bar.set_alarm("复位条件不足：确认底盘在线、遥控自动档且有效、故障码为0、无运动授权")
             return
-        reply = QMessageBox.question(
-            self, "确认故障复位",
-            "请先现场确认：机构和底盘完全静止、取样管与升降机构已机械复位、"
-            "故障原因已排查、运动范围无人。\n"
-            "复位只清除软件/STM32 急停锁；不会恢复旧任务，也不会启动电机。\n"
-            "确认现在复位吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
+        reply = QMessageBox.question(self, "确认复位并恢复控制",
+                                     "请先现场确认：机构和底盘完全静止、取样管与升降机构已机械复位、"
+                                     "运动范围无人、遥控器处于自动档且摇杆回中。\n"
+                                     "该操作会清除软件/STM32 急停锁（如有），并把底盘控制权交回本界面；"
+                                     "不会恢复旧目标，也不会自动启动电机。\n"
+                                     "复位后必须重新选点并重新开始导航。\n"
+                                     "确认复位并恢复底盘控制吗？",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if not bridge.call_clear_estop():
-            self._alarm_bar.set_alarm(f"故障复位失败：{bridge.last_error}")
+        if not bridge.call_restore_control():
+            self._alarm_bar.set_alarm(f"复位并恢复控制失败：{bridge.last_error}")
             return
-        logger.warning("Operator cleared local emergency stop; old task remains canceled")
-        QMessageBox.information(self, "故障复位", "急停锁已清除。请从新任务开始；不要继续故障前的动作。")
+        # Re-read the daemon after reset.  A successful request alone is not
+        # sufficient: the UI must prove that both local and chassis latches
+        # are clear before it presents the recovered state.
+        try:
+            refreshed = bridge.client.request("status")
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._alarm_bar.set_alarm(f"复位结果无法确认：{exc}")
+            return
+        refreshed_chassis = refreshed.get("chassis") or {}
+        if (refreshed.get("safety_latched") or refreshed_chassis.get("estop_latched")
+                or (refreshed.get("recovery") or {}).get("reset_required")):
+            self._alarm_bar.set_alarm("复位未完成：底盘仍报告锁存")
+            return
+        # Update all visible status surfaces immediately; do not wait for the
+        # next polling tick and do not clear an unrelated localization alarm.
+        self._on_local_runtime_status(refreshed)
+        self._on_safety_status(chassis_safety_message(refreshed_chassis))
+        telemetry = {"pose": dict(refreshed.get("pose") or {}),
+                     "navigation": refreshed.get("navigation"),
+                     "recovery": refreshed.get("recovery"),
+                     "motion_blocked": False}
+        self._main_page.telemetry.update_status(telemetry)
+        self._map_page.telemetry.update_status(telemetry)
+        logger.warning("Operator reset and restored chassis control; old task remains canceled")
+        QMessageBox.information(self, "复位并恢复控制",
+                                "底盘已复位并恢复控制。请重新选点并重新开始导航；旧目标不会恢复。")
 
     def _on_pause(self) -> None:
         """Stop and cancel navigation; resumption requires a new goal."""
@@ -434,13 +480,10 @@ class MainWindow(QMainWindow):
         if self._rc_mirror_started:
             return
         self._rc_mirror_started = True
-        # start_ros() owns the single signal connection. Connecting here too
-        # delivered each 100 ms status twice and repeatedly repolished Qt.
         self._rc_mirror_timer = QTimer(self)
         self._rc_mirror_timer.timeout.connect(self._expire_rc_mode_mirror)
         self._rc_mirror_timer.start(250)
         self._update_manual_mode_ui()
-
     @Slot(str)
     def _on_rc_mode_mirror(self, mode: str) -> None:
         """Handle STM32 mode feedback from the robot daemon."""
@@ -650,11 +693,121 @@ class MainWindow(QMainWindow):
         # Navigate to guidance page
         self.page_manager.push("guidance")
 
+    def _on_navigation_goal_selected(self, x, y):
+        for page in (self._main_page, self._map_page):
+            page.set_selected_goal(x, y)
+
+    def _clear_localization_alarm(self):
+        # Recovery must not hide a chassis or other subsystem alarm.
+        if self._alarm_bar._alarm_label.text().startswith("定位启动失败："):
+            self._alarm_bar.clear_alarm()
+
+    def _on_start_localization(self) -> None:
+        if not _env_flag("GRAIN_LOCAL_RUNTIME") or self._slam_bridge is None:
+            self._alarm_bar.set_alarm("本机定位服务未连接")
+            return
+        if self._localization_confirming or self._localization_status.get("state") in ("VALIDATING_STATIC", "READY"):
+            self._poll_localization_status()
+            return
+        active_map = self._localization_status.get("map_id", "等待读取活动地图身份")
+        reply = QMessageBox.question(
+            self, "启动定位",
+            f"活动定位地图：{active_map}\n"
+            "请确认车体已静止在这张活动地图的建图起点，车头方向与建图时一致。\n"
+            "页面显示的候选预览不会因此自动成为活动地图。\n"
+            "只启动定位，不清急停、不恢复旧目标、不驱动车体。\n确认启动定位吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._localization_confirming = True
+        self._map_page.set_localization_feedback("正在提交定位启动确认…", busy=True)
+        bridge = self._slam_bridge
+        def confirm():
+            try:
+                ok = bridge.confirm_map_origin()
+                message = bridge.last_error
+            except Exception as exc:
+                ok, message = False, str(exc)
+            try:
+                self.localization_confirmation_finished.emit(ok, message)
+            except RuntimeError:
+                pass  # window has closed; never resume anything
+        threading.Thread(target=confirm, daemon=True, name="localization-confirm").start()
+
+    @Slot(bool, str)
+    def _on_localization_confirmation(self, ok, message):
+        self._localization_confirming = False
+        if self._localization_closing:
+            return
+        if not ok:
+            self._map_page.set_localization_feedback("定位启动失败：" + message, busy=False)
+            self._alarm_bar.set_alarm("定位启动失败：" + message)
+        else:
+            self._map_page.set_localization_feedback("已提交定位确认，请保持静止，等待启动检查。", busy=True)
+            self._clear_localization_alarm()
+        self._start_localization_status_poll()
+
+    def _start_localization_status_poll(self):
+        if getattr(self, "_localization_status_timer", None) is None:
+            self._localization_status_timer = QTimer(self)
+            self._localization_status_timer.timeout.connect(self._poll_localization_status)
+        self._localization_status_timer.start(2000)
+        self._poll_localization_status()
+
+    def _poll_localization_status(self):
+        if self._localization_closing or self._localization_status_loading:
+            return
+        reader = getattr(self._slam_bridge, "read_localization_startup_status", None)
+        if reader is None:
+            return
+        self._localization_status_loading = True
+        def read():
+            try:
+                status = reader()
+            except Exception as exc:
+                status = {"state": "UNAVAILABLE", "reason": str(exc)}
+            try:
+                self.localization_status_received.emit(status)
+            except RuntimeError:
+                pass
+        threading.Thread(target=read, daemon=True, name="localization-status").start()
+
+    @Slot(dict)
+    def _on_localization_status(self, status):
+        self._localization_status_loading = False
+        if self._localization_closing:
+            return
+        self._localization_status = dict(status)
+        self._refresh_map_admission()
+        if self._localization_confirming:
+            return
+        state, reason = status.get("state", "UNAVAILABLE"), status.get("reason", "")
+        active_map = status.get("map_id", "未知")
+        if state == "READY":
+            message = f"活动定位地图：{active_map}。静态检查通过；实时位姿状态见下方。"
+            self._map_page.set_localization_feedback(message, busy=True)
+            self._map_page._btn_localization.setText("定位已启动")
+            self._clear_localization_alarm()
+        elif state in ("BLOCKED", "UNAVAILABLE"):
+            self._map_page.set_localization_feedback("定位启动失败：" + reason, busy=False)
+            self._alarm_bar.set_alarm("定位启动失败：" + reason)
+        elif state == "WAIT_INITIAL_POSE":
+            self._map_page.set_localization_feedback(f"活动定位地图：{active_map}；请确认对应建图起点后启动定位。", busy=False)
+            self._clear_localization_alarm()
+        else:
+            self._map_page.set_localization_feedback(f"定位启动中：{state}；{reason}。保持静止，静态检查约60秒。", busy=True)
+            self._clear_localization_alarm()
+
     def _on_map_goal_requested(self, x: float, y: float) -> None:
         """Run the existing navigation adapter for an explicitly selected goal."""
         if self._navigation_thread is not None and self._navigation_thread.is_alive():
             self._main_page.set_navigation_result(False, "已有导航任务")
             return
+
+        for page in (self._main_page, self._map_page):
+            page.set_navigation_busy(True)
 
         def run() -> None:
             bridge = SamplingBridge()
@@ -669,6 +822,7 @@ class MainWindow(QMainWindow):
     @Slot(bool, str)
     def _on_map_navigation_finished(self, ok: bool, message: str) -> None:
         self._main_page.set_navigation_result(ok, message)
+        self._map_page.set_navigation_result(ok, message)
 
     # ── Reboot recovery: unfinished task detection ─────────
 
@@ -847,6 +1001,10 @@ class MainWindow(QMainWindow):
             self._main_page._map_widget.set_pointcloud_image
         )
         self._map_page.set_ros_thread(self._ros_thread)
+        self._ros_thread.odometry_updated.connect(self._map_page.map_widget.update_odometry)
+        self._ros_thread.saved_map_updated.connect(self._on_saved_map_preview)
+        self._ros_thread.navigation_telemetry_updated.connect(self._main_page.telemetry.update_status)
+        self._ros_thread.navigation_telemetry_updated.connect(self._map_page.telemetry.update_status)
         if self._mapping_page is not None:
             if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
                 from grain_sampling_local.slam import LocalSlamBridge
@@ -857,7 +1015,79 @@ class MainWindow(QMainWindow):
             self._mapping_page.set_slam_bridge(slam_bridge)
         self._setup_rc_control()
         self._ros_thread.start()
+        if _env_flag("GRAIN_LOCAL_RUNTIME"):
+            self._start_localization_status_poll()
         logger.info("Robot daemon event thread started")
+
+    def _refresh_map_admission(self):
+        data = self._saved_preview_data
+        ready = "error" not in data and data.get("active_map_match") is True
+        reason = ""
+        if "error" in data:
+            reason = str(data.get("error") or "地图预览校验失败")
+        elif data.get("candidate") is True or data.get("active_map_match") is not True:
+            reason = "地图不可用：预览地图尚未切换为 Golden 当前定位地图"
+        if _env_flag("GRAIN_LOCAL_RUNTIME"):
+            startup = self._localization_status
+            # Manifest metadata may carry map_version as an int while the
+            # Golden startup status carries the same value as text; compare the
+            # normalized form so an identical map is not reported as mismatched.
+            identity_ok = all(startup.get(k) is not None
+                              and str(data.get(k)) == str(startup.get(k))
+                              for k in ("map_id", "map_version", "frame"))
+            binding_ok, binding_reason = self._runtime_binding_state(data)
+            if startup.get("state") != "READY":
+                reason = f"地图不可用：定位状态 {startup.get('state', 'UNAVAILABLE')}"
+            elif not identity_ok:
+                reason = "地图不可用：UI 预览与 Golden/Odometry 地图身份不一致"
+            elif not binding_ok:
+                reason = "地图不可用：" + binding_reason
+            ready = ready and startup.get("state") == "READY" and identity_ok and binding_ok
+        for page in (self._main_page, self._map_page):
+            page.telemetry.set_map_ready(ready)
+        if reason and hasattr(self._map_page, "set_map_availability"):
+            self._map_page.set_map_availability(False, reason)
+        elif hasattr(self._map_page, "set_map_availability"):
+            self._map_page.set_map_availability(True, "")
+
+    def _runtime_binding_state(self, data):
+        """Check the preview against the map actually bound to the runtime."""
+        from grain_sampling_workflow.saved_map_preview import load_runtime_map_binding
+        pointer = os.environ.get("GRAIN_SAVED_MAP_PREVIEW")
+        if not pointer:
+            return False, "未配置活动地图绑定路径"
+        binding = load_runtime_map_binding(pointer)
+        if not binding:
+            return False, "尚未把选中的地图加载到 Golden 运行时"
+        for key in ("map_id", "map_version", "frame"):
+            if str(binding.get(key)) != str(data.get(key)):
+                return False, "运行时地图绑定与当前预览不是同一张图"
+        recorded_manifest = binding.get("package_manifest_sha256")
+        if recorded_manifest and recorded_manifest != data.get("manifest_sha256"):
+            return False, "预览包哈希与运行时地图绑定不一致"
+        recorded_pcd = binding.get("pcd_sha256")
+        if recorded_pcd and recorded_pcd != data.get("pcd_sha256"):
+            return False, "预览点云哈希与运行时地图绑定不一致"
+        return True, ""
+
+    @Slot(dict)
+    def _on_saved_map_preview(self, data):
+        previous = self._saved_preview_data
+        identity = lambda d: (d.get("map_id"), d.get("map_version"), d.get("frame"))
+        if "error" not in data and identity(previous) != identity(data):
+            # A selected coordinate from another map must never become a goal here.
+            for page in (self._main_page, self._map_page):
+                page.clear_selected_goal()
+        self._saved_preview_data = dict(data)
+        image, bounds = data.get("image"), data.get("world_bounds")
+        for widget in (self._main_page.map_widget, self._map_page.map_widget):
+            widget.set_saved_map(image, bounds)
+        self._map_page.set_saved_preview(data)
+        self._refresh_map_admission()
+        if "error" in data:
+            self._alarm_bar.set_alarm("地图预览加载失败：" + data["error"])
+        elif self._alarm_bar._alarm_label.text().startswith("地图预览加载失败："):
+            self._alarm_bar.clear_alarm()
 
     @Slot(str)
     def _on_safety_status(self, message: str) -> None:
@@ -877,6 +1107,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         """Clean up on window close."""
+        self._localization_closing = True
+        timer = getattr(self, "_localization_status_timer", None)
+        if timer is not None:
+            timer.stop()
         if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
             from grain_sampling_workflow.robot_bridge import RobotClient
             try:

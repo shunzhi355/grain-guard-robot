@@ -98,6 +98,8 @@ class MapWidget(QWidget):
         self._waypoints: list[tuple[float, float, str]] = []  # (x, y, label)
         self._nav_path: list[tuple[float, float]] = []
         self._cloud_img: QImage | None = None  # 2D point cloud projection
+        self._saved_map_image = None
+        self._saved_map_bounds = None
 
         # ── View transform ──────────────────────────────────
         self._zoom: float = 1.0
@@ -199,6 +201,24 @@ class MapWidget(QWidget):
         self._cloud_img = img
         self.update()
 
+    def set_saved_map(self, image, bounds) -> None:
+        """Use camera_init world bounds for raster, pose and goal coordinates."""
+        self._saved_map_image = image
+        self._saved_map_bounds = tuple(bounds) if bounds is not None else None
+        if self._saved_map_bounds is not None:
+            self.fit_saved_map()
+        self.update()
+
+    def fit_saved_map(self) -> None:
+        if self._saved_map_bounds is None:
+            return
+        xmin, xmax, ymin, ymax = self._saved_map_bounds
+        self._offset_x, self._offset_y = (xmin + xmax) / 2, (ymin + ymax) / 2
+        self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, 0.9 * min(
+            self.width() / ((xmax - xmin) * CELL_SIZE_PX),
+            self.height() / ((ymax - ymin) * CELL_SIZE_PX))))
+        self.update()
+
     # ── Coordinate transforms ───────────────────────────────
 
     def _world_to_widget(self, wx: float, wy: float) -> QPointF:
@@ -230,8 +250,13 @@ class MapWidget(QWidget):
         # Background
         painter.fillRect(self.rect(), MAP_BG)
 
-        # Point cloud 2D projection (background layer)
-        if self._cloud_img is not None and not self._cloud_img.isNull():
+        # Saved map is georeferenced. Do not stretch it to the widget rectangle.
+        if self._saved_map_image is not None and self._saved_map_bounds is not None:
+            xmin, xmax, ymin, ymax = self._saved_map_bounds
+            rect = QRectF(self._world_to_widget(xmin, ymax), self._world_to_widget(xmax, ymin))
+            painter.drawImage(rect, self._saved_map_image)
+        # The legacy body-frame preview cannot replace a world-frame map.
+        elif self._cloud_img is not None and not self._cloud_img.isNull():
             painter.drawImage(self.rect(), self._cloud_img)
 
         self._draw_grid(painter)
@@ -431,18 +456,20 @@ class MapWidget(QWidget):
             event.accept()
 
     def wheelEvent(self, event: Any) -> None:
-        """Zoom in/out centred on cursor position."""
-        old_zoom = self._zoom
+        """Zoom around the cursor with Qt5/Qt6 mouse and touchpad events."""
         delta = event.angleDelta().y()
-        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        steps = delta / 120.0 if delta else event.pixelDelta().y() / 40.0
+        if not steps:
+            event.ignore()
+            return
+        old_zoom = self._zoom
+        factor = 1.15 ** steps
         new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, old_zoom * factor))
 
-        # Zoom toward cursor
-        wx, wy = self._widget_to_world(
-            event.pos().x(), event.pos().y(),
-        )
+        # Qt6 QWheelEvent removed pos(); position() retains subpixel precision.
+        position = event.position() if hasattr(event, "position") else event.pos()
+        wx, wy = self._widget_to_world(position.x(), position.y())
         self._zoom = new_zoom
-        # Adjust offset to keep cursor point stationary
         ratio = old_zoom / new_zoom
         self._offset_x = wx - (wx - self._offset_x) * ratio
         self._offset_y = wy - (wy - self._offset_y) * ratio
@@ -454,6 +481,8 @@ class MapWidget(QWidget):
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
+        if self._saved_map_bounds is not None:
+            self.fit_saved_map()
         # Keep coordinate label at top-left
         if self._coord_label:
             self._coord_label.move(8, 8)

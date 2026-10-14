@@ -38,6 +38,19 @@ mapping_load_config() {
     fi
 
     export MAPPING_ENV_FILE="$env_file" MAPPING_APP_CONFIG="$app_config"
+    # Prefer the live route/source pair over a stale historical interface name.
+    # This keeps multi-route hosts deterministic without installing a default route.
+    if command -v ip >/dev/null 2>&1; then
+        local live_route live_dev live_src
+        live_route="$(ip route get "$MID360_IP" 2>/dev/null | head -n 1 || true)"
+        live_dev="$(awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' <<<"$live_route")"
+        live_src="$(awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' <<<"$live_route")"
+        if [ "$live_src" = "$RADAR_HOST_IP" ] && [ -n "$live_dev" ]; then
+            RADAR_NETDEV="$live_dev"
+        elif ! ip link show "$RADAR_NETDEV" >/dev/null 2>&1; then
+            RADAR_NETDEV="$(ip -o -4 addr show | awk -v ip="$RADAR_HOST_IP" '$4 ~ "^" ip "/" {print $2; exit}' || true)"
+        fi
+    fi
     export MID360_IP RADAR_HOST_IP RADAR_NETDEV LIVOX_WS SFAST_WS
     export LIVOX_PACKAGE LIVOX_LAUNCH LIVOX_LIDAR_TOPIC LIVOX_IMU_TOPIC
     export SFAST_PACKAGE SFAST_MAPPING_EXECUTABLE SFAST_CONFIG SFAST_RELOCALIZATION_LAUNCH

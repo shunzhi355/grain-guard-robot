@@ -42,6 +42,7 @@ except ImportError:
     )
 
 from grain_sampling_ui.widgets.map_widget import MapWidget
+from grain_sampling_ui.widgets.navigation_telemetry import NavigationTelemetry
 from grain_sampling_ui.theme import THEME_COLORS
 from grain_sampling_workflow.state_machine import (
     SamplingAction,
@@ -225,6 +226,7 @@ class MainPage(QWidget):
         self._lbl_goal: QLabel | None = None
         self._btn_navigate: QPushButton | None = None
         self._selected_goal: tuple[float, float] | None = None
+        self._nav_busy = False
 
         # ── Workflow state ─────────────────────────────────
         self._orchestrator: WorkflowOrchestrator | None = None
@@ -339,12 +341,10 @@ class MainPage(QWidget):
         )
         outer.addWidget(coord_lbl)
 
-        self._lbl_goal = QLabel("目标点：未选择")
-        self._lbl_goal.setObjectName("selected_goal")
-        self._lbl_goal.setStyleSheet(
-            "font-size: 10pt; color: #8B949E; background: transparent;"
-        )
-        outer.addWidget(self._lbl_goal)
+        self.telemetry = NavigationTelemetry()
+        self._lbl_goal = self.telemetry.goal_label
+        outer.addWidget(self.telemetry)
+        self.telemetry.readiness_changed.connect(self._refresh_navigation_button)
         self._btn_navigate = QPushButton("开始导航")
         self._btn_navigate.setObjectName("btn_primary")
         self._btn_navigate.setEnabled(False)
@@ -392,27 +392,41 @@ class MainPage(QWidget):
             self._map_widget.update_odometry(x, y, yaw)
 
     def _on_goal_selected(self, x: float, y: float) -> None:
-        self._selected_goal = (float(x), float(y))
-        if self._lbl_goal is not None:
-            self._lbl_goal.setText(f"目标点：X {x:.2f}  Y {y:.2f}")
-        if self._btn_navigate is not None:
-            self._btn_navigate.setEnabled(True)
+        self.set_selected_goal(x, y)
         self.goal_selected.emit(float(x), float(y))
 
+    def clear_selected_goal(self):
+        self._selected_goal = None
+        self.telemetry.set_goal()
+        self.map_widget.clear_goal_target()
+        self.set_navigation_busy(False)
+        self.telemetry.set_result("请重新选点")
+
+    def set_selected_goal(self, x, y):
+        self._selected_goal = (float(x), float(y))
+        self.telemetry.set_goal(x, y)
+        self.map_widget.set_goal_target(x, y)
+        self._refresh_navigation_button()
+
+    def _refresh_navigation_button(self, *_):
+        if self._btn_navigate is not None:
+            self._btn_navigate.setEnabled(self._selected_goal is not None
+                                          and self.telemetry.ready and not self._nav_busy)
+
+    def set_navigation_busy(self, busy):
+        self._nav_busy = bool(busy)
+        self._refresh_navigation_button()
+
     def _on_navigate_clicked(self) -> None:
-        if self._selected_goal is None:
+        if self._selected_goal is None or not self.telemetry.ready or self._nav_busy:
             return
-        self._btn_navigate.setEnabled(False)
+        self.set_navigation_busy(True)
+        self.telemetry.set_result("正在请求导航")
         self.navigation_requested.emit(*self._selected_goal)
 
     def set_navigation_result(self, ok: bool, message: str = "") -> None:
-        if self._lbl_goal is not None:
-            if ok:
-                self._lbl_goal.setText("导航完成")
-            elif message:
-                self._lbl_goal.setText(f"导航未完成：{message}")
-        if self._btn_navigate is not None:
-            self._btn_navigate.setEnabled(self._selected_goal is not None)
+        self.set_navigation_busy(False)
+        self.telemetry.set_result("到达 XY 目标" if ok else (message or "未完成"))
 
     def _on_mechanism_status(self, data: dict) -> None:
         """Handle /mechanism/status JSON updates."""

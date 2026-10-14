@@ -25,24 +25,26 @@ def main():
     parser.add_argument("--allow-point-navigation", action="store_true")
     args = parser.parse_args()
     from grain_sampling_local.config import LocalConfig
-    from grain_sampling_local.localization_health import LocalizationHealthGate
+    from grain_sampling_local.localization_health import LocalizationHealthGate, startup_status_ready
     from grain_sampling_local.navigation import PointNavigator, wrap
+    from grain_sampling_local.navigation_worker import NavigationWorker, NavigationSocketClient
     from grain_sampling_workflow.robot_bridge import RobotClient
     config = LocalConfig.load(args.config)
     if not args.allow_point_navigation or config.navigation_mode != "local":
         parser.error("explicit --allow-point-navigation and navigation_mode=local required")
     import rospy
-    import sensor_msgs.point_cloud2 as pc2
     from nav_msgs.msg import Odometry
-    from sensor_msgs.msg import PointCloud2
-    from std_msgs.msg import Bool
+    from std_msgs.msg import Bool, String
+    if config.require_pointcloud_for_navigation:
+        import sensor_msgs.point_cloud2 as pc2
+        from sensor_msgs.msg import PointCloud2
     rospy.init_node("grain_lenovo_local_navigation", anonymous=True)
-    client = RobotClient(str(config.socket_path))
-    token = client.request("nav_register")["token"]
+    client = NavigationSocketClient(str(config.socket_path))
     lock = threading.Lock()
     inputs = {"x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0, "odom_at": 0.0,
               "cloud_at": 0.0, "localization_at": 0.0, "localization_valid": False,
               "blocked": True, "frame_id": config.map_frame}
+    startup_status = {}
     preview = []
     sensor_fault = threading.Event()
     health_gate = LocalizationHealthGate(frame_id=config.map_frame)
@@ -75,6 +77,11 @@ def main():
             if config.localization_health_mode == "odom_stable":
                 healthy = health_gate.accept(now=now, stamp=now-age, x=x, y=y, yaw=yaw,
                                              frame_id=msg.header.frame_id)
+                if config.localization_startup_status_topic:
+                    healthy = healthy and startup_status_ready(
+                        startup_status, now=time.time(), map_id=config.map_id,
+                        map_version=config.localization_startup_map_version,
+                        manifest_sha256=config.localization_startup_manifest_sha256)
                 inputs["localization_valid"] = healthy
                 inputs["localization_at"] = now
                 publish_health(healthy)
@@ -97,37 +104,43 @@ def main():
     def localization(msg):
         with lock:
             inputs.update(localization_valid=bool(msg.data) and not sensor_fault.is_set(), localization_at=time.monotonic())
+    def startup_health(msg):
+        try:
+            value = json.loads(msg.data)
+        except (ValueError, TypeError):
+            value = {}
+        with lock:
+            startup_status.clear()
+            if isinstance(value, dict):
+                startup_status.update(value)
+    if config.localization_startup_status_topic:
+        rospy.Subscriber(config.localization_startup_status_topic, String, startup_health, queue_size=1)
     rospy.Subscriber(config.odom_topic, Odometry, odom, queue_size=1)
-    rospy.Subscriber(config.cloud_topic, PointCloud2, cloud, queue_size=1)
+    if config.require_pointcloud_for_navigation:
+        rospy.Subscriber(config.cloud_topic, PointCloud2, cloud, queue_size=1)
     if config.localization_health_mode == "external":
         rospy.Subscriber(config.localization_valid_topic, Bool, localization, queue_size=1)
-    navigator = PointNavigator(
-        far_forward=config.point_far_forward,
-        near_forward=config.point_near_forward,
-        max_effort_step=config.point_max_effort_step,
-    )
-    sequence = 0
+    navigator = PointNavigator.from_config(config)
+    worker = NavigationWorker(client, navigator)
     last_preview = 0.0
     try:
         while not rospy.is_shutdown():
             with lock:
                 if config.localization_health_mode == "odom_stable":
                     health_gate.tick(now=time.monotonic())
-                    if not health_gate.valid:
+                    startup_ok = (not config.localization_startup_status_topic or startup_status_ready(
+                        startup_status, now=time.time(), map_id=config.map_id,
+                        map_version=config.localization_startup_map_version,
+                        manifest_sha256=config.localization_startup_manifest_sha256))
+                    if not health_gate.valid or not startup_ok:
                         inputs["localization_valid"] = False
                         inputs["localization_at"] = 0.0
                         publish_health(False)
             with lock:
                 snapshot, points = dict(inputs), list(preview)
-            sequence += 1
-            reply = client.request("nav_inputs", token=token, sequence=sequence, inputs=snapshot)
-            goal = reply.get("goal")
-            if goal and not reply.get("latched"):
-                forward, turn, arrived = navigator.step(goal, snapshot)
-                sequence += 1
-                client.request("nav_velocity", token=token, sequence=sequence,
-                               goal_id=goal["goal_id"], created_at=time.monotonic(),
-                               forward=forward, turn=turn, arrived=arrived)
+            worker.tick(snapshot)
+            if worker.last_error:
+                rospy.logwarn_throttle(2.0, "local navigation waiting/recovery: " + worker.last_error)
             if time.monotonic() - last_preview > 0.25:
                 temporary = config.directory / "preview.tmp"
                 temporary.write_text(json.dumps({"at": time.monotonic(), "points": points}), encoding="utf-8")
@@ -136,7 +149,11 @@ def main():
             time.sleep(0.04)
     finally:
         # Daemon watchdog remains authoritative if this request cannot arrive.
-        client.request("estop")
+        try:
+            client.close()
+            RobotClient(str(config.socket_path)).request("estop")
+        except (OSError, RuntimeError, ValueError) as exc:
+            rospy.logerr("adapter shutdown stop unconfirmed: %s", exc)
 
 
 if __name__ == "__main__":

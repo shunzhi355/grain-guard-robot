@@ -38,7 +38,7 @@ def active_manifest_path(pcd_dir: str | os.PathLike[str] | None = None) -> Path:
         explicit = os.environ.get("GRAIN_ACTIVE_MAP_MANIFEST")
         if explicit:
             return Path(explicit)
-    root = Path(pcd_dir or os.environ.get("SFAST_PCD_DIR", "~/fastlio2_ws/src/S-FAST_LIO/PCD")).expanduser()
+    root = Path(pcd_dir or os.environ.get("GRAIN_MAPPING_PCD_DIR", os.environ.get("SFAST_PCD_DIR", "~/.cache/grain-diagnostics/GSR-NAV-UI-SOFTWARE-INTEGRATION-043/maps/current/PCD"))).expanduser()
     return root / "active_map.json"
 
 

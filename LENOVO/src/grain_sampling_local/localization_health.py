@@ -75,3 +75,20 @@ class LocalizationHealthGate:
         self._good = 0
         self.reason = reason
         return False
+
+
+def startup_status_ready(status, *, now, map_id, map_version, manifest_sha256):
+    """Fresh, identity-matched runtime admission; silence and faults mean false."""
+    if not isinstance(status, dict):
+        return False
+    stamp = status.get("heartbeat_at")
+    quality = status.get("r2")
+    if not isinstance(quality, dict):
+        return False
+    return (status.get("state") == "READY" and _finite(stamp)
+            and 0 <= now-stamp <= 1
+            and status.get("map_id") == map_id
+            and status.get("map_version") == map_version
+            and status.get("manifest_sha256") == manifest_sha256
+            and status.get("frame") == "camera_init"
+            and quality.get("pass") is True)

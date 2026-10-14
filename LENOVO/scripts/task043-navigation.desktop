@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=粮食扦样机器人 Task043
+Comment=启动建图、定位和导航控制台
+Exec=/home/ps02/grain_robot/staging/lenovo-local-20261010/LENOVO/scripts/start_task043_ui_desktop.sh
+Path=/home/ps02/grain_robot/staging/lenovo-local-20261010
+Terminal=false
+StartupNotify=true
+Categories=Utility;

@@ -139,8 +139,9 @@ class ChassisController:
                 raise RuntimeError("STM32 mechanism requires stopped chassis, auto mode and no estop")
             if self.link is not None:
                 self._serial_session = self.link.session
-                sequence = self.link.reserve_sequence()
-                self._serial_sequence = sequence
+                # Allocate inside the FIRST write, so concurrent STOP cannot
+                # overtake a reserved but not yet transmitted request.
+                sequence = None
             else:
                 if self._serial_session is None:
                     self._serial_session = secrets.randbelow(0xffffffff) + 1
@@ -168,14 +169,23 @@ class ChassisController:
                     continue
                 attempts += 1
                 try:
-                    link.mechanism_command(command, device, confirm=True,
-                                           sequence=sequence)
+                    # Hold the controller lock only for checks + TX, never ACK.
+                    with self.lock:
+                        if (self._pending_mechanism is not token or self.estop_latched
+                                or self.link is not link):
+                            raise MechanismDisconnectedError("mechanism writer changed/canceled")
+                        if moving and (self.epoch is not None or self.mode == "manual"):
+                            raise RuntimeError("mechanism safety interlock changed before write")
+                        sequence = link.begin_mechanism_command(command, device, sequence=sequence)
+                        self._serial_sequence = link.sequence
+                    link.wait_mechanism_reply(sequence, command, device)
                 except MechanismRejectedError:
                     raise
                 except (MechanismTimeoutError, MechanismDisconnectedError, OSError,
                         RuntimeError) as exc:
                     last_error = str(exc)
-                    logger.warning("STM32 mechanism retry command=%d device=%d sequence=%d attempt=%d: %s",
+                    sequence = getattr(exc, "command_sequence", sequence)
+                    logger.warning("STM32 mechanism retry command=%d device=%d sequence=%s attempt=%d: %s",
                                    command, device, sequence, attempts, exc)
                     if isinstance(exc, (OSError, ChassisError)) and not isinstance(exc, MechanismTimeoutError):
                         with self.lock:
@@ -338,6 +348,7 @@ class ChassisController:
                     "motion_epoch": self.epoch or 0, "estop_latched": self.estop_latched,
                     "obstacle_stop": self.obstacle, "obstacle": self.obstacle,
                     "last_motion_age_ms": age, "last_stop_reason": self.last_stop_reason,
+                    "serial_rx": self.link.rx_diagnostics() if self.link else None,
                     "last_mechanism_reply": self.last_mechanism_reply,
                     "mechanism_pending": self._pending_mechanism is not None,
                     "faults": state["faults"] if state else None}

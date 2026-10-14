@@ -9,6 +9,7 @@ import os
 import threading
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from PySide2.QtCore import Qt, Signal, QTimer
 from PySide2.QtWidgets import (
     QComboBox,
@@ -44,6 +45,39 @@ SKIP_MAPPING_WAREHOUSE = "联调模式（跳过地图）"
 def _env_flag(name: str) -> bool:
     """Return True only for an explicit, conventional truthy value."""
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _local_saved_maps() -> list[dict]:
+    """Saved maps of the task043 map store (local direct-connect runtime)."""
+    try:
+        from grain_sampling_local.slam import LocalSlamBridge
+        return list(LocalSlamBridge().list_saved_maps())
+    except Exception:  # missing package, broken store, no permission
+        return []
+
+
+def _active_runtime_map_id() -> str:
+    """Map currently loaded into the Golden runtime, or an empty string."""
+    from grain_sampling_workflow.saved_map_preview import load_runtime_map_binding
+    candidates: list[Path] = []
+    configured = os.environ.get("GRAIN_SAVED_MAP_PREVIEW")
+    if configured:
+        candidates.append(Path(configured))
+    try:
+        from grain_sampling_local.slam import LocalSlamBridge
+        candidates.append(LocalSlamBridge()._active_preview_pointer())
+    except Exception:
+        pass
+    state_dir = os.environ.get("GRAIN_ROBOT_STATE_DIR") or os.path.expanduser(
+        "~/.local/state/grain-lenovo")
+    candidates += [Path(state_dir) / "active_map_preview.json",
+                   Path("/run/grain-lenovo/active_map_preview.json")]
+    for candidate in candidates:
+        binding = load_runtime_map_binding(candidate)
+        if binding.get("map_id"):
+            return str(binding["map_id"])
+    return ""
+
 
 # ── Stub task data ───────────────────────────────────────────────────────
 SAMPLE_TASKS: list[dict[str, object]] = [
@@ -441,6 +475,12 @@ class _CreateTaskDialog(QDialog):
         add_wp_btn.clicked.connect(self._add_waypoint)
         wp_btn_layout.addWidget(add_wp_btn)
 
+        use_pose_btn = QPushButton("取当前位置")
+        use_pose_btn.setObjectName("btn_info")
+        use_pose_btn.setToolTip("用当前定位位姿填入 X/Y，便于以开始采集的位置作为点位")
+        use_pose_btn.clicked.connect(self._use_current_pose)
+        wp_btn_layout.addWidget(use_pose_btn)
+
         del_wp_btn = QPushButton("删除选中点位")
         del_wp_btn.setObjectName("btn_danger")
         del_wp_btn.clicked.connect(self._remove_waypoint)
@@ -487,6 +527,33 @@ class _CreateTaskDialog(QDialog):
 
     def _refresh_warehouse_list(self) -> None:
         self._warehouse_input.clear()
+        self._map_entries: dict[str, dict] = {}
+        if _env_flag("GRAIN_LOCAL_RUNTIME"):
+            self._refresh_local_warehouse_list()
+        else:
+            self._refresh_legacy_warehouse_list()
+        if _env_flag("GRAIN_SAMPLING_UI_SKIP_MAPPING"):
+            self._warehouse_input.addItem(SKIP_MAPPING_WAREHOUSE, True)
+
+    def _refresh_local_warehouse_list(self) -> None:
+        """List the task043 saved maps and preselect the loaded one.
+
+        Work-order waypoints live in the active localization map's coordinate
+        frame, so only the map currently loaded into Golden is offered.
+        """
+        active = _active_runtime_map_id()
+        for entry in _local_saved_maps():
+            name = str(entry.get("name") or entry.get("map_id") or "未命名")
+            label = f"{name}（当前定位图）" if active and entry.get("map_id") == active else name
+            self._warehouse_input.addItem(label, False)
+            self._map_entries[label] = entry
+        if active:
+            for index in range(self._warehouse_input.count()):
+                if self._warehouse_input.itemText(index).endswith("（当前定位图）"):
+                    self._warehouse_input.setCurrentIndex(index)
+                    break
+
+    def _refresh_legacy_warehouse_list(self) -> None:
         warehouses: dict[str, str] = {}
         if os.path.isdir(PCD_DIR):
             for f in os.listdir(PCD_DIR):
@@ -502,8 +569,18 @@ class _CreateTaskDialog(QDialog):
                     warehouses[name] = ts_str
         for name in sorted(warehouses.keys()):
             self._warehouse_input.addItem(name, False)
-        if _env_flag("GRAIN_SAMPLING_UI_SKIP_MAPPING"):
-            self._warehouse_input.addItem(SKIP_MAPPING_WAREHOUSE, True)
+
+    def _active_map_guard(self, warehouse: str) -> str:
+        """Return an error message when this work order must not be created."""
+        entry = getattr(self, "_map_entries", {}).get(warehouse)
+        if entry is None:
+            return "该仓号不是已保存地图，请重新选择"
+        active = _active_runtime_map_id()
+        if not active:
+            return "当前没有加载中的定位地图，请先在建图管理里选择并加载地图"
+        if entry.get("map_id") != active:
+            return "所选地图不是当前定位地图，请先在建图管理里切换并加载该地图"
+        return ""
 
     def _add_waypoint(self) -> None:
         x = self._x_input.value()
@@ -511,6 +588,20 @@ class _CreateTaskDialog(QDialog):
         count = self._waypoint_list.count() + 1
         self._waypoint_list.addItem(f"点位{count}: X={x:.1f}  Y={y:.1f}")
         self._waypoint_list.setCurrentRow(self._waypoint_list.count() - 1)
+
+    def _use_current_pose(self) -> None:
+        """Fill X/Y from the live pose so an order can start where we stand."""
+        try:
+            from grain_sampling_workflow.robot_bridge import RobotClient
+            pose = RobotClient().request("status", client_role="ui").get("pose") or {}
+            x, y = float(pose["x_m"]), float(pose["y_m"])
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            self._error_label.setText(f"读取实时位姿失败：{exc}")
+            self._error_label.setVisible(True)
+            return
+        self._x_input.setValue(x)
+        self._y_input.setValue(y)
+        self._error_label.setVisible(False)
 
     def _on_waypoint_selected(self, row: int) -> None:
         if row < 0:
@@ -551,11 +642,22 @@ class _CreateTaskDialog(QDialog):
         return None
 
     def _on_create(self) -> None:
-        warehouse = self._warehouse_input.currentText()
-        if not warehouse:
+        warehouse_label = self._warehouse_input.currentText()
+        if not warehouse_label:
             self._error_label.setText("暂无地图，请先建图")
             self._error_label.setVisible(True)
             return
+
+        warehouse = warehouse_label
+        if _env_flag("GRAIN_LOCAL_RUNTIME") and not self._warehouse_input.currentData():
+            problem = self._active_map_guard(warehouse_label)
+            if problem:
+                self._error_label.setText(problem)
+                self._error_label.setVisible(True)
+                return
+            # Keep the stored name free of the "（当前定位图）" decoration.
+            warehouse = str((self._map_entries.get(warehouse_label) or {}).get("name")
+                            or warehouse_label)
 
         waypoints: list[dict[str, float]] = []
         for i in range(self._waypoint_list.count()):

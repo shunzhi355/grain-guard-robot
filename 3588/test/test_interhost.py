@@ -71,6 +71,11 @@ class FakeLink:
     def fail_pending(self, reason):
         pass
 
+    def rx_diagnostics(self):
+        # Production links expose UART diagnostics; the controller reports them
+        # in ``status()`` so the test double must provide the same surface.
+        return {"reports_seen": 0, "reports_accepted": 0, "rejected_reports": []}
+
     def close(self):
         pass
 
@@ -332,6 +337,20 @@ def test_bridge_clear_estop_uses_explicit_local_action():
     client = Client()
     assert RobotBridge(client=client).call_clear_estop()
     assert client.actions == [("clear_estop", {"mechanical_reset_confirmed": True})]
+
+
+def test_bridge_restore_control_uses_explicit_local_action():
+    class Client:
+        def __init__(self):
+            self.actions = []
+
+        def request(self, action, **values):
+            self.actions.append((action, values))
+            return {"ok": True}
+
+    client = Client()
+    assert RobotBridge(client=client).call_restore_control()
+    assert client.actions == [("restore_control", {"mechanical_reset_confirmed": True})]
 
 
 def test_navigation_test_preflight_clears_latch_without_arming():

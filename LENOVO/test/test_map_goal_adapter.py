@@ -24,7 +24,7 @@ class FakeClient:
                 "frame_id": "camera_init",
                 "map_id": "warehouse_ab12",
                 "map_version": 3,
-                "pose": {"x_m": 1.2, "y_m": -0.4, "yaw_rad": 0.0},
+                "pose": {"x_m": 1.2, "y_m": -0.4},
             }
             return {"goal_id": "goal-1"}
         raise AssertionError(action)

@@ -34,10 +34,22 @@ class LocalConfig:
     point_far_forward: float = 0.55
     point_near_forward: float = 0.40
     point_max_effort_step: float = 0.15
+    point_forward_deadzone: float = 0.0
+    point_forward_min: float = 0.40
+    point_turn_deadzone: float = 0.18
+    point_turn_min: float = 0.18
+    point_turn_max: float = 0.20
+    point_xy_tolerance: float = 0.12
+    point_heading_tolerance: float = 0.20
+    point_heading_realign_tolerance: float = 0.30
+    point_arrival_hysteresis: float = 0.04
     # Keep the strict external health contract by default. ``odom_stable``
     # is an explicit fallback for deployments where Golden has no Bool topic.
     localization_health_mode: str = "external"
     require_pointcloud_for_navigation: bool = True
+    localization_startup_status_topic: str = ""
+    localization_startup_map_version: str = ""
+    localization_startup_manifest_sha256: str = ""
 
     @classmethod
     def load(cls, path):
@@ -68,9 +80,14 @@ class LocalConfig:
 
     def validate(self):
         for name in ("stm32_port", "x2p_port", "runtime_dir", "map_frame", "map_id", "map_manifest",
-                     "odom_topic", "cloud_topic", "localization_valid_topic", "ros_image"):
+                     "odom_topic", "cloud_topic", "localization_valid_topic", "ros_image",
+                     "localization_startup_status_topic", "localization_startup_map_version",
+                     "localization_startup_manifest_sha256"):
             if not isinstance(getattr(self, name), str):
                 raise ValueError(f"{name} must be a string")
+        if self.localization_startup_status_topic and (not self.localization_startup_map_version
+                or len(self.localization_startup_manifest_sha256) != 64):
+            raise ValueError("startup gate requires pinned map version and manifest SHA256")
         if self.navigation_mode not in ("operator", "local"):
             raise ValueError("navigation_mode must be operator or local")
         if self.suction_policy not in ("required", "external"):
@@ -90,14 +107,24 @@ class LocalConfig:
             raise ValueError("require_pointcloud_for_navigation must be boolean")
         if type(self.map_version) is not int or self.map_version < 0:
             raise ValueError("map_version must be a non-negative integer")
-        for name in ("point_far_forward", "point_near_forward", "point_max_effort_step"):
+        for name in ("point_far_forward", "point_near_forward", "point_max_effort_step", "point_turn_deadzone", "point_turn_max", "point_xy_tolerance", "point_heading_tolerance", "point_forward_deadzone", "point_forward_min", "point_turn_min", "point_heading_realign_tolerance", "point_arrival_hysteresis"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be finite")
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name} must be in 0..1")
+        if not self.point_forward_deadzone <= self.point_forward_min <= self.point_near_forward:
+            raise ValueError("point forward deadzone/min/near limits are inconsistent")
+        if not self.point_turn_deadzone <= self.point_turn_min <= self.point_turn_max:
+            raise ValueError("point turn deadzone/min/max limits are inconsistent")
+        if not self.point_heading_tolerance < self.point_heading_realign_tolerance:
+            raise ValueError("realign tolerance must exceed heading tolerance")
+        if self.point_max_effort_step <= 0:
+            raise ValueError("point_max_effort_step must be positive")
         if self.point_near_forward > self.point_far_forward:
             raise ValueError("point_near_forward must be <= point_far_forward")
+        if self.point_turn_deadzone > self.point_turn_max or self.point_xy_tolerance <= 0 or self.point_heading_tolerance <= 0:
+            raise ValueError("invalid point-navigation deadzone or tolerance")
 
     @property
     def directory(self):
