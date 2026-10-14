@@ -1,0 +1,620 @@
+"""Local-only robot service. No TCP/UDP GRICP listener, TLS, SSH or remote host."""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import secrets
+import threading
+import time
+import uuid
+from pathlib import Path
+from contextlib import contextmanager
+
+from grain_sampling_devices import mechanism_protocol as m
+from grain_sampling_devices.chassis_serial import MechanismTimeoutError
+from grain_sampling_interhost.server import RobotServer
+from .mechanism import SerialWorkflowRuntime
+from grain_sampling_workflow.map_manifest import load_active_manifest
+
+STM32_RC_FAULT = 1  # chassis.h: FAULT_RC; only ignored during an active lift.
+MECHANISM_ACK_ATTEMPTS = 3
+
+
+class TransientStatusLoss(RuntimeError):
+    """Passive status silence requires neutral and a NEW goal, not global reset."""
+
+
+def finite(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+class LocalRobotService:
+    # Reuse only the permission-restricted AF_UNIX transport, not RobotServer
+    # construction, serve(), TLS, peer session or any interhost request routing.
+    _ipc_loop = RobotServer._ipc_loop
+
+    def __init__(self, config, chassis, lift, *, simulation=False):
+        self.config = config
+        self.chassis = chassis
+        self.ipc_path = str(config.socket_path)
+        self.simulation = simulation
+        self.lock = threading.RLock()
+        self.running = threading.Event()
+        self.latched = False
+        self.last_error = ""
+        self.events = []
+        self._event_lock = threading.Lock()
+        self._mechanism_gate = threading.Lock()
+        self._baseline_link = None
+        self._baseline_boot = None
+        self._stop_link = None
+        self._task_active = False
+        self._ui_at = 0.0
+        self._input_at = 0.0
+        self._inputs = None
+        self._nav_token = None
+        self._nav_sequence = 0
+        self._goal = None
+        self.navigation = None
+        self._zero_frames = 0
+        self._epoch = None
+        self.worker = None
+        self.mechanism = SerialWorkflowRuntime(
+            lift, rpm=config.lift_rpm, serial_command=self.send_mechanism,
+            check=self.check_stationary, state_path=config.directory / "lift-recovery.json",
+            suction_policy=config.suction_policy, event=self.event)
+        self.latched = self.mechanism.estop_latched
+        if self.latched:
+            self.last_error = "incomplete lift operation from previous run; mechanical reset required"
+
+    def event(self, kind, **values):
+        record = {"time": time.time(), "monotonic": time.monotonic(), "kind": kind, **values}
+        with self._event_lock:
+            self.events.append(record)
+            try:
+                self.config.directory.mkdir(parents=True, exist_ok=True)
+                with (self.config.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+            except (OSError, ValueError) as exc:
+                # Full disk / logging failure must never abort a safety stop.
+                record["log_error"] = str(exc)
+                logging.getLogger(__name__).error("Local event logging failed: %s", exc)
+
+    def _map_identity(self):
+        """Read the task-selected runtime map identity before static defaults."""
+        selected = self.config.directory / "active_runtime_map.json"
+        try:
+            value = json.loads(selected.read_text(encoding="utf-8"))
+            if all(value.get(key) not in (None, "") for key in ("map_id", "map_version", "frame")):
+                return value["map_id"], value["map_version"], value["frame"]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        manifest = load_active_manifest(self.config.map_manifest or None)
+        if manifest is None:
+            return self.config.map_id, self.config.map_version, self.config.map_frame
+        return manifest.map_id, manifest.map_version, manifest.frame
+
+    def start(self):
+        self.config.directory.mkdir(parents=True, exist_ok=True)
+        self.chassis.start()
+        deadline = time.monotonic() + 3
+        verified = False
+        while time.monotonic() < deadline:
+            with self.chassis.lock:
+                link = self.chassis.link
+                state, received = link.mode_telemetry.snapshot() if link else (None, 0)
+                if state is not None and time.monotonic() - received < 1:
+                    self._baseline_link, self._baseline_boot = link, state["boot"]
+                    verified = True
+                    break
+            time.sleep(0.02)
+        if not verified:
+            # Fail closed without taking the whole console down.  The socket has
+            # to stay reachable so the operator can see the hardware fault, but
+            # an unverified link is treated as latched: no navigation, no
+            # mechanism action and no arming until a fresh STM32 report is
+            # verified by an explicit operator reset.
+            self.latched = True
+            self.last_error = ("STM32 status not received; hardware link unverified, "
+                               "motion prohibited")
+            self.event("hardware_link_unverified", reason=self.last_error)
+        if verified:
+            self.mechanism.start()
+        else:
+            # The mechanism runtime reads X2P state at startup; a failure there
+            # must not remove the console either.
+            try:
+                self.mechanism.start()
+            except Exception as exc:
+                self.event("mechanism_startup_deferred", error=str(exc))
+        self.running.set()
+        self.worker = threading.Thread(target=self._supervise, daemon=True, name="local-hardware-safety")
+        self.worker.start()
+        self.event("service_started", simulation=self.simulation, navigation_mode=self.config.navigation_mode,
+                   hardware_backend="stm32+x2p", pca9685=False,
+                   lift_rpm=self.mechanism.controller.lift_rpm, source_file=__file__)
+
+    def _check_hardware(self, *, require_rc_auto):
+        if self.latched or self.mechanism.estop_latched:
+            raise RuntimeError(self.last_error or "local hardware safety latch active")
+        with self.chassis.lock:
+            link = self.chassis.link
+            state, received = link.mode_telemetry.snapshot() if link else (None, 0)
+            if link is not self._baseline_link or not link:
+                raise RuntimeError("STM32 disconnected/re-enumerated; no automatic action replay")
+            if not state or state["boot"] != self._baseline_boot:
+                raise RuntimeError("STM32 rebooted")
+            # During a mechanism stroke, mirror the 3588 policy: RC mode and
+            # its dedicated fault bit do not cancel an already-started X2P
+            # position segment. Other MCU faults and ESTOP still cancel it.
+            faults = (state["faults"] if require_rc_auto else
+                      state["faults"] & ~STM32_RC_FAULT)
+            if state["flags"] & 2 or faults:
+                raise RuntimeError(
+                    f"STM32 emergency stop/fault: flags={state['flags']} "
+                    f"faults={state['faults']}"
+                )
+            if self.chassis.estop_latched:
+                raise RuntimeError(
+                    "local chassis emergency-stop latch active; "
+                    "inspect the robot and use Fault Reset before a new task"
+                )
+            if require_rc_auto and time.monotonic() - received >= 1.0:
+                raise TransientStatusLoss("STM32 status timeout; stopped, wait for fresh status and select a new goal")
+            if require_rc_auto and link.mode_telemetry.mode() != "auto":
+                raise RuntimeError(
+                    "fresh RC automatic mode required: "
+                    f"reported_mode={state['mode']} "
+                    f"rc_age_ms={state['rc_age_ms']} "
+                    f"status_age_ms={round((time.monotonic() - received) * 1000)} "
+                    f"flags={state['flags']} faults={state['faults']}"
+                )
+
+    def check(self):
+        """Require fresh automatic RC before starting an action/navigation."""
+        self._check_hardware(require_rc_auto=True)
+
+    def check_lift_motion(self):
+        """Keep hard faults, ESTOP and disconnect cancellation during X2P motion."""
+        self._check_hardware(require_rc_auto=False)
+        if self.chassis.epoch is not None:
+            raise RuntimeError("chassis must be disarmed during mechanism operation")
+
+    def _stm32_safety_snapshot(self):
+        """Capture the last passive MCU report before ESTOP changes its state.
+
+        A blank RC mode alone cannot distinguish a receiver dropout from a
+        stopped UART reader. Keep this read-only and bounded for the stop path.
+        """
+        with self.chassis.lock:
+            link = self.chassis.link
+            state, received = (link.mode_telemetry.snapshot() if link else
+                               (None, float("-inf")))
+            age_ms = (round((time.monotonic() - received) * 1000)
+                      if received != float("-inf") else None)
+            return {
+                "link_same_as_start": link is not None and link is self._baseline_link,
+                "rx_thread_alive": bool(self.chassis.receiver and self.chassis.receiver.is_alive()),
+                "status_age_ms": age_ms,
+                "serial_rx": link.rx_diagnostics() if link else None,
+                "last_stop_reason": self.chassis.last_stop_reason,
+                "rc_mode": link.mode_telemetry.mode() if link else "",
+                "reported_mode": state["mode"] if state else None,
+                "rc_age_ms": state["rc_age_ms"] if state else None,
+                "flags": state["flags"] if state else None,
+                "faults": state["faults"] if state else None,
+                "boot": state["boot"] if state else None,
+                "boot_same_as_start": bool(state and state["boot"] == self._baseline_boot),
+            }
+
+    def check_stationary(self):
+        self.check()
+        if self.chassis.epoch is not None:
+            raise RuntimeError("chassis must be disarmed before mechanism operation")
+
+    @contextmanager
+    def _write_guard(self, link):
+        with self.chassis.lock:
+            self.check_stationary()
+            if link is not self.chassis.link:
+                raise RuntimeError("STM32 handle changed before write")
+            yield
+
+    def send_mechanism(self, command, device):
+        with self.chassis.lock:
+            link = self.chassis.link
+        if command == m.STOP_ALL:
+            if link is None:
+                self.event("stop_unconfirmed", device="stm32", error="offline")
+                return
+            link.fail_pending("local STOP_ALL")
+            try:
+                link.mechanism_command(command, device)
+                self.event("stop_submitted", device="stm32", execution_confirmed=False)
+            except Exception as exc:
+                self.event("stop_unconfirmed", device="stm32", error=str(exc))
+            return
+        try:
+            self.check_stationary()
+            # The MCU caches replies by (session, sequence). A lost ACK may
+            # therefore be queried again with exactly the same request ID,
+            # without restarting a timed mechanism action. Never allocate a
+            # new ID after a timeout or retry across a boot/link change.
+            sequence = link.reserve_sequence()
+            for attempt in range(1, MECHANISM_ACK_ATTEMPTS + 1):
+                self.check_stationary()
+                try:
+                    result = link.mechanism_command(
+                        command, device, confirm=True, sequence=sequence,
+                        write_guard=self._write_guard(link),
+                    )
+                except MechanismTimeoutError:
+                    self.event("stm32_ack_timeout", command=command,
+                               device=device, sequence=sequence, attempt=attempt)
+                    if attempt == MECHANISM_ACK_ATTEMPTS:
+                        raise
+                else:
+                    if attempt > 1:
+                        self.event("stm32_ack_recovered", command=command,
+                                   device=device, sequence=sequence, attempts=attempt)
+                    return result
+        except Exception as exc:
+            self.trip(f"STM32 action unconfirmed: {exc}")
+            raise
+
+    def trip(self, reason):
+        with self.lock:
+            first = not self.latched
+            self.latched = True
+            if first or not self.last_error:
+                self.last_error = reason
+            if self._goal:
+                self.navigation = {"goal_id": self._goal["goal_id"], "result": "FAILED", "message": reason}
+            self._goal = None
+            self._epoch = None
+            self._task_active = False
+        if first:
+            self.event("safety_latched", reason=reason,
+                       stm32=self._stm32_safety_snapshot(),
+                       navigation_inputs=self._navigation_diagnostics())
+        self.chassis.estop()
+        self._stop_link = self.chassis.link
+        try:
+            self.mechanism.emergency_stop()
+        except Exception as exc:
+            self.event("stop_unconfirmed", device="x2p", error=str(exc))
+
+    def _abort_navigation_for_status_gap(self, reason):
+        """No stale output or old-goal replay; keep hardware ESTOP/fault latches."""
+        with self.lock:
+            if self._goal is None:
+                # Another request may already have revoked this goal. Do not
+                # turn a concurrent, already-handled navigation stop into ESTOP.
+                if self._task_active or self._mechanism_gate.locked():
+                    self.trip(str(reason))
+                return
+            if self._mechanism_gate.locked():
+                self.trip(str(reason))
+                return
+            goal_id = self._goal["goal_id"]
+            diagnostics = self._stm32_safety_snapshot()
+            link_before_stop = self.chassis.link
+            self.chassis.stop("STM32 status timeout")
+            submitted = link_before_stop is not None and self.chassis.link is link_before_stop
+            self._goal, self._epoch = None, None
+            self._task_active = False
+            self.last_error = str(reason)
+            self.navigation = {"goal_id": goal_id, "result": "FAILED", "message": str(reason),
+                               "new_goal_required": True, "automatic_resume": False}
+        self.event("navigation_stopped_status_timeout", reason=str(reason),
+                   stm32=diagnostics, stop_request_submitted=submitted,
+                   physical_stop_confirmed=False, old_goal_revoked=True)
+        if not submitted:
+            self.trip("STM32 status timeout; stop write failed/offline")
+
+    def _navigation_diagnostics(self):
+        now = time.monotonic()
+        return {"input_age_ms": round((now - self._input_at) * 1000),
+                "ui_age_ms": round((now - self._ui_at) * 1000),
+                "motion_command_age_ms": None if self.chassis.last_command is None else round((now - self.chassis.last_command) * 1000),
+                "pose": dict(self._inputs) if self._inputs else None}
+
+    def _supervise(self):
+        while self.running.is_set():
+            try:
+                with self.lock:
+                    if not self.latched:
+                        with self.chassis.lock:
+                            link = self.chassis.link
+                            report, received = link.mode_telemetry.snapshot() if link else (None, 0)
+                            reset_detected = bool(report and time.monotonic() - received < .5 and
+                                (link is not self._baseline_link or report["boot"] != self._baseline_boot))
+                        if reset_detected:
+                            self.trip("STM32 rebooted/reconnected; operator reset and new goal required")
+                    if self.latched:
+                        with self.chassis.lock:
+                            if self.chassis.link is not None and self.chassis.link is not self._stop_link:
+                                self.chassis.estop()
+                                self.send_mechanism(m.STOP_ALL, 0)
+                                self._stop_link = self.chassis.link
+                if not self.latched and (self._task_active or self._goal is not None):
+                    if self._mechanism_gate.locked() and self._goal is None:
+                        self.check_lift_motion()
+                    else:
+                        self.check()
+                    if time.monotonic() - self._ui_at > 1.5:
+                        raise RuntimeError("workflow/UI heartbeat lost")
+                    if self._epoch is not None:
+                        self._check_navigation_inputs()
+                        if self.chassis.epoch != self._epoch:
+                            raise RuntimeError("local navigation velocity timeout/revoked authorization: "
+                                               + self.chassis.last_stop_reason)
+            except TransientStatusLoss as exc:
+                self._abort_navigation_for_status_gap(exc)
+            except Exception as exc:
+                self.trip(str(exc))
+            time.sleep(0.03)
+
+    def _check_navigation_inputs(self):
+        value = self._inputs
+        now = time.monotonic()
+        if value is None or now - self._input_at > 0.3:
+            raise RuntimeError("local navigation sensor feed stale")
+        if not 0 <= now - value["odom_at"] <= 0.3:
+            raise RuntimeError("odometry stale")
+        if self.config.require_pointcloud_for_navigation and (not 0 <= now - value["cloud_at"] <= 0.5 or value["blocked"]):
+            raise RuntimeError("obstacle/cloud unavailable")
+        if value["localization_valid"] is not True or not 0 <= now - value["localization_at"] <= 0.5:
+            raise RuntimeError("localization quality not confirmed/fresh")
+        if not self._map_identity()[0]:
+            raise RuntimeError("map_id must be configured for autonomous navigation")
+
+    def _nav_request(self, request):
+        if self.config.navigation_mode != "local":
+            raise RuntimeError("autonomous chassis navigation is disabled in operator mode")
+        kind = request["action"]
+        if kind == "nav_register":
+            if self._goal is not None:
+                raise RuntimeError("cannot replace navigation worker during a goal")
+            if self._nav_token and time.monotonic() - self._input_at < 0.5:
+                raise RuntimeError("a local navigation worker is already active")
+            self._nav_token = secrets.token_hex(24)
+            self._nav_sequence = 0
+            self._inputs = None
+            return {"ok": True, "token": self._nav_token}
+        if not self._nav_token or request.get("token") != self._nav_token:
+            raise RuntimeError("invalid local navigation worker token")
+        sequence = request.get("sequence")
+        if type(sequence) is not int or sequence <= self._nav_sequence:
+            raise ValueError("replayed local navigation update")
+        self._nav_sequence = sequence
+        if kind == "nav_inputs":
+            value = request.get("inputs")
+            if (not isinstance(value, dict)
+                    or not all(finite(value.get(k)) for k in ("x_m", "y_m", "yaw_rad", "odom_at", "cloud_at", "localization_at"))
+                    or type(value.get("blocked")) is not bool
+                    or type(value.get("localization_valid")) is not bool
+                    or value.get("frame_id") != self.config.map_frame):
+                raise ValueError("invalid local sensor inputs/frame")
+            now = time.monotonic()
+            if any(value[k] > now + 0.02 for k in ("odom_at", "cloud_at", "localization_at")):
+                raise ValueError("future sensor timestamp")
+            self._inputs = value
+            self._input_at = now
+            return {"ok": True, "goal": self._goal, "latched": self.latched}
+        if kind == "nav_fault":
+            reason = request.get("reason")
+            if not isinstance(reason, str) or not reason or len(reason) > 256:
+                raise ValueError("bounded navigation fault reason required")
+            self.trip("local navigator fault: " + reason)
+            return {"ok": True}
+        if kind == "nav_velocity":
+            if not self._goal or request.get("goal_id") != self._goal["goal_id"] or self._epoch is None:
+                raise RuntimeError("no matching authorized local navigation goal")
+            self.check()
+            self._check_navigation_inputs()
+            stamp = request.get("created_at")
+            if not finite(stamp) or not 0 <= time.monotonic() - stamp <= 0.15:
+                raise ValueError("expired velocity command")
+            forward, turn = request.get("forward"), request.get("turn")
+            if not all(finite(v) and -1 <= v <= 1 for v in (forward, turn)):
+                raise ValueError("normalized effort must be finite and in [-1,1]")
+            if forward != 0 and turn != 0:
+                raise ValueError("forward and turn must be mutually exclusive")
+            self.chassis.command(self._epoch, round(forward * 300), round(turn * 800))
+            self._zero_frames = self._zero_frames + 1 if forward == turn == 0 else 0
+            if request.get("arrived") is True:
+                pose, goal = self._inputs, self._goal["pose"]
+                error = math.hypot(pose["x_m"] - goal["x_m"], pose["y_m"] - goal["y_m"])
+                if self._zero_frames < 3 or error > self.config.point_xy_tolerance:
+                    raise RuntimeError("arrival requires three zero frames and fresh in-tolerance XY pose")
+                self.chassis.stop("local navigation arrival")
+                self.navigation = {"goal_id": self._goal["goal_id"], "result": "SUCCEEDED"}
+                self._goal, self._epoch = None, None
+            return {"ok": True}
+        raise ValueError("unknown local navigation request")
+
+    def _recovery_status(self):
+        with self.chassis.lock:
+            link = self.chassis.link
+            report, received = link.mode_telemetry.snapshot() if link else (None, 0)
+            fresh = bool(report and 0 <= time.monotonic() - received < .5)
+            boot = report["boot"] if fresh else None
+            detected = bool(fresh and (link is not self._baseline_link or boot != self._baseline_boot))
+            required = bool(self.latched or self.chassis.estop_latched or detected)
+            ready = bool(fresh and link.mode_telemetry.mode() == "auto"
+                         and report["faults"] == 0 and self.chassis.epoch is None
+                         and not self._mechanism_gate.locked())
+            return {"mcu_boot": boot, "baseline_boot": self._baseline_boot,
+                    "reset_detected": detected, "reset_required": required,
+                    "reset_ready": ready, "automatic_motion_resume": False}
+
+    def local_request(self, request):
+        kind = request.get("action")
+        if kind == "status":
+            if request.get("client_role") == "ui":
+                self._ui_at = time.monotonic()
+            inputs = self._inputs if time.monotonic() - self._input_at < 0.3 else None
+            map_id, map_version, map_frame = self._map_identity()
+            return {"ok": True, "runtime": "lenovo-local", "simulation": self.simulation,
+                    "lift_rpm": self.mechanism.controller.lift_rpm,
+                    "configured_lift_rpm": self.config.lift_rpm,
+                    "chassis": self.chassis.status(), "navigation": self.navigation,
+                    "recovery": self._recovery_status(),
+                    "lenovo_online": self.config.navigation_mode == "local" and inputs is not None,
+                    "test_navigation_mode": self.config.navigation_mode == "operator",
+                    "localization_health_mode": self.config.localization_health_mode,
+                    "pointcloud_required": self.config.require_pointcloud_for_navigation,
+                    "pose": inputs, "slam": {"map_id": map_id,
+                        "map_version": map_version,
+                        "frame": map_frame,
+                        "mode": "LOCALIZING" if inputs and inputs["localization_valid"] else "UNKNOWN"},
+                    "safety_latched": self.latched, "last_error": self.last_error,
+                    "external_suction": self.config.suction_policy == "external",
+                    "requires_mechanical_reset": self.mechanism.requires_mechanical_reset()}
+        if kind == "estop":
+            self.trip("operator emergency stop")
+            return {"ok": True}
+        if kind in ("clear_estop", "restore_control"):
+            # ``restore_control`` is the idempotent form used by the UI's
+            # "恢复底盘控制" button: it hands control back even when no latch is
+            # currently set, but keeps every safety precondition below.
+            if request.get("mechanical_reset_confirmed") is not True:
+                raise RuntimeError("explicit operator mechanical inspection/reset confirmation required")
+            if not self._mechanism_gate.acquire(blocking=False):
+                raise RuntimeError("wait for active mechanism worker to stop before resetting")
+            try:
+                state = self.chassis.status()
+                if state["rc_mode"] != "auto" or state["faults"] != 0 or state["motion_armed"]:
+                    raise RuntimeError("reset requires online fresh auto RC and no faults/motion")
+                self.mechanism.controller.lift_drive.stop()
+                # The explicit reset will first submit AUTO_STOP. Mark this
+                # handle under the same locks as reconnect supervision, so a
+                # delayed "stop the replacement" pass cannot ESTOP after CLEAR.
+                with self.lock, self.chassis.lock:
+                    self._stop_link = self.chassis.link
+                self.chassis.clear_estop(confirm_status=True)
+                self.mechanism.reset(self.mechanism.grain, mechanical_reset_confirmed=True)
+                with self.lock, self.chassis.lock:
+                    self._baseline_link = self.chassis.link
+                    state, _ = self._baseline_link.mode_telemetry.snapshot()
+                    self._baseline_boot = state["boot"]
+                    self._task_active = False
+                    self._goal, self._epoch = None, None
+                    self.latched, self.last_error = False, ""
+                self.event("operator_reset" if kind == "clear_estop" else "operator_take_control",
+                           resumed=False)
+                return {"ok": True, "latched": False, "resumed": False,
+                        "requires_new_goal": True}
+            finally:
+                self._mechanism_gate.release()
+        if kind == "cancel":
+            with self.lock:
+                self.chassis.stop("local goal canceled")
+                if self._goal:
+                    self.navigation = {"goal_id": self._goal["goal_id"], "result": "CANCELED"}
+                self._goal, self._epoch = None, None
+            return {"ok": True}
+        if kind == "mechanism":
+            with self.lock:
+                if not self._mechanism_gate.acquire(blocking=False):
+                    raise RuntimeError("another mechanism action is active")
+            try:
+                self.check_stationary()
+                if self._goal is not None:
+                    raise RuntimeError("finish/cancel navigation before mechanisms")
+                if request.get("name") == "set_grain":
+                    if self.config.suction_policy != "external":
+                        raise RuntimeError("full workflow needs confirmed external suction handling")
+                    self.mechanism.set_grain(str(request.get("grain", "")))
+                    self._task_active = True
+                    self._ui_at = time.monotonic()
+                else:
+                    if not self._task_active or time.monotonic() - self._ui_at > 1.5:
+                        raise RuntimeError("start a task and keep the local UI/workflow heartbeat running")
+                    self.mechanism.execute(request.get("name"), **request.get("args", {}))
+                return {"ok": True}
+            except Exception as exc:
+                if self._task_active:
+                    self.trip(str(exc))
+                raise
+            finally:
+                self._mechanism_gate.release()
+        if kind in ("test_goal", "test_arrive", "goal"):
+            with self.lock:
+                self.check_stationary()
+                if self._mechanism_gate.locked() or self.mechanism.requires_mechanical_reset():
+                    raise RuntimeError("mechanism active/incomplete lift return; navigation forbidden")
+                if kind == "test_arrive":
+                    if self.config.navigation_mode != "operator" or not self._goal or request.get("goal_id") != self._goal["goal_id"]:
+                        raise RuntimeError("no matching operator-confirmed goal")
+                    self.navigation = {"goal_id": self._goal["goal_id"], "result": "SUCCEEDED", "test_only": True}
+                    self._goal = None
+                    return {"ok": True}
+                if self._goal:
+                    raise RuntimeError("cancel previous goal first")
+                operator = self.config.navigation_mode == "operator"
+                if (kind == "test_goal") != operator:
+                    raise RuntimeError("navigation mode mismatch")
+                pose = request.get("pose") if operator else (request.get("goal") or {}).get("pose")
+                if not isinstance(pose, dict) or not all(finite(pose.get(k)) for k in ("x_m", "y_m")):
+                    raise ValueError("finite goal coordinates required")
+                if not operator:
+                    goal = request["goal"]
+                    map_id, _, map_frame = self._map_identity()
+                    frame_id = goal.get("frame_id")
+                    if (goal.get("map_id") != map_id
+                            or frame_id not in (map_frame, "map")):
+                        raise ValueError("goal map/frame mismatch")
+                    self._check_navigation_inputs()
+                goal_id = str(uuid.uuid4())
+                self._goal = {"goal_id": goal_id, "pose": pose}
+                self.navigation = dict(self._goal, state="AWAITING_OPERATOR" if operator else "RUNNING", test_only=operator)
+                self._ui_at = time.monotonic()
+                if not operator:
+                    self.chassis.set_obstacle(False)
+                    try:
+                        self._epoch = self.chassis.arm(goal_id)
+                    except Exception:
+                        self._goal = None
+                        self.navigation = {"goal_id": goal_id, "result": "FAILED"}
+                        raise
+                    self._zero_frames = 0
+                self.event("navigation_goal", operator_confirmed=operator, goal_id=goal_id, pose=pose)
+                return {"ok": True, "goal_id": goal_id}
+        if isinstance(kind, str) and kind.startswith("nav_"):
+            with self.lock:
+                try:
+                    return self._nav_request(request)
+                except TransientStatusLoss as exc:
+                    self._abort_navigation_for_status_gap(exc)
+                    raise
+                except Exception as exc:
+                    if self._epoch is not None:
+                        self.trip(f"local navigation rejected: {exc}")
+                    raise
+        if kind == "map_list":
+            from grain_sampling_local.slam import LocalSlamBridge
+            root = LocalSlamBridge().find_latest_saved_map()
+            return {"ok": True, "maps": ([{"map_id": Path(root).stem, "path": root}] if root else [])}
+        if kind == "slam":
+            raise RuntimeError("mapping is owned by the task043 container bridge; use the Lenovo UI")
+        raise ValueError("unknown local action")
+
+    def serve(self):
+        try:
+            self.start()
+            self._ipc_loop()
+        finally:
+            self.close()
+
+    def close(self):
+        self.running.clear()
+        self.trip("service shutdown")
+        if self.worker:
+            self.worker.join(timeout=2)
+        try:
+            self.mechanism.close()
+        finally:
+            self.chassis.close()

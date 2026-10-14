@@ -1,0 +1,17 @@
+{
+  "stm32_port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AB3N91KX-if00-port0",
+  "x2p_port": "/dev/serial/by-id/usb-FTDI_FT231X_USB_UART_D30GLD5V-if00-port0",
+  "x2p_slave": 2,
+  "lift_rpm": 800,
+  "forward_sign": 1,
+  "navigation_mode": "operator",
+  "suction_policy": "external",
+  "acknowledge_legacy_untighten": true,
+  "runtime_dir": "",
+  "odom_topic": "/Odometry",
+  "cloud_topic": "/cloud_registered_body",
+  "localization_valid_topic": "/grain/localization_valid",
+  "map_frame": "camera_init",
+  "map_id": "",
+  "ros_image": "grain-nav:noetic-x86"
+}
