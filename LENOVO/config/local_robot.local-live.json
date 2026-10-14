@@ -12,7 +12,7 @@
   "cloud_topic": "/task043_newmap/cloud_registered_body",
   "localization_valid_topic": "/grain/localization_valid",
   "map_frame": "camera_init",
-  "map_id": "warehouse_live_20261012_newmap_a",
+  "map_id": "test_03_11b22b058183",
   "ros_image": "grain-nav:noetic-x86",
   "point_far_forward": 0.9,
   "point_near_forward": 0.9,
@@ -29,6 +29,7 @@
   "point_heading_realign_tolerance": 0.3,
   "point_arrival_hysteresis": 0.04,
   "localization_startup_status_topic": "/task043/localization_startup_status",
-  "localization_startup_map_version": "20261012-r1",
-  "localization_startup_manifest_sha256": "2ee2ae1d3500e85ca655c3f70a3cdc2d89b4f737df2dc4f5b1bc11461c6c4e13"
+  "localization_startup_map_version": "1",
+  "localization_startup_manifest_sha256": "85b4e7e65a24aab14984430e76eb9530c68a9f8a0a2163f76ead94344ce322e1",
+  "map_version": 1
 }

@@ -17,7 +17,12 @@ def test_local_live_profile_matches_current_map_and_sensor_policy():
     assert config.navigation_mode == "local"
     assert config.odom_topic == "/task043_newmap/Odometry"
     assert config.map_frame == "camera_init"
-    assert config.map_id == "warehouse_live_20261012_newmap_a"
+    # The live profile is rewritten by task043_switch_map.sh on every map
+    # switch; keep this assertion in step with the deployed value so a stale
+    # copy cannot silently break the adapter's localization health gate.
+    assert config.map_id == "test_03_11b22b058183"
+    assert config.localization_startup_map_version == "1"
+    assert len(config.localization_startup_manifest_sha256) == 64
     assert config.localization_health_mode == "odom_stable"
     assert config.require_pointcloud_for_navigation is False
     assert config.point_near_forward > 0.8
