@@ -240,7 +240,13 @@ class WorkflowOrchestrator:
         if self._user_callback:
             self._user_callback(prev, current, action)
 
-        logger.info("FSM: %s -> %s  (action: %s)", prev, current, action)
+        logger.info(
+            "FSM: %s -> %s  (action: %s) waypoint=%d/%d depth=%d/%d pipes=%d mechanism=%s",
+            prev, current, action,
+            self._fsm.current_waypoint_index + 1, self._fsm.total_waypoints,
+            self._fsm.current_depth_index + 1, self._fsm.max_depth,
+            self._fsm.current_pipe_index, self._mechanism_connected,
+        )
 
         # ── Operation logging (task A) ─────────────────────
         self._log_on_transition(prev, current, action)
@@ -627,8 +633,12 @@ class WorkflowOrchestrator:
                     self._fsm.current_depth_index + 1, self._fsm.max_depth,
                     self._fsm.current_waypoint_index + 1, self._fsm.total_waypoints)
         if self._fsm.current_depth_index + 1 < self._fsm.max_depth:
+            logger.info("Current point still has sampling depths; retaining %d pipes",
+                        self._fsm.current_pipe_index)
             self._fsm.transition(SamplingAction.SYSTEM_NEXT_DEPTH)
         else:
+            logger.info("Current point sampling complete; extracting %d pipes before departure",
+                        self._fsm.current_pipe_index)
             self._fsm.transition(SamplingAction.SYSTEM_START_EXTRACTION)
 
     def _handle_extract_pipe(self) -> None:

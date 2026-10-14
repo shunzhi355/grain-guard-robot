@@ -83,6 +83,22 @@ def test_without_a_loaded_map_creation_is_refused(dialog, monkeypatch):
     assert "没有加载中的定位地图" in widget._error_label.text()
 
 
+def test_two_points_with_repeated_depth_sample_once_at_each_point(dialog):
+    module, widget, app = dialog
+    signals = []
+    widget.task_created.connect(signals.append)
+    widget._waypoint_list.clear()
+    widget._waypoint_list.addItem("点位1: X=7.5  Y=0.7")
+    widget._waypoint_list.addItem("点位2: X=10.0  Y=1.5")
+    widget._depth_inputs[0].setCurrentText("2.0 米")
+    widget._depth_inputs[1].setCurrentText("2.0 米")
+    widget._depth_inputs[2].setCurrentText("无")
+    widget._on_create()
+    assert len(signals) == 1
+    assert signals[0]["depth_list"] == [2.0]
+    assert signals[0]["waypoints"] == [{"x": 7.5, "y": 0.7}, {"x": 10.0, "y": 1.5}]
+
+
 def test_current_pose_helper_fills_xy_from_live_pose(dialog, monkeypatch):
     module, widget, app = dialog
     import grain_sampling_workflow.robot_bridge as bridge

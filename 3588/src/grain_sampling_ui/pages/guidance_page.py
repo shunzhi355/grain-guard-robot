@@ -632,6 +632,25 @@ class GuidancePage(QWidget):
             title_text = "假导航联调：等待人工确认"
             detail_text = "底盘不会移动；请在假导航终端确认现场安全并按 Enter。"
 
+        if state == SamplingState.CONVEY_DONE and self._fsm is not None:
+            completed = self._fsm.current_depth_index + 1
+            total = self._fsm.max_depth
+            if completed < total:
+                title_text = f"当前点位第 {completed}/{total} 层取粮完成"
+                detail_text = (
+                    "输粮已停止、仓门已关闭。确认后继续当前点位的下一层采样；"
+                    "全部层次采样完成后开始取管，取完再前往下一点。"
+                )
+                self._action_buttons["CONFIRM_DONE"].setText("确认，继续下一层")
+            else:
+                title_text = "当前点位取粮完成"
+                detail_text = (
+                    f"本点 {total} 层采样已完成，输粮已停止、仓门已关闭。"
+                    f"确认后开始取管，剩余 {self._fsm.current_pipe_index} 节；"
+                    "请逐根确认取出，全部取完后再导航下一点或提示返航。"
+                )
+                self._action_buttons["CONFIRM_DONE"].setText("确认，开始取管")
+
         # ── Title ───────────────────────────────────────────
         self._title.setText(title_text)
 

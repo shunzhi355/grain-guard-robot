@@ -48,6 +48,27 @@ for state, button in (
             assert fsm.current_pipe_index == (3 if state == S.PIPE_SUPPORT_PROMPT else 2)
     finally:
         page.close()
+for depth_index, expected_button in ((0, "确认，继续下一层"), (1, "确认，开始取管")):
+    fsm = SamplingStateMachine(total_waypoints=2, max_depth=2)
+    fsm._state = S.CONVEY_DONE
+    fsm.current_depth_index = depth_index
+    fsm.current_pipe_index = 2
+    page = GuidancePage()
+    page.attach_state_machine(fsm)
+    page.show()
+    qapp.processEvents()
+    try:
+        assert page._action_buttons['CONFIRM_DONE'].text() == expected_button
+        if depth_index == 0:
+            assert '第 1/2 层' in page._title.text()
+        else:
+            assert '剩余 2 节' in page._detail.text()
+        page._action_buttons['CONFIRM_DONE'].click()
+        qapp.processEvents()
+        assert fsm.current_state == S.NEXT_CHECK
+        assert fsm.current_pipe_index == 2
+    finally:
+        page.close()
 '''
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     result = subprocess.run(

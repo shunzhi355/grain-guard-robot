@@ -420,6 +420,10 @@ class _CreateTaskDialog(QDialog):
 
         layout.addLayout(form)
 
+        depth_hint = QLabel("以上深度会在每个点位依次采样，相同深度只采一次。每点只采一次时，仅设置深度1，其余选“无”。")
+        depth_hint.setWordWrap(True)
+        layout.addWidget(depth_hint)
+
         # Waypoint list
         wp_label = QLabel("采样点位:")
         wp_label.setStyleSheet(f"font-size: 10pt; color: {C['text_secondary']};")
@@ -679,6 +683,7 @@ class _CreateTaskDialog(QDialog):
                 depth_list.append(float(text.replace(" 米", "")))
         if not depth_list:
             depth_list = [2.0]
+        depth_list = list(dict.fromkeys(depth_list))
 
         grain_type = self._grain_input.currentText()
         data = {

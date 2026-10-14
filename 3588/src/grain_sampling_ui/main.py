@@ -609,6 +609,15 @@ class MainWindow(QMainWindow):
             fallback = float(depth_list_raw) if isinstance(depth_list_raw, (int, float)) else 2.0
             depth_list = [fallback]
 
+        # Local depth selectors describe the depths at EACH waypoint. Repeated
+        # values must not create another press/sample cycle at the same depth.
+        if task_data.get("source") == "local":
+            unique_depths = list(dict.fromkeys(depth_list))
+            if unique_depths != depth_list:
+                logger.info("Local task %s: merging repeated depths %s -> %s",
+                            order_id, depth_list, unique_depths)
+            depth_list = unique_depths
+
         waypoints = []
         for wp in waypoints_raw:
             if isinstance(wp, dict):
