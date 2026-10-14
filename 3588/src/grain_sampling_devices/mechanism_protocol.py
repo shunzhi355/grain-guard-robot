@@ -14,11 +14,12 @@ START, STOP, STOP_ALL = 1, 2, 3
 TIGHTEN, CONVEY, BIN_SHALLOW, BIN_MID, BIN_DEEP, CLAMP, UNCLAMP = range(1, 8)
 BIN_DEVICES = {"shallow": BIN_SHALLOW, "mid": BIN_MID, "deep": BIN_DEEP}
 
-# Local firmware timings from robot/mechanism.h; UART does not carry duration.
+# Required paired firmware timings in robot/mechanism.h; UART carries no duration.
+# Deploy the matching firmware before running this workflow on hardware.
 BIN_OPEN_DURATION_SEC = 5.0
-BIN_CLOSE_DURATION_SEC = 6.0
-CLAMP_DURATION_SEC = 3.0
-UNCLAMP_DURATION_SEC = 2.0
+BIN_CLOSE_DURATION_SEC = 3.0
+CLAMP_DURATION_SEC = 2.0
+UNCLAMP_DURATION_SEC = 1.0
 
 
 def command_payload(command: int, device: int) -> bytes:

@@ -6,6 +6,7 @@ import math
 import os
 from dataclasses import dataclass, fields, replace as dataclass_replace
 from pathlib import Path
+from utils.sampling_params import X2P_RPM
 
 
 @dataclass(frozen=True)
@@ -13,7 +14,7 @@ class LocalConfig:
     stm32_port: str = ""
     x2p_port: str = ""
     x2p_slave: int = 2
-    lift_rpm: int = 30
+    lift_rpm: int = X2P_RPM
     forward_sign: int = 1
     navigation_mode: str = "operator"
     suction_policy: str = "required"

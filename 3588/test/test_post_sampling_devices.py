@@ -36,10 +36,10 @@ def test_dry_run_uses_production_services_and_all_three_bins(capsys):
 
     assert "/mechanism/start_suction" in output
     assert "/mechanism/stop_suction" in output
-    assert "/mechanism/convey" in output
+    assert "/mechanism/start_convey" in output
     for name in ("shallow", "mid", "deep"):
-        assert f"/mechanism/open_bin/{name}" in output
-        assert f"/mechanism/close_bin/{name}" in output
+        assert f"/mechanism/hold_bin_open/{name}" in output
+        assert "/mechanism/close_all_bins" in output
     assert "导航、插管、夹紧、拧管或升降" in output
 
 
@@ -50,4 +50,4 @@ def test_skip_waste_omits_suction_calls(capsys):
 
     assert "[\u8df3\u8fc7] --skip-waste" in output
     assert "[预演] 启动排废粮" not in output
-    assert "/mechanism/convey" in output
+    assert "/mechanism/start_convey" in output

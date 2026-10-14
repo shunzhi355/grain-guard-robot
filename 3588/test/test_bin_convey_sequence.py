@@ -11,11 +11,21 @@ from grain_sampling_devices.mechanism_driver import CHANNELS, BIN_OPEN_PULSE, BI
 from grain_sampling_workflow.ros_bridge import SamplingBridge
 
 
+@pytest.fixture(autouse=True)
+def bin_waits(mock_mechanism, monkeypatch):
+    waits = []
+    def wait(seconds):
+        waits.append((seconds, set(mock_mechanism._running)))
+        return mock_mechanism._stop_flag.is_set()
+    monkeypatch.setattr(mock_mechanism, "_wait_bin_motion", wait)
+    return waits
+
+
 def test_production_convey_duration_follows_grain_configuration():
     assert get_grain_params("")["convey_duration"] == 120.0
     assert {grain: params["convey_duration"]
             for grain, params in GRAIN_MECHANISM_CONFIG.items()} == {
-                "稻谷": 10.0, "玉米": 10.0, "黄豆": 90.0,
+                "稻谷": 30.0, "玉米": 60.0, "黄豆": 90.0,
             }
 
 
@@ -43,16 +53,15 @@ def test_waste_select_sample_convey_close_all_then_stop(grain, depth):
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
     assert events == [
         ("hold_bin_open", (depth,)),
-        ("wait", 5.0), ("close_bin", (depth,)), ("wait", 6.5),
+        ("wait", 0.5),
         ("start_suction", ()), ("wait", 7), ("stop_suction", ()),
         ("start_convey", ()), ("wait", params["convey_duration"]),
-        ("close_all_bins", ()), ("wait", 6.5),
-        ("stop_convey", ()), ("wait", 0.5),
+        ("stop_convey", ()), ("close_all_bins", ()), ("wait", 3.5),
     ]
     assert fsm.current_state == SamplingState.CONVEY_DONE
     bridge.call_open_bin.assert_not_called()
     bridge.call_convey.assert_not_called()
-    bridge.call_close_bin.assert_called_once_with(depth)
+    bridge.call_close_bin.assert_not_called()
 
 
 def test_ui_waits_for_mcu_bin_closing_then_enters_formal_sampling():
@@ -72,9 +81,9 @@ def test_ui_waits_for_mcu_bin_closing_then_enters_formal_sampling():
 
     orch._wait_interruptible = wait
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    assert waits == [5.0, 6.5]
+    assert waits == [0.5]
     bridge.call_hold_bin_open.assert_called_once_with(0)
-    bridge.call_close_bin.assert_called_once_with(0)
+    bridge.call_close_bin.assert_not_called()
     bridge.call_start_convey.assert_not_called()
     assert fsm.current_state == SamplingState.FORMAL_SAMPLING
 
@@ -87,7 +96,7 @@ def test_stop_during_open_delay_never_starts_conveyor():
     orch.enable_mechanism()
 
     def stop_during_wait(seconds):
-        assert seconds == 5.0
+        assert seconds == 0.5
         fsm.transition(SamplingAction.STOP)
         return False
 
@@ -130,12 +139,12 @@ def test_failure_stops_hardware_and_blocks_completion(fail):
     assert fsm.current_state == SamplingState.STOPPED
     bridge.call_emergency_stop.assert_called()
     if fail == "close_all_bins":
-        bridge.call_stop_convey.assert_not_called()
+        bridge.call_stop_convey.assert_called_once()
     if fail == "stop_convey":
-        bridge.call_close_all_bins.assert_called_once()
+        bridge.call_close_all_bins.assert_not_called()
 
 
-@pytest.mark.parametrize("interrupt_at", [1, 2, 3])
+@pytest.mark.parametrize("interrupt_at", [1, 2])
 def test_interruption_during_convey_or_closing_stops_outputs(interrupt_at):
     fsm = SamplingStateMachine()
     fsm._state = SamplingState.CONVEY_1
@@ -153,7 +162,7 @@ def test_interruption_during_convey_or_closing_stops_outputs(interrupt_at):
     orch._handle_convey()
     assert fsm.current_state == SamplingState.STOPPED
     bridge.call_emergency_stop.assert_called()
-    if interrupt_at <= 2:
+    if interrupt_at == 1:
         bridge.call_stop_convey.assert_not_called()
     else:
         bridge.call_stop_convey.assert_called_once()
@@ -166,7 +175,7 @@ def test_continuous_services_no_timers_and_emergency_stop(mock_mechanism):
     history = mock_mechanism.action_history
     assert all(kw["duration"] is None for name, kw in history
                if name in ("convey", "open_bin"))
-    active = {CHANNELS["convey_1"], CHANNELS["convey_2"], CHANNELS["bin_deep"]}
+    active = {CHANNELS["convey_1"], CHANNELS["convey_2"]}
     assert active <= mock_mechanism._running
     mock_mechanism.emergency_stop()
     stopped = next(kw["channels"] for name, kw in reversed(history)
@@ -206,26 +215,21 @@ def test_select_bin_opens_only_target_closes_others_then_neutral(
     node = MechanismNode(controller=mock_mechanism)
     assert node.run_action("hold_bin_open", depth=depth)[0]
     params = get_grain_params("")
+    order = [depth] + [name for name in ("shallow", "mid", "deep") if name != depth]
     assert len(bin_timers) == 3
-    for name, timer in zip(("shallow", "mid", "deep"), bin_timers):
+    for name, timer in zip(order, bin_timers):
         channel = CHANNELS[f"bin_{name}"]
         pulse = BIN_OPEN_PULSE if name == depth else BIN_CLOSE_PULSE
-        assert mock_mechanism.pca9685.register_history[channel] == [pulse]
+        assert mock_mechanism.pca9685.register_history[channel] == [pulse, 1500]
         assert timer.seconds == params["open_duration" if name == depth else "close_duration"]
-        timer.start.assert_called_once()
-    # All three directions have been commanded before any movement timer expires.
-    for timer in bin_timers:
-        timer.callback()
-    for name in ("shallow", "mid", "deep"):
-        channel = CHANNELS[f"bin_{name}"]
-        assert mock_mechanism.pca9685.register_history[channel][-1] == 1500
-        assert channel not in mock_mechanism._running
+        timer.cancel.assert_called_once()
     assert not mock_mechanism._bin_timers
 
 
-def test_close_all_cancels_old_selection_timers(mock_mechanism, bin_timers):
+
+def test_close_all_cancels_old_closing_timers(mock_mechanism, bin_timers):
     node = MechanismNode(controller=mock_mechanism)
-    assert node.run_action("hold_bin_open", depth="deep")[0]
+    assert node.run_action("close_all_bins")[0]
     old_timers = list(bin_timers)
     assert node.run_action("close_all_bins")[0]
     for timer in old_timers:
@@ -296,8 +300,8 @@ def test_open_stage_waits_for_slower_closing_doors(monkeypatch):
     orch.enable_mechanism()
     orch._wait_interruptible = MagicMock(return_value=True)
     orch._handle_open_bin()
-    assert [call.args[0] for call in orch._wait_interruptible.call_args_list] == [5.0, 7.5]
-    bridge.call_close_bin.assert_called_once_with(0)
+    assert [call.args[0] for call in orch._wait_interruptible.call_args_list] == [0.5]
+    bridge.call_close_bin.assert_not_called()
 
 
 def test_close_all_bridge_uses_registered_service():

@@ -11,7 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
-from sampling_params import PRESS_SEGMENT_CM
+from sampling_params import PRESS_SEGMENT_CM, MECHANISM_SETTLE_MARGIN_S
 from grain_sampling_workflow.mechanism_config import get_grain_params
 
 
@@ -62,12 +62,14 @@ def main():
 
     def action(name):
         checked(name)
-        rospy.sleep(max(p[name + "_duration"] for p in configs) + 0.5)
+        rospy.sleep(max(p[name + "_duration"] for p in configs) + MECHANISM_SETTLE_MARGIN_S)
+
+    def move(direction, distance):
+        checked("move_lift", direction=direction, distance_cm=distance)
+        rospy.sleep(MECHANISM_SETTLE_MARGIN_S)
 
     try:
-        run_segments(args.target_cm, args.segment_cm, action,
-                     lambda direction, distance: checked(
-                         "move_lift", direction=direction, distance_cm=distance))
+        run_segments(args.target_cm, args.segment_cm, action, move)
     except (Exception, KeyboardInterrupt):
         try:
             checked("emergency_stop")

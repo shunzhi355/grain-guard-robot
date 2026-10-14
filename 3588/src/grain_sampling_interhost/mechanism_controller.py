@@ -32,18 +32,11 @@ class MechanismRuntime:
         self._unclamp_finish_at = 0.0
 
     def start(self):
-        # The real reciprocating press defaults to 30 r/min.  Allow a bounded
-        # per-run override for supervised bench tests without changing the
-        # production calibration. The same bound must reach the X2P motion
-        # controller, otherwise it rejects the faster timed position moves.
-        lift_rpm = os.getenv("GRAIN_LIFT_RPM")
-        requested_rpm = None
-        if lift_rpm is not None:
-            requested_rpm = int(lift_rpm)
-            if not 1 <= requested_rpm <= 800:
-                raise ValueError("GRAIN_LIFT_RPM must be in 1..800 r/min")
-            self.controller.lift_rpm = requested_rpm
-            logger.warning("X2P supervised lift speed override: %d r/min", requested_rpm)
+        # Command speed and the X2P position limit must use the same setting.
+        requested_rpm = int(os.getenv("GRAIN_LIFT_RPM", os.getenv("X2P_RPM", X2P_RPM)))
+        if not 1 <= requested_rpm <= 800:
+            raise ValueError("GRAIN_LIFT_RPM must be in 1..800 r/min")
+        self.controller.lift_rpm = requested_rpm
         self.controller.open()
         try:
             self.controller.init_escs(hold_s=3.0)
@@ -51,8 +44,7 @@ class MechanismRuntime:
             if port:
                 self.controller.lift_drive = build_x2p_lift_drive(
                     port=port, slave=int(os.getenv("X2P_SLAVE", X2P_SLAVE)),
-                    rpm=(requested_rpm if requested_rpm is not None
-                         else int(os.getenv("X2P_RPM", X2P_RPM))),
+                    rpm=requested_rpm,
                     duration_s=float(os.getenv("X2P_DURATION", X2P_DURATION_S)),
                     forward_sign=int(os.getenv("X2P_FORWARD_SIGN", X2P_FORWARD_SIGN)),
                 )
@@ -210,6 +202,20 @@ class MechanismRuntime:
             depth = args.get("depth")
             if depth not in DEPTHS:
                 raise ValueError("invalid bin depth")
+            if action == "hold_bin_open":
+                def before_move(name, selected):
+                    self._mirrored(lambda: None, self._bin_commands(
+                        "open_bin" if selected else "close_bin", name))
+                minimum = ({"open_duration": mcu.BIN_OPEN_DURATION_SEC,
+                            "close_duration": mcu.BIN_CLOSE_DURATION_SEC}
+                           if self.serial_command is not None else {})
+                try:
+                    return self.controller.hold_bin_open(
+                        depth=depth, before_move=before_move, minimum_durations=minimum)
+                except Exception:
+                    if not self.estop_latched:
+                        self.emergency_stop()
+                    raise
             return self._mirrored(
                 lambda: getattr(self.controller, action)(depth=depth),
                 self._bin_commands(action, depth),

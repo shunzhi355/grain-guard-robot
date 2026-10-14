@@ -218,6 +218,7 @@ class Port:
 port = Port()
 link = ChassisSerial(port)
 runtime = MechanismRuntime(MechanismController(mock_mode=True), serial_command=link.mechanism_command)
+runtime.controller._wait_bin_motion = lambda seconds: False
 class Client:
     def request(self, action, **values):
         runtime.execute(values['name'], **values.get('args', {}))
@@ -233,8 +234,7 @@ def wait(seconds):
     assert fsm.current_state == S.OPEN_BIN
     frames = Parser().feed(b''.join(port.packets))
     opening = [b'\x01\x05', b'\x01\x05', b'\x02\x03', b'\x02\x04']
-    assert (seconds, [f.payload for f in frames]) in (
-        (5.0, opening), (6.5, opening + [b'\x02\x05']))
+    assert (seconds, [f.payload for f in frames]) == (0.5, opening)
     assert frames[0].sequence != frames[1].sequence
     return True
 orch._wait_interruptible = wait
@@ -249,7 +249,7 @@ try:
     button.click()
     app.processEvents()
     assert fsm.current_state == S.FORMAL_SAMPLING
-    assert len(port.packets) == 5
+    assert len(port.packets) == 4
 finally:
     page.close()
     runtime.close()

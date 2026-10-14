@@ -5,7 +5,7 @@
 不调用夹紧、拧管或升降服务。测试顺序：
 
 1. 排废粮（正式 /mechanism/start_suction + stop_suction）；
-2. 螺旋运粮（正式 /mechanism/convey，短时测试后急停）；
+2. 螺旋运粮（正式 start_convey/stop_convey，默认按品种计时）；
 3. 浅、中、深三个仓门逐一打开和关闭。
 
 任一阶段失败、Ctrl+C 或人工取消都会尽力调用机构急停。
@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from sampling_params import (  # noqa: E402
     CHANNELS,
-    ENABLE_UNWIRED_CHANNELS,
+    MECHANISM_SETTLE_MARGIN_S,
     GRAIN_MECHANISM_CONFIG,
     SUPPORTED_GRAINS,
 )
@@ -96,12 +96,6 @@ class PostSamplingDeviceTest:
             f"CH{CHANNELS['bin_deep']}；风机 CH{CHANNELS['fan']}",
             flush=True,
         )
-        if not ENABLE_UNWIRED_CHANNELS:
-            print(
-                "[重要] 当前 ENABLE_UNWIRED_CHANNELS=False：CH7 风机为占位，"
-                "排废粮服务不会驱动实物。",
-                flush=True,
-            )
         if self.options.dry_run:
             print("[预演] 等待正式 /mechanism/* 服务", flush=True)
             return
@@ -121,12 +115,14 @@ class PostSamplingDeviceTest:
             "/mechanism/set_grain",
             "/mechanism/start_suction",
             "/mechanism/stop_suction",
-            "/mechanism/convey",
+            "/mechanism/start_convey",
+            "/mechanism/stop_convey",
+            "/mechanism/close_all_bins",
             "/mechanism/emergency_stop",
         ]
         for name, _, _ in BINS:
             required.extend(
-                (f"/mechanism/open_bin/{name}", f"/mechanism/close_bin/{name}")
+                (f"/mechanism/hold_bin_open/{name}",)
             )
         for service in required:
             try:
@@ -187,12 +183,6 @@ class PostSamplingDeviceTest:
         if self.options.skip_waste:
             print("[跳过] --skip-waste", flush=True)
             return
-        if not ENABLE_UNWIRED_CHANNELS:
-            print(
-                "[阻塞] 正式配置将 CH7 标记为未接线，本阶段只能验证 ROS，"
-                "不能验证实物排废粮。不会冒充硬件测试成功。",
-                flush=True,
-            )
         self._confirm("确认废粮出口通畅、人员远离，准备启动排废粮。")
         self._trigger("/mechanism/start_suction", "启动排废粮")
         self._wait(self.options.waste_seconds, "排废粮观察")
@@ -207,11 +197,9 @@ class PostSamplingDeviceTest:
             flush=True,
         )
         self._confirm("确认 CH0/CH1 螺旋输送机周围无人、无异物。")
-        self._trigger("/mechanism/convey", "启动 CH0+CH1 螺旋运粮")
+        self._trigger("/mechanism/start_convey", "启动 CH0+CH1 螺旋运粮")
         self._wait(self.options.convey_seconds, "运粮观察")
-        if not self.emergency_stop("运粮点动到时，停止 CH0/CH1"):
-            raise TestFailure("运粮点动后急停失败")
-        self._set_grain("运粮停止后重新使能")
+        self._trigger("/mechanism/stop_convey", "停止 CH0/CH1 输粮")
 
     def test_bins(self) -> None:
         self._banner("浅/中/深三仓存储装置")
@@ -219,9 +207,10 @@ class PostSamplingDeviceTest:
             self._confirm(
                 f"确认 {label}(CH{channel}) 周围安全，准备单独测试该仓门。"
             )
-            self._trigger(f"/mechanism/open_bin/{name}", f"打开{label} CH{channel}")
-            self._wait(self.options.bin_hold_seconds, f"{label}开门观察")
-            self._trigger(f"/mechanism/close_bin/{name}", f"关闭{label} CH{channel}")
+            self._trigger(f"/mechanism/hold_bin_open/{name}", f"打开{label} CH{channel}")
+            self._wait(MECHANISM_SETTLE_MARGIN_S + self.options.bin_hold_seconds, f"{label}选仓完成停稳")
+            self._trigger("/mechanism/close_all_bins", "关闭三仓")
+            self._wait(GRAIN_MECHANISM_CONFIG[self.options.grain]["close_duration"] + MECHANISM_SETTLE_MARGIN_S, "关仓完成停稳")
             print(f"[OK] {label}完成独立开/关测试", flush=True)
 
     def run(self) -> None:
@@ -254,10 +243,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yes", action="store_true", help="跳过人工确认（实机不推荐）")
     parser.add_argument("--grain", choices=SUPPORTED_GRAINS, default="稻谷")
     parser.add_argument("--waste-seconds", type=nonnegative_float, default=5.0)
-    parser.add_argument("--convey-seconds", type=nonnegative_float, default=5.0)
-    parser.add_argument("--bin-hold-seconds", type=nonnegative_float, default=2.0)
+    parser.add_argument("--convey-seconds", type=nonnegative_float, default=None)
+    parser.add_argument("--bin-hold-seconds", type=nonnegative_float, default=0.0)
     parser.add_argument("--service-timeout", type=positive_float, default=20.0)
-    parser.add_argument("--skip-waste", action="store_true", help="跳过当前未接线的 CH7 排废粮")
+    parser.add_argument("--skip-waste", action="store_true", help="跳过 CH7 排废粮测试")
     return parser
 
 
@@ -269,7 +258,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             assume_yes=args.yes,
             grain=args.grain,
             waste_seconds=args.waste_seconds,
-            convey_seconds=args.convey_seconds,
+            convey_seconds=GRAIN_MECHANISM_CONFIG[args.grain]["convey_duration"] if args.convey_seconds is None else args.convey_seconds,
             bin_hold_seconds=args.bin_hold_seconds,
             service_timeout=args.service_timeout,
             skip_waste=args.skip_waste,

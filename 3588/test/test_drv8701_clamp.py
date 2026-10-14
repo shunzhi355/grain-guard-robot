@@ -32,7 +32,7 @@ def test_pca9685_static_level_and_legacy_duty_registers(monkeypatch):
 
     writes.clear()
     pca.set_duty_cycle(CLAMP_EN_CHANNEL, md.CLAMP_EN_DUTY_CLOSE_PERCENT)
-    assert writes[-2:] == [(base + 2, 0x85), (base + 3, 0x01)]  # 389/4096
+    assert writes[-2:] == [(base + 2, 0x5C), (base + 3, 0x01)]  # 348/4096
     assert (base + 3, FULL_ON_OFF_BIT) not in writes
 
     writes.clear()
@@ -65,7 +65,7 @@ def test_pca9685_open_sleeps_clamp_before_setting_continuous_pwm(monkeypatch):
         ("frequency", md.DEFAULT_FREQUENCY_HZ),
         ("neutral",),
         ("level", CLAMP_PH_CHANNEL, False),
-        ("duty", CLAMP_EN_CHANNEL, 9.5),
+        ("duty", CLAMP_EN_CHANNEL, 8.5),
     ]
     pca.close()
 
@@ -91,7 +91,7 @@ def test_clamp_direction_wake_and_timed_sleep():
     assert pca.events[:4] == [
         ("level", CLAMP_NS_CHANNEL, False),
         ("level", CLAMP_PH_CHANNEL, False),
-        ("duty", CLAMP_EN_CHANNEL, 9.5),
+        ("duty", CLAMP_EN_CHANNEL, 8.5),
         ("level", CLAMP_NS_CHANNEL, True),
     ]
     deadline = time.monotonic() + 1

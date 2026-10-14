@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import date, datetime
 from typing import Callable, Optional
-from utils.sampling_params import PRESS_SEGMENT_CM
+from utils.sampling_params import PRESS_SEGMENT_CM, MECHANISM_SETTLE_MARGIN_S
 
 from grain_sampling_workflow.state_machine import (
     SamplingAction,
@@ -29,13 +29,11 @@ from grain_sampling_cloud.protocol import ApiPath, DetectionResult, OrderInfo, R
 
 logger = logging.getLogger(__name__)
 
-#: 机构动作完成后的额外停稳余量（秒）。mechanism_node 的 Trigger 服务是
-#: "立即返回"的（duration 走后台 auto_stop 线程），而电调 full-off 后电机
-#: 仍有惯性。实机确认：夹紧/松开后需 +0.5s，拧紧（5s 动作）后需 +0.5s，
-#: 否则下一步会与仍在转的机构冲突。
-MECHANISM_SETTLE_MARGIN: float = 0.5
+#: 夹紧/松开/拧紧在后台定时停止，额外等待 0.5 秒停稳。
+#: 选仓和伺服动作阻塞至完成，返回后只添加这段停稳时间。
+MECHANISM_SETTLE_MARGIN: float = MECHANISM_SETTLE_MARGIN_S
 
-#: 开仓指令发出后至少等待 5 秒；另须覆盖其他仓门的关仓时间。
+#: 未接机构的占位流程等待；实机选仓服务内部等待全部仓门动作。
 BIN_OPEN_WAIT_SEC: float = 5.0
 
 #: 单次下压/上升距离（厘米）。X2P 伺服单次 move_lift ≤ 30cm
@@ -530,12 +528,14 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_SUCTION_COMPLETE)
 
     def _handle_convey(self) -> None:
-        """Close all bins after conveying, then stop the conveyors."""
+        """Stop conveying at the grain deadline, then close all bins."""
         if self._mechanism_connected:
             try:
                 if not self._call_mechanism("start_convey", self._bridge.call_start_convey):
                     return
                 if not self._wait_interruptible(self.convey_duration_sec):
+                    return
+                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
                     return
                 if not self._call_mechanism(
                     "close_all_bins", self._bridge.call_close_all_bins
@@ -544,10 +544,6 @@ class WorkflowOrchestrator:
                 close_sec = max(float(get_grain_params(self._grain)["close_duration"]),
                                 mcu.BIN_CLOSE_DURATION_SEC) + MECHANISM_SETTLE_MARGIN
                 if not self._wait_interruptible(close_sec):
-                    return
-                if not self._call_mechanism("stop_convey", self._bridge.call_stop_convey):
-                    return
-                if not self._wait_interruptible(MECHANISM_SETTLE_MARGIN):
                     return
             except Exception:
                 self._stop_fsm("bin/conveyor sequence failed")
@@ -568,36 +564,19 @@ class WorkflowOrchestrator:
             self._fsm.transition(SamplingAction.SYSTEM_CONVEY_COMPLETE)
 
     def _handle_open_bin(self) -> None:
-        """Open the selected bin for five seconds, close it, then sample."""
+        """Wait for serial bin selection, leave the target open, then sample."""
         depth = self._fsm.current_depth_index
         if self._mechanism_connected:
             if not self._call_mechanism(
                 "hold_bin_open", lambda: self._bridge.call_hold_bin_open(depth)
             ):
                 return  # final failure already stopped the FSM
-            params = get_grain_params(self._grain)
-            open_sec = max(
-                BIN_OPEN_WAIT_SEC,
-                float(params["open_duration"]),
-                mcu.BIN_OPEN_DURATION_SEC,
-            )
-            close_sec = max(
-                float(params["close_duration"]) + MECHANISM_SETTLE_MARGIN,
-                mcu.BIN_CLOSE_DURATION_SEC + MECHANISM_SETTLE_MARGIN,
-            )
-            if not self._wait_interruptible(open_sec):
-                self._bridge.call_emergency_stop()
-                return
-            if not self._call_mechanism(
-                "close_bin", lambda: self._bridge.call_close_bin(depth)
-            ):
-                return
-            if not self._wait_interruptible(close_sec):
+            if not self._wait_interruptible(MECHANISM_SETTLE_MARGIN):
                 self._bridge.call_emergency_stop()
                 return
             logger.info(
-                "Open bin depth=%d for %.1f sec, close for %.1f sec; formal sampling starts",
-                depth, open_sec, close_sec,
+                "Bin selection complete, target depth=%d remains open; formal sampling starts",
+                depth,
             )
         else:
             if not self._wait_interruptible(BIN_OPEN_WAIT_SEC):
@@ -730,10 +709,8 @@ class WorkflowOrchestrator:
         """Per-grain actuation durations from ``mechanism_config``.
 
         Returns a dict keyed by ``clamp``/``unclamp``/``tighten``/
-        ``untighten`` (read from the grain config) plus ``servo`` — a fixed
-        delay simulating the not-yet-wired press/lift servo.  The servo
-        delay falls back to the clamp duration so it always tracks the
-        grain config.
+        ``untighten`` (read from grain/firmware timings). Servo movement blocks
+        until encoder arrival, so ``servo`` only adds the settling margin.
 
         Every duration includes the ``MECHANISM_SETTLE_MARGIN`` so the
         ``_wait_interruptible`` wait covers both the actuation time AND the
@@ -748,9 +725,7 @@ class WorkflowOrchestrator:
             "unclamp": float(params.get("unclamp_duration", 3.0)) + settle,
             "tighten": float(params.get("tighten_duration", 3.0)) + settle,
             "untighten": float(params.get("untighten_duration", 3.0)) + settle,
-            "servo": float(
-                params.get("press_duration", params.get("clamp_duration", 3.0))
-            ) + settle,
+            "servo": settle,
         }
 
     def _run_mechanism_sequence(

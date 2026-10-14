@@ -88,13 +88,14 @@ def test_invalid_command_never_writes(command, device):
 
 
 @pytest.fixture
-def stack():
+def stack(monkeypatch):
     port = SerialRecorder()
     chassis = ChassisController()
     chassis.link = ChassisSerial(port)
     port.reader = chassis.link
     chassis.mode = "auto"
     local = MechanismController(mock_mode=True)
+    monkeypatch.setattr(local, "_wait_bin_motion", lambda seconds: local._stop_flag.is_set())
     runtime = MechanismRuntime(local, serial_command=chassis.mechanism_command)
     yield port, chassis, local, runtime
     runtime.close()
@@ -118,8 +119,8 @@ def test_runtime_forwards_extraction_to_lift_only(stack, direction):
     ("start_convey", {}, [(1, 2)], 1, 1200),
     ("stop_convey", {}, [(2, 2)], 0, 1500),
     ("open_bin", {"depth": "shallow"}, [(1, 3), (1, 3)], 2, 1200),
-    ("hold_bin_open", {"depth": "mid"}, [(1, 4), (1, 4), (2, 3), (2, 5)], 3, 1200),
-    ("hold_bin_open", {"depth": "deep"}, [(1, 5), (1, 5), (2, 3), (2, 4)], 4, 1200),
+    ("hold_bin_open", {"depth": "mid"}, [(1, 4), (1, 4), (2, 3), (2, 5)], 3, 1500),
+    ("hold_bin_open", {"depth": "deep"}, [(1, 5), (1, 5), (2, 3), (2, 4)], 4, 1500),
     ("close_bin", {"depth": "deep"}, [(2, 5)], 4, 1800),
     ("open_bin_default", {}, [(1, 4), (1, 4)], 3, 1200),
     ("close_all_bins", {}, [(2, 3), (2, 4), (2, 5)], 2, 1800),
@@ -136,7 +137,7 @@ def test_runtime_sends_semantic_actions_and_retains_pca(
         assert local.pca9685.register_history[0] == local.pca9685.register_history[1]
     if action == "hold_bin_open":
         for channel in {2, 3, 4} - {pca_channel}:
-            assert local.pca9685.register_history[channel][-1] == 1800
+            assert local.pca9685.register_history[channel][-1] == 1500
     if action == "close_all_bins":
         assert all(local.pca9685.register_history[ch][-1] == 1800 for ch in (2, 3, 4))
 
@@ -169,7 +170,7 @@ def test_bin_i2c_failure_stops_both_output_paths(stack, monkeypatch):
     with pytest.raises(OSError, match="I2C failed"):
         runtime.execute("hold_bin_open", depth="mid")
     assert [f.payload for f in port.frames()] == [
-        b"\x01\x04", b"\x01\x04", b"\x02\x03", b"\x02\x05", b"\x03\x00",
+        b"\x03\x00",
     ]
     assert runtime.estop_latched and local._stop_flag.is_set()
 
@@ -277,32 +278,31 @@ def test_formal_workflow_serial_conveys_only_after_sampling_for_grain_duration(s
     orch.set_convey_duration(convey_sec)
     waits = []
     opening = [b"\x01\x03", b"\x01\x03", b"\x02\x04", b"\x02\x05"]
-    selected_close = [b"\x02\x03"]
     closing = [b"\x02\x03", b"\x02\x04", b"\x02\x05"]
 
     def wait(seconds):
         waits.append(seconds)
         frames = [f.payload for f in port.frames()]
         if fsm.current_state == SamplingState.OPEN_BIN:
-            assert (seconds, frames) in ((5.0, opening), (6.5, opening + selected_close))
+            assert (seconds, frames) == (0.5, opening)
         elif seconds == 7:
             assert fsm.current_state == SamplingState.FORMAL_SAMPLING
-            assert frames == opening + selected_close
+            assert frames == opening
         elif seconds == convey_sec:
             assert fsm.current_state == SamplingState.CONVEY_1
-            assert frames == opening + selected_close + [b"\x01\x02"]
-        elif seconds == 6.5:
-            assert frames == opening + selected_close + [b"\x01\x02"] + closing
+            assert frames == opening + [b"\x01\x02"]
+        elif seconds == 3.5:
+            assert frames == opening + [b"\x01\x02", b"\x02\x02"] + closing
             assert all(local.pca9685.register_history[ch][-1] == 1800
                        for ch in (2, 3, 4))
         elif seconds == 0.5:
-            assert frames == opening + selected_close + [b"\x01\x02"] + closing + [b"\x02\x02"]
+            assert frames == opening + [b"\x01\x02", b"\x02\x02"] + closing
         return True
 
     orch._wait_interruptible = wait
     fsm.transition(SamplingAction.CONFIRM_WASTE_DISCHARGED)
-    assert waits == [5.0, 6.5, 7, convey_sec, 6.5, 0.5]
-    assert [f.payload for f in port.frames()] == opening + selected_close + [b"\x01\x02"] + closing + [b"\x02\x02"]
+    assert waits == [0.5, 7, convey_sec, 3.5]
+    assert [f.payload for f in port.frames()] == opening + [b"\x01\x02", b"\x02\x02"] + closing
     assert fsm.current_state == SamplingState.CONVEY_DONE
 
 
@@ -391,7 +391,7 @@ def test_timed_convey_stops_local_outputs_without_serial(monkeypatch):
 
 
 @pytest.mark.parametrize("action,device,direction,duty", [
-    ("clamp", 6, False, 9.5), ("unclamp", 7, True, 6.0),
+    ("clamp", 6, False, 8.5), ("unclamp", 7, True, 6.0),
 ])
 def test_gripper_uses_final_numbering_and_preserves_drv8701(stack, action, device, direction, duty):
     port, _, local, runtime = stack

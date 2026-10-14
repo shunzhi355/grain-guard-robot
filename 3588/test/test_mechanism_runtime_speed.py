@@ -88,8 +88,8 @@ def test_default_x2p_position_limit_unchanged(monkeypatch):
     controller = StubController()
     runtime = MechanismRuntime(controller=controller)
     runtime.start()
-    assert controller.lift_rpm == 30
-    assert observed["rpm"] == 500
+    assert controller.lift_rpm == 800
+    assert observed["rpm"] == 800
     runtime.close()
 
 
@@ -98,7 +98,7 @@ def test_default_speed_unchanged(monkeypatch):
     monkeypatch.setenv("X2P_PORT", "")
     controller = StubController()
     MechanismRuntime(controller=controller).start()
-    assert controller.lift_rpm == 30
+    assert controller.lift_rpm == 800
 
 
 def test_doubled_rpm_halves_commanded_move_duration():
@@ -111,6 +111,7 @@ def test_doubled_rpm_halves_commanded_move_duration():
 
     drive = Drive()
     controller = MechanismController(mock_mode=True, lift_drive=drive)
+    controller.lift_rpm = 30
     controller.move_lift("down", 5.0)
     controller.lift_rpm = 60
     controller.move_lift("down", 5.0)

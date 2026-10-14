@@ -339,8 +339,8 @@ class TestMechanismIntegration:
              patch.object(orch, "_wait_interruptible", return_value=True) as mock_wait:
             orch._handle_open_bin()
         mock_bridge.call_hold_bin_open.assert_called_once_with(1)
-        assert [call.args[0] for call in mock_wait.call_args_list] == [5.0, 6.5]
-        mock_bridge.call_close_bin.assert_called_once_with(1)
+        assert [call.args[0] for call in mock_wait.call_args_list] == [0.5]
+        mock_bridge.call_close_bin.assert_not_called()
         mock_bridge.call_start_convey.assert_not_called()
         mock_transition.assert_called_with(SamplingAction.SYSTEM_BIN_OPENED)
 

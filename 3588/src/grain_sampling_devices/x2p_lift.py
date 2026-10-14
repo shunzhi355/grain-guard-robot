@@ -63,7 +63,7 @@ def build_x2p_lift_drive(
     slave : int
         Modbus 从站地址（默认 2，与 x2p_config.json 一致）。
     rpm : int
-        升降转速（r/min），默认 30。
+        升降转速（r/min），默认取 sampling_params.X2P_RPM。
     duration_s : float
         升降时长（秒），默认 2.0。
     forward_sign : int

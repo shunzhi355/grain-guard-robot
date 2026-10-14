@@ -142,11 +142,11 @@ def test_press_lift_use_lift_drive_when_injected(mock_mechanism):
     mock_mechanism.lift_drive = _LiftDrive(fake, rpm=30, duration_s=2.0)
 
     mock_mechanism.press()  # press=下压 → down → reverse
-    assert fake.speed_calls == [("reverse", 30, 2.0)]
+    assert fake.speed_calls == [("reverse", 800, 2.0)]
     assert fake.stop_calls == 1
 
     mock_mechanism.lift(duration=3.0)  # lift=提升 → up → forward
-    assert fake.speed_calls == [("reverse", 30, 2.0), ("forward", 30, 3.0)]
+    assert fake.speed_calls == [("reverse", 800, 2.0), ("forward", 800, 3.0)]
     assert fake.stop_calls == 2
 
     # 未写 PCA9685 通道（register_history 应保持空）
@@ -166,7 +166,7 @@ def test_press_lift_placeholder_without_lift_drive(mock_mechanism):
 
 def test_press_lift_rpm_duration_attributes(mock_mechanism):
     """默认 lift_rpm/lift_duration 可现场标定覆盖。"""
-    assert mock_mechanism.lift_rpm == 30
+    assert mock_mechanism.lift_rpm == 800
     assert mock_mechanism.lift_duration == 2.0
 
     mock_mechanism.lift_rpm = 50

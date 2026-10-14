@@ -46,7 +46,8 @@ class SerialMechanisms:
     """Bench adapter; timed convey is blocking and cancellable, never a stale timer.
 
     ACK means command accepted, not mechanically completed. Mechanism dwell
-    times other than timed conveying remain the caller/workflow's responsibility.
+    times for individual gripper/bin actions remain the caller's responsibility;
+    hold_bin_open waits for all three sequential bin moves before returning.
     """
 
     def __init__(self, send, check, *, grain=""):
@@ -68,7 +69,16 @@ class SerialMechanisms:
         with self._action_lock:
             if action != "stop_all":
                 self.check()
-            sent = [self.send(cmd, dev) for cmd, dev in commands]
+            sent = []
+            for index, (cmd, dev) in enumerate(commands):
+                if action != "stop_all":
+                    self.check()
+                sent.append(self.send(cmd, dev))
+                if action == "hold_bin_open" and index >= 1:
+                    params = get_grain_params(self.grain)
+                    duration = (max(params["open_duration"], mcu.BIN_OPEN_DURATION_SEC)
+                                if index == 1 else max(params["close_duration"], mcu.BIN_CLOSE_DURATION_SEC))
+                    self._wait(duration)
             if action == "convey":
                 try:
                     deadline = time.monotonic() + duration_s
@@ -78,3 +88,9 @@ class SerialMechanisms:
                 finally:
                     sent.append(self.send(mcu.STOP, mcu.CONVEY))
             return sent
+
+    def _wait(self, duration):
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            self.check()
+            time.sleep(min(0.02, max(0, deadline - time.monotonic())))

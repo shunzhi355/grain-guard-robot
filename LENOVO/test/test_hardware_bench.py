@@ -39,6 +39,10 @@ ACTION_CASES += [(action, {"depth": depth}) for depth in m.BIN_DEVICES
 def test_uart_plan_matches_existing_3588_runtime(action, args):
     recorded = []
     local = MagicMock()
+    def select(depth, before_move, minimum_durations):
+        for name in (depth,) + tuple(n for n in m.BIN_DEVICES if n != depth):
+            before_move(name, name == depth)
+    local.hold_bin_open.side_effect = select
     runtime = MechanismRuntime(local, serial_command=lambda cmd, dev: recorded.append((cmd, dev)))
     try:
         runtime.execute(action, **args)

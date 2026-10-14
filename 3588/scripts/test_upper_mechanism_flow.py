@@ -14,21 +14,23 @@
   # 启动 grain-sampling 并交互式测试
   python3 scripts/test_upper_mechanism_flow.py --grain 稻谷 --bin shallow
 
-安全说明：
-  * Ctrl+C、服务失败或动作失败时，尽力调用 /mechanism/emergency_stop。
-  * 输送服务本身会按品种参数运行 90~180 秒；本测试为短时点动，
-    到 --convey-seconds 后用急停停止，随后重新 set_grain 解锁。
-  * 当前代码中负压风机 CH7 仍为未接线占位；服务返回成功不代表风机已实际启动。
+默认使用正式流程的品种时长、往复下压和选仓顺序。
+显式 --sampling-seconds/--convey-seconds 可覆盖测试时长。
+Ctrl+C 或动作失败时调用急停。
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from sampling_params import GRAIN_MECHANISM_CONFIG, PRESS_SEGMENT_CM, MECHANISM_SETTLE_MARGIN_S
 
 
 SERVICE_NAME = "grain-sampling"
@@ -49,9 +51,7 @@ class Options:
     bin_name: str
     sections: int
     cycles_per_section: int
-    down_cm: float
-    up_cm: float
-    pause_seconds: float
+    segment_cm: float
     waste_seconds: float
     sampling_seconds: float
     convey_seconds: float
@@ -144,9 +144,11 @@ class UpperMechanismTest:
             "/mechanism/tighten",
             "/mechanism/start_suction",
             "/mechanism/stop_suction",
-            "/mechanism/convey",
-            f"/mechanism/open_bin/{self.options.bin_name}",
-            f"/mechanism/close_bin/{self.options.bin_name}",
+            "/mechanism/start_convey",
+            "/mechanism/stop_convey",
+            "/mechanism/close_all_bins",
+            "/mechanism/lift_health",
+            f"/mechanism/hold_bin_open/{self.options.bin_name}",
             "/mechanism/emergency_stop",
         ]
         if self.options.release_pipe_at_end and self.options.sections > 1:
@@ -238,61 +240,44 @@ class UpperMechanismTest:
         )
         self._set_grain()
 
+        params = GRAIN_MECHANISM_CONFIG[self.options.grain]
+        def timed(action, label):
+            self._trigger("/mechanism/" + action, label)
+            self._sleep(params[action + "_duration"] + MECHANISM_SETTLE_MARGIN_S, label + "完成并停稳")
+
+        self._trigger("/mechanism/lift_health", "读取升降编码器")
         for section in range(1, self.options.sections + 1):
             if section > 1:
                 self._confirm(f"请插入第 {section} 节管，对准接头后确认。")
-                self._trigger("/mechanism/tighten", f"第 {section} 节管拧紧")
-                self._trigger("/mechanism/unclamp", "加管后松开夹具")
-
-            self._trigger("/mechanism/clamp", f"第 {section} 节管夹紧")
-            for cycle in range(1, self.options.cycles_per_section + 1):
-                print(
-                    f"\n[下管] 第 {section}/{self.options.sections} 节，"
-                    f"往复 {cycle}/{self.options.cycles_per_section}",
-                    flush=True,
-                )
-                self._move_lift("down", self.options.down_cm)
-                self._sleep(self.options.pause_seconds, "伺服换向间停")
-                self._trigger("/mechanism/unclamp", "松开夹具")
-                self._move_lift("up", self.options.up_cm)
-                self._sleep(self.options.pause_seconds, "伺服换向间停")
-                self._trigger("/mechanism/clamp", "再次夹紧")
+                timed("tighten", "拧紧")
+                timed("unclamp", "加管后松开")
+                timed("clamp", "加管后夹紧")
+            for cycle in range(self.options.cycles_per_section):
+                timed("clamp", "夹紧")
+                self._move_lift("down_cycle", self.options.segment_cm)
+                self._sleep(MECHANISM_SETTLE_MARGIN_S, "下压完成停稳")
+                timed("unclamp", "松开")
+                self._move_lift("return", self.options.segment_cm)
+                self._sleep(MECHANISM_SETTLE_MARGIN_S, "回程完成停稳")
+                timed("clamp", "再次夹紧")
+                self._trigger("/mechanism/start_suction", "启动风机")
 
     def _test_suction(self) -> None:
-        self._banner("5. 排废粮与正式抽粮")
-        print("[重要] 当前风机 CH7 在代码中仍是未接线占位通道。", flush=True)
-        print("[重要] start_suction 返回成功只能证明 ROS 流程成功。", flush=True)
-        self._confirm("确认抽粮管路和废粮出口安全，准备测试排废粮。")
-        self._trigger("/mechanism/start_suction", "启动风机（排废粮）")
-        self._sleep(self.options.waste_seconds, "排废粮测试")
-        self._trigger("/mechanism/start_suction", "进入正式抽粮")
-        self._sleep(self.options.sampling_seconds, "正式抽粮测试")
+        self._banner("5. 排废粮、选仓与正式抽粮")
+        self._sleep(self.options.waste_seconds, "排废粮观察")
+        self._confirm("确认废粮已排完，准备选仓和正式采样。")
+        self._trigger(f"/mechanism/hold_bin_open/{self.options.bin_name}", "依次选仓（等待全部完成）")
+        self._sleep(MECHANISM_SETTLE_MARGIN_S, "仓门停稳")
+        self._sleep(self.options.sampling_seconds, "正式采样")
         self._trigger("/mechanism/stop_suction", "停止风机")
 
     def _test_conveyor_and_bin(self) -> None:
-        self._banner("6. 螺旋输送与粮仓")
-        self._confirm(
-            f"确认输送机周围无人无异物，准备点动 "
-            f"{self.options.convey_seconds:.1f} 秒。"
-        )
-        self._trigger("/mechanism/convey", "启动 CH0/CH1 螺旋输送")
-        self._sleep(self.options.convey_seconds, "螺旋输送点动")
-
-        # convey 没有单独的 stop 服务，必须急停才能在品种默认时长前停止。
-        if not self.emergency_stop("输送点动计时结束，停止 CH0/CH1"):
-            raise FlowError("输送点动后急停失败，禁止继续粮仓测试")
-        self._set_grain("输送急停后重新使能机构")
-
-        self._confirm(f"准备打开 {self.options.bin_name} 粮仓，确认粮仓下方安全。")
-        self._trigger(
-            f"/mechanism/open_bin/{self.options.bin_name}",
-            f"打开 {self.options.bin_name} 粮仓",
-        )
-        self._confirm("观察开仓动作后确认收粮完成，继续将关闭粮仓。")
-        self._trigger(
-            f"/mechanism/close_bin/{self.options.bin_name}",
-            f"关闭 {self.options.bin_name} 粮仓",
-        )
+        self._banner("6. 按品种输粮并关仓")
+        self._trigger("/mechanism/start_convey", "启动 CH0/CH1 输粮")
+        self._sleep(self.options.convey_seconds, "输粮")
+        self._trigger("/mechanism/stop_convey", "停止 CH0/CH1 输粮")
+        self._trigger("/mechanism/close_all_bins", "三仓同时关闭")
+        self._sleep(GRAIN_MECHANISM_CONFIG[self.options.grain]["close_duration"] + MECHANISM_SETTLE_MARGIN_S, "关仓完成并停稳")
 
     def _finish_pipe(self) -> None:
         self._banner("7. 结束状态")
@@ -311,7 +296,9 @@ class UpperMechanismTest:
         )
         if self.options.sections > 1:
             self._trigger("/mechanism/untighten", "拧松管路接头")
+            self._sleep(GRAIN_MECHANISM_CONFIG[self.options.grain]["untighten_duration"] + MECHANISM_SETTLE_MARGIN_S, "拧松完成停稳")
         self._trigger("/mechanism/unclamp", "松开夹具，准备人工取管")
+        self._sleep(GRAIN_MECHANISM_CONFIG[self.options.grain]["unclamp_duration"] + MECHANISM_SETTLE_MARGIN_S, "松开完成停稳")
 
     def run(self) -> None:
         self.start_system_service()
@@ -334,17 +321,15 @@ def positive_int(value: str) -> int:
 
 def nonnegative_float(value: str) -> float:
     parsed = float(value)
-    if parsed < 0:
+    if not math.isfinite(parsed) or parsed < 0:
         raise argparse.ArgumentTypeError("不能小于 0")
     return parsed
 
 
 def lift_distance(value: str) -> float:
     parsed = float(value)
-    if parsed < 2.0:
-        raise argparse.ArgumentTypeError(
-            "实机编码器容差约 1.5 cm，测试位移必须至少 2.0 cm"
-        )
+    if not math.isfinite(parsed) or not 2 <= parsed <= 30:
+        raise argparse.ArgumentTypeError("测试位移必须在 2～30 cm 之间")
     return parsed
 
 
@@ -359,12 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bin", dest="bin_name", choices=BIN_NAMES, default="shallow", help="测试的粮仓")
     parser.add_argument("--sections", type=positive_int, default=1, help="测试管节数；大于 1 时会测试拧紧动作")
     parser.add_argument("--cycles-per-section", type=positive_int, default=1, help="每节管执行的下/上往复次数")
-    parser.add_argument("--down-cm", type=lift_distance, default=3.0, help="每次下压厘米数（>=2）")
-    parser.add_argument("--up-cm", type=lift_distance, default=2.0, help="每次上升厘米数（>=2）")
-    parser.add_argument("--pause-seconds", type=nonnegative_float, default=1.0, help="伺服换向间停秒数")
+    parser.add_argument("--segment-cm", type=lift_distance, default=PRESS_SEGMENT_CM, help="每轮净下压距离，默认 20 cm")
     parser.add_argument("--waste-seconds", type=nonnegative_float, default=3.0, help="排废粮测试秒数")
-    parser.add_argument("--sampling-seconds", type=nonnegative_float, default=5.0, help="抽粮测试秒数")
-    parser.add_argument("--convey-seconds", type=nonnegative_float, default=5.0, help="螺旋输送点动秒数，后续使用急停结束")
+    parser.add_argument("--sampling-seconds", type=nonnegative_float, default=None, help="覆盖品种采样时长")
+    parser.add_argument("--convey-seconds", type=nonnegative_float, default=None, help="覆盖品种输粮时长")
     parser.add_argument("--service-timeout", type=positive_int, default=30, help="等待每个 ROS 服务的超时秒数")
     parser.add_argument(
         "--release-pipe-at-end",
@@ -376,9 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.down_cm <= args.up_cm:
-        print("参数错误：--down-cm 必须大于 --up-cm，否则没有净下压位移。", file=sys.stderr)
-        return 2
+    params = GRAIN_MECHANISM_CONFIG[args.grain]
     options = Options(
         dry_run=args.dry_run,
         start_service=not args.no_start_service,
@@ -387,12 +368,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         bin_name=args.bin_name,
         sections=args.sections,
         cycles_per_section=args.cycles_per_section,
-        down_cm=args.down_cm,
-        up_cm=args.up_cm,
-        pause_seconds=args.pause_seconds,
+        segment_cm=args.segment_cm,
         waste_seconds=args.waste_seconds,
-        sampling_seconds=args.sampling_seconds,
-        convey_seconds=args.convey_seconds,
+        sampling_seconds=params["sampling_duration"] if args.sampling_seconds is None else args.sampling_seconds,
+        convey_seconds=params["convey_duration"] if args.convey_seconds is None else args.convey_seconds,
         service_timeout=float(args.service_timeout),
         release_pipe_at_end=args.release_pipe_at_end,
     )

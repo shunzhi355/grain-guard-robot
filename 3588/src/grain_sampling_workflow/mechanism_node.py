@@ -558,7 +558,7 @@ class MechanismNode:
         with self._lock:
             self._action_threads[action] = thread
         thread.start()
-        if self._wait_for_action:
+        if self._wait_for_action or action == "hold_bin_open":
             thread.join()
         else:
             resp.success = True

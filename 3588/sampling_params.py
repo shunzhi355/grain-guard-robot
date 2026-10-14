@@ -25,6 +25,7 @@ PRESS_SEGMENT_CM = 20.0
 PRESS_DOWN_CM = 5.0
 PRESS_UP_CM = 2.0
 PRESS_PAUSE_S = 0.0  # 不额外等待；每段仍须停稳、验位并重新使能后才换向。
+MECHANISM_SETTLE_MARGIN_S = 0.5
 
 # ===========================================================================
 # 1. 机制执行器 —— PCA9685 通道映射 + 脉宽 + 品种参数
@@ -68,7 +69,7 @@ PULSE_CLOSE: float = 1900.0   # 动作脉宽，非停止命令
 PULSE_STOP: float = 1500.0    # 停止及初始化中位，持续输出
 
 #: CH5 历史夹爪标定；DRV8701E 的 EN 起测占空比按该脉宽占周期比例换算。
-CLAMP_PULSE_CLOSE: float = 1900.0
+CLAMP_PULSE_CLOSE: float = 1700.0
 CLAMP_PULSE_OPEN: float = 1200.0
 
 # DRV8701E 夹爪：PH 定方向，EN 持续 PWM，NS 低电平休眠。
@@ -105,7 +106,7 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
     "open_duration": 5.0,       # 目标仓开门动作时长；旧 open_bin 服务用于自动关仓延时
     "close_duration": 3.0,      # 非目标仓/收尾三仓关门时长；动作后回中位（无到位反馈）
     "clamp_duration": 2.0,       # 夹紧时长（实机确认 2s）
-    "unclamp_duration": 5.0,    # 松开时长（按当前数值 5s；后续实机标定）
+    "unclamp_duration": 1.0,    # 松开时长
     "tighten_duration": 10.0,    # 拧紧时长（用户 2026-09 标定 10s）
     "untighten_duration": 3.0,   # 旋松时长
     "throttle_open": 1000.0,     # 当前输送有效值；现场确认输送 CH0/CH1 能转
@@ -115,8 +116,8 @@ DEFAULT_GRAIN_PARAMS: dict[str, float] = {
 
 #: 品种 → 机制参数（在默认参数上覆盖扦样/输送时长）。
 GRAIN_MECHANISM_CONFIG: dict[str, dict[str, float]] = {
-    "稻谷": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 10.0, "convey_duration": 10.0},
-    "玉米": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 10.0, "convey_duration": 10.0},
+    "稻谷": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 120.0, "convey_duration": 30.0},
+    "玉米": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 180.0, "convey_duration": 60.0},
     "黄豆": {**DEFAULT_GRAIN_PARAMS, "sampling_duration": 90.0, "convey_duration": 90.0},
 }
 
@@ -171,10 +172,8 @@ X2P_PORT: str = "/dev/ttyS0"
 X2P_SLAVE: int = 2
 
 #: 升降转速（r/min）。同时作为 move-timed 距离运动的速度上限（max_rpm）。
-#: 注意：X2P 文档标称电机额定 120 r/min，超过需现场确认安全，勿长期超速。
-#: 无联调覆盖时，X2P 位置模式控制器的软件 max_rpm 上限仍为 500。
-#: 真实流程默认指令 30 r/min；GRAIN_LIFT_RPM 仅对本轮联调同时覆盖指令与上限。
-X2P_RPM: int = 500
+#: 正式流程和测试共用；运行时覆盖需同时更新运动指令与位置模式上限。
+X2P_RPM: int = 800
 
 #: 升降时长（秒）。
 X2P_DURATION_S: float = 2.0

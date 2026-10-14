@@ -9,6 +9,7 @@ from pathlib import Path
 
 from grain_sampling_devices.mechanism_driver import _BaseMechanismController
 from grain_sampling_interhost.mechanism_controller import MechanismRuntime
+from grain_sampling_workflow.mechanism_config import get_grain_params
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,22 @@ class LiftWorkflowController(_BaseMechanismController):
         raise RuntimeError("PCA9685 output is forbidden in Lenovo serial-only mode")
 
     _write_hw_off = _write_hw
+
+    def hold_bin_open(self, depth, *, before_move=None, minimum_durations=None):
+        """Use the production UART callback and dwell, without PCA writes."""
+        names = ("shallow", "mid", "deep")
+        if depth not in names or before_move is None:
+            raise ValueError("valid bin depth and UART callback required")
+        params = get_grain_params(self.current_grain or "")
+        minimum = minimum_durations or {}
+        for name in (depth,) + tuple(n for n in names if n != depth):
+            if self._stop_flag.is_set():
+                raise RuntimeError("bin selection interrupted")
+            selected = name == depth
+            before_move(name, selected)
+            key = "open_duration" if selected else "close_duration"
+            if self._wait_bin_motion(max(float(params[key]), float(minimum.get(key, 0)))):
+                raise RuntimeError("bin selection interrupted")
 
     def emergency_stop(self):
         self._stop_flag.set()

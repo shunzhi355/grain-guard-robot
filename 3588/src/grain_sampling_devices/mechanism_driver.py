@@ -69,9 +69,18 @@ from utils.sampling_params import (
     PRESS_DOWN_CM,
     PRESS_UP_CM,
     PRESS_PAUSE_S,
+    X2P_RPM,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_bins(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        with self._bin_action_lock:
+            return method(self, *args, **kwargs)
+    return serialized
 
 
 def _press_cycle_depths(distance_mm: float) -> list[float]:
@@ -465,6 +474,7 @@ class _BaseMechanismController:
         self.pca9685 = pca9685
         self.mock_mode = bool(mock_mode)
         self._lock = threading.RLock()       # 保护 I2C 写 + _running + 仓门定时器
+        self._bin_action_lock = threading.RLock()
         self._bin_timers: dict[int, threading.Timer] = {}
         self._running: set = set()           # 运行中通道集合
         self._stop_flag = threading.Event()  # 急停/关闭标志
@@ -482,7 +492,7 @@ class _BaseMechanismController:
         #: dais516 x2p.MotionController 转换为内部位置段）；缺省为占位 no-op。
         self.lift_drive = None
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
-        self.lift_rpm = 30
+        self.lift_rpm = X2P_RPM
         self.lift_duration = 2.0
         # A paired automatic press cycle remembers its absolute encoder origin.
         # Keeping these fields in the shared base also makes mock controllers
@@ -693,6 +703,7 @@ class _BaseMechanismController:
         for key in ("convey_1", "convey_2"):
             self._act("convey", CHANNELS[key], action, duration=duration)
 
+    @_serialize_bins
     def open_bin(self, depth: str = "mid", duration=None) -> None:
         """开仓，depth 取值 shallow/mid/deep。独立标定 BIN_OPEN_PULSE=1200us。
 
@@ -721,24 +732,52 @@ class _BaseMechanismController:
         if timer is not None:
             timer.cancel()
 
-    def hold_bin_open(self, depth: str) -> None:
-        """正式流程：目标仓开门、其他两仓同时关门，到时各自回1500us。"""
+    @_serialize_bins
+    def hold_bin_open(self, depth: str, *, before_move=None, minimum_durations=None) -> None:
+        """目标仓开门后依次关闭其他两仓；全部完成才返回。
+
+        before_move 同步串口指令；等待期间不持有状态锁，急停可以中断。
+        """
         if depth not in ("shallow", "mid", "deep"):
             raise ValueError(f"unknown bin depth {depth!r}; expected shallow/mid/deep")
         params = get_grain_params(self.current_grain or "")
-        with self._lock:
-            try:
+        minimum_durations = minimum_durations or {}
+        try:
+            with self._lock:
                 for name in ("shallow", "mid", "deep"):
-                    selected = name == depth
+                    channel = CHANNELS[f"bin_{name}"]
+                    self._cancel_bin_timer(channel)
+                    if channel in self._running:
+                        self.set_stop(channel)
+            for name in (depth,) + tuple(n for n in ("shallow", "mid", "deep") if n != depth):
+                if self._stop_flag.is_set():
+                    raise RuntimeError("bin selection interrupted")
+                selected = name == depth
+                key = "open_duration" if selected else "close_duration"
+                duration = max(float(params[key]), float(minimum_durations.get(key, 0)))
+                if before_move is not None:
+                    before_move(name, selected)
+                with self._lock:
                     self._move_bin(
                         "hold_bin_open" if selected else "close_bin",
                         CHANNELS[f"bin_{name}"],
                         BIN_OPEN_PULSE if selected else BIN_CLOSE_PULSE,
-                        float(params["open_duration" if selected else "close_duration"]),
+                        float(params[key]),
                     )
-            except Exception:
-                self.emergency_stop()
-                raise
+                if self._wait_bin_motion(duration):
+                    raise RuntimeError("bin selection interrupted")
+                with self._lock:
+                    if self._stop_flag.is_set():
+                        raise RuntimeError("bin selection interrupted")
+                    channel = CHANNELS[f"bin_{name}"]
+                    self._cancel_bin_timer(channel)
+                    self.set_stop(channel)
+        except Exception:
+            self.emergency_stop()
+            raise
+
+    def _wait_bin_motion(self, duration: float) -> bool:
+        return self._stop_flag.wait(duration)
 
     def _move_bin(self, action: str, channel: int, pulse: float, duration) -> None:
         """仓门定时回中位；新动作取消旧回调，避免重试/换仓被旧定时器截断。"""
@@ -767,6 +806,7 @@ class _BaseMechanismController:
                 logger.exception("Failed to return bin channel %s to neutral", channel)
                 self.emergency_stop()
 
+    @_serialize_bins
     def close_all_bins(self, duration=None) -> None:
         """三仓同时按关门方向运行，动作到时保持1500us中位。"""
         if duration is None:
@@ -788,6 +828,7 @@ class _BaseMechanismController:
             duration = float(get_grain_params(self.current_grain or "")["close_duration"])
             self._move_bin("close_bin_auto", channel, BIN_CLOSE_PULSE, duration)
 
+    @_serialize_bins
     def close_bin(self, depth: str = "mid", duration=None) -> None:
         """关仓，depth 取值 shallow/mid/deep。独立标定 BIN_CLOSE_PULSE=1800us。"""
         key = f"bin_{depth}"
@@ -1088,7 +1129,7 @@ class MechanismController(_BaseMechanismController):
         #: dais516 x2p.MotionController 提供。
         self.lift_drive = lift_drive
         #: 升降默认转速（r/min）与时长（s），可现场标定覆盖。
-        self.lift_rpm = 30
+        self.lift_rpm = X2P_RPM
         self.lift_duration = 2.0
         self._clamp_timer: threading.Timer | None = None
 
