@@ -302,3 +302,52 @@ def test_int_and_text_map_version_are_the_same_map(window,monkeypatch,tmp_path):
     w._on_localization_status(startup);w._on_saved_map_preview(d)
     _select_goal_and_wait(w,app)
     assert w._map_page._btn_navigate.isEnabled()
+
+
+def write_preview_package(root):
+    """Minimal valid saved-map package usable by the preview loader."""
+    import hashlib, json
+    from PySide2.QtGui import QColor, QImage
+    preview = root/"map_package"/"preview"; preview.mkdir(parents=True)
+    (root/"map_package"/"PCD").mkdir(parents=True)
+    pcd = root/"map_package"/"PCD"/"GlobalMap.pcd"; pcd.write_bytes(b"point cloud")
+    image_path = preview/"map_preview.png"
+    picture = QImage(64,48,QImage.Format.Format_RGB32); picture.fill(QColor("white"))
+    assert picture.save(str(image_path),"PNG")
+    manifest = {"map_id":"map-a","map_version":1,"map_frame":"camera_init",
+                "pcd_sha256":hashlib.sha256(pcd.read_bytes()).hexdigest()}
+    manifest_path = preview/"map_manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    metadata = {"manifest_sha256":hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                "pcd_sha256":manifest["pcd_sha256"],
+                "preview_sha256":hashlib.sha256(image_path.read_bytes()).hexdigest(),
+                "world_bounds":[-2,3,-1,5],"z_slice":[0.4,2.0],"width_px":64,"height_px":48}
+    metadata_path = preview/"preview_metadata.json"
+    metadata_path.write_text(json.dumps(metadata))
+    pointer = root/"map_package"/"saved_map_preview.json"
+    pointer.write_text(json.dumps({"metadata_path":str(metadata_path),"candidate":False}))
+    return pointer
+
+
+def test_offline_snapshot_is_loaded_and_marked_unavailable(window,monkeypatch,tmp_path):
+    """A missing daemon must show the last map as an unverified snapshot."""
+    from grain_sampling_ui.robot_event_thread import RobotEventThread
+    from grain_sampling_workflow.saved_map_preview import preview_paths
+    w,app=window;monkeypatch.setenv("GRAIN_LOCAL_RUNTIME","1")
+    pointer = write_preview_package(tmp_path)
+    signature = tuple((str(p),p.stat().st_mtime_ns,p.stat().st_size) for p in preview_paths(pointer))
+    thread = RobotEventThread(client=SimpleNamespace(request=lambda *a,**k: (_ for _ in ()).throw(OSError("offline"))))
+    seen = []
+    thread.saved_map_updated.connect(seen.append)
+    thread._load_saved_preview(str(pointer),{},("offline","",False,signature),True)
+    assert len(seen)==1 and "error" not in seen[0]
+    data = seen[0]
+    assert data["offline"] is True and data["active_map_match"] is False
+    assert data["map_id"]=="map-a"
+    w._on_localization_status({"state":"READY","map_id":"map-a","map_version":1,"frame":"camera_init"})
+    w._on_saved_map_preview(data)
+    assert w._map_page.map_widget._saved_map_image is not None      # map stays visible
+    assert "离线" in w._map_page._slice_note.text()
+    assert not w._map_page._btn_navigate.isEnabled()
+    w._map_page.set_selected_goal(.3,.3)
+    assert not w._map_page._btn_navigate.isEnabled()

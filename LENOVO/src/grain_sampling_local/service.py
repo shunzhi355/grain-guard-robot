@@ -99,17 +99,35 @@ class LocalRobotService:
         self.config.directory.mkdir(parents=True, exist_ok=True)
         self.chassis.start()
         deadline = time.monotonic() + 3
+        verified = False
         while time.monotonic() < deadline:
             with self.chassis.lock:
                 link = self.chassis.link
                 state, received = link.mode_telemetry.snapshot() if link else (None, 0)
                 if state is not None and time.monotonic() - received < 1:
                     self._baseline_link, self._baseline_boot = link, state["boot"]
+                    verified = True
                     break
             time.sleep(0.02)
+        if not verified:
+            # Fail closed without taking the whole console down.  The socket has
+            # to stay reachable so the operator can see the hardware fault, but
+            # an unverified link is treated as latched: no navigation, no
+            # mechanism action and no arming until a fresh STM32 report is
+            # verified by an explicit operator reset.
+            self.latched = True
+            self.last_error = ("STM32 status not received; hardware link unverified, "
+                               "motion prohibited")
+            self.event("hardware_link_unverified", reason=self.last_error)
+        if verified:
+            self.mechanism.start()
         else:
-            raise RuntimeError("STM32 status not received; startup aborted")
-        self.mechanism.start()
+            # The mechanism runtime reads X2P state at startup; a failure there
+            # must not remove the console either.
+            try:
+                self.mechanism.start()
+            except Exception as exc:
+                self.event("mechanism_startup_deferred", error=str(exc))
         self.running.set()
         self.worker = threading.Thread(target=self._supervise, daemon=True, name="local-hardware-safety")
         self.worker.start()

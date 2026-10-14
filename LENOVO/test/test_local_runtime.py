@@ -1,5 +1,6 @@
 import importlib.util
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -77,6 +78,65 @@ def test_operator_reset_waits_for_mcu_clear_status(stack):
     assert not service.chassis.estop_latched
     assert not service.latched
     task(service)
+
+
+def test_unverified_stm32_link_keeps_console_up_and_prohibits_motion(tmp_path):
+    """No STM32 status must not remove the daemon: latch instead of aborting."""
+    config = LocalConfig(runtime_dir=str(tmp_path), suction_policy="external")
+    service, _peers = entry.create_service(config, simulate=True)
+
+    class UnverifiedChassis:
+        link = None
+        epoch = None
+        last_command = None
+        estop_latched = False
+
+        def __init__(self):
+            self.lock = threading.RLock()
+            self.mode = "unknown"
+
+        def start(self):
+            pass
+
+        def status(self):
+            return {"rc_mode": "unknown", "rc_valid": False, "faults": None,
+                    "motion_armed": False, "chassis_armed": False,
+                    "chassis_link": "offline", "estop_latched": False}
+
+        def stop(self, reason="stop"):
+            pass
+
+        def estop(self):
+            pass
+
+        def set_obstacle(self, value):
+            pass
+
+        def arm(self, goal_id):
+            raise AssertionError("must not arm while the STM32 link is unverified")
+
+        def clear_estop(self, **kwargs):
+            raise AssertionError("must not clear a latch without fresh MCU telemetry")
+
+        def close(self):
+            pass
+
+    service.chassis = UnverifiedChassis()
+    service.start()
+    try:
+        assert service.latched
+        assert "unverified" in service.last_error
+        status = service.local_request({"action": "status"})
+        assert status["safety_latched"] is True
+        assert status["recovery"]["reset_required"] is True
+        with pytest.raises(RuntimeError):
+            service.local_request({"action": "goal", "goal": {
+                "map_id": "test-map", "frame_id": "camera_init",
+                "pose": {"x_m": 1.0, "y_m": 1.0}}})
+        with pytest.raises(RuntimeError):
+            service.local_request({"action": "mechanism", "name": "set_grain", "grain": "稻谷"})
+    finally:
+        service.close()
 
 
 def test_host_estop_latch_is_not_reported_as_current_mcu_fault(stack):

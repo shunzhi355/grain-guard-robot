@@ -1021,13 +1021,16 @@ class MainWindow(QMainWindow):
 
     def _refresh_map_admission(self):
         data = self._saved_preview_data
+        offline = data.get("offline") is True
         ready = "error" not in data and data.get("active_map_match") is True
         reason = ""
         if "error" in data:
             reason = str(data.get("error") or "地图预览校验失败")
+        elif offline:
+            reason = "地图不可用：离线地图快照（本机硬件服务未就绪，未与实时定位校验）"
         elif data.get("candidate") is True or data.get("active_map_match") is not True:
             reason = "地图不可用：预览地图尚未切换为 Golden 当前定位地图"
-        if _env_flag("GRAIN_LOCAL_RUNTIME"):
+        if _env_flag("GRAIN_LOCAL_RUNTIME") and not offline:
             startup = self._localization_status
             # Manifest metadata may carry map_version as an int while the
             # Golden startup status carries the same value as text; compare the

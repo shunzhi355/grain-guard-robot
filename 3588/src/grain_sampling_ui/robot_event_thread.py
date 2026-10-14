@@ -104,6 +104,11 @@ class RobotEventThread(QThread):
                 if message != self._last_error:
                     self._last_error = message
                     self.error.emit(message)
+                if os.getenv("GRAIN_LOCAL_RUNTIME") == "1":
+                    # Keep showing the last selected map as an explicitly
+                    # unverified snapshot instead of falling back to the legacy
+                    # slice UI when the daemon is unavailable.
+                    self._saved_preview(None)
             self.msleep(100)
 
     def stop(self):
@@ -145,13 +150,15 @@ class RobotEventThread(QThread):
         pointer = os.environ.get("GRAIN_SAVED_MAP_PREVIEW")
         if not pointer:
             return
-        slam = status.get("slam") or {}
+        offline = not status
+        slam = (status or {}).get("slam") or {}
         from grain_sampling_workflow.saved_map_preview import preview_paths
         try:
             pointer_value = json.loads(Path(pointer).read_text(encoding="utf-8"))
             candidate = pointer_value.get("candidate") is True
             paths = preview_paths(pointer)
-            key = (slam.get("map_id"), slam.get("frame"), candidate,
+            key = ("offline" if offline else slam.get("map_id"),
+                   "" if offline else slam.get("frame"), candidate,
                    tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             key = ("error", str(exc))
@@ -164,17 +171,19 @@ class RobotEventThread(QThread):
         self._saved_preview_loading = True
         self.saved_map_updated.emit({"error": "正在校验保存地图…"})
         threading.Thread(target=self._load_saved_preview,
-                         args=(pointer, dict(slam), key), daemon=True,
+                         args=(pointer, dict(slam), key, offline), daemon=True,
                          name="saved-map-preview-loader").start()
 
-    def _load_saved_preview(self, pointer, slam, key):
+    def _load_saved_preview(self, pointer, slam, key, offline=False):
         from grain_sampling_workflow.saved_map_preview import load_saved_preview, preview_paths
         try:
             pointer_value = json.loads(Path(pointer).read_text(encoding="utf-8"))
             candidate = pointer_value.get("candidate") is True
-            data = load_saved_preview(pointer, map_id=slam.get("map_id"), frame=slam.get("frame"), allow_candidate=candidate)
+            data = load_saved_preview(pointer, map_id=slam.get("map_id"), frame=slam.get("frame"),
+                                      allow_candidate=candidate or offline)
             data["candidate"] = candidate
-            data["active_map_match"] = not candidate and data.get("map_id") == slam.get("map_id")
+            data["offline"] = bool(offline)
+            data["active_map_match"] = (not offline) and not candidate and data.get("map_id") == slam.get("map_id")
             image = QImage(data["image_path"])
             if image.isNull() or (image.width(), image.height()) != (data["width_px"], data["height_px"]):
                 raise ValueError("saved map image unreadable or dimensions differ")
