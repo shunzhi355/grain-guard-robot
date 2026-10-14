@@ -132,7 +132,8 @@ class LocalRobotService:
         self.worker = threading.Thread(target=self._supervise, daemon=True, name="local-hardware-safety")
         self.worker.start()
         self.event("service_started", simulation=self.simulation, navigation_mode=self.config.navigation_mode,
-                   hardware_backend="stm32+x2p", pca9685=False)
+                   hardware_backend="stm32+x2p", pca9685=False,
+                   lift_rpm=self.mechanism.controller.lift_rpm, source_file=__file__)
 
     def _check_hardware(self, *, require_rc_auto):
         if self.latched or self.mechanism.estop_latched:
@@ -457,6 +458,8 @@ class LocalRobotService:
             inputs = self._inputs if time.monotonic() - self._input_at < 0.3 else None
             map_id, map_version, map_frame = self._map_identity()
             return {"ok": True, "runtime": "lenovo-local", "simulation": self.simulation,
+                    "lift_rpm": self.mechanism.controller.lift_rpm,
+                    "configured_lift_rpm": self.config.lift_rpm,
                     "chassis": self.chassis.status(), "navigation": self.navigation,
                     "recovery": self._recovery_status(),
                     "lenovo_online": self.config.navigation_mode == "local" and inputs is not None,

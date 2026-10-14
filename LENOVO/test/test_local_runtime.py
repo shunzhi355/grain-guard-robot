@@ -44,6 +44,17 @@ def task(service):
     service.local_request({"action": "mechanism", "name": "set_grain", "grain": "稻谷"})
 
 
+def test_status_reports_actual_lift_speed_and_startup_source(stack):
+    service, _, _ = stack
+    startup = next(event for event in service.events if event["kind"] == "service_started")
+    assert startup["lift_rpm"] == 800
+    assert startup["source_file"].endswith("service.py")
+    service.mechanism.controller.lift_rpm = 600
+    status = service.local_request({"action": "status"})
+    assert status["lift_rpm"] == 600
+    assert status["configured_lift_rpm"] == 800
+
+
 def test_complete_two_point_three_bin_flow(tmp_path):
     config = LocalConfig(runtime_dir=str(tmp_path), suction_policy="external")
     result = run_workflow(config, entry.create_service)
