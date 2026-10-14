@@ -29,7 +29,23 @@ if [[ -n "$TASK043_GATE_MODE" ]]; then
     echo "UI deployment incomplete: Python, local_robot.py or live configuration missing" >&2; exit 1;
   }
   "$UI_PYTHON" -c 'import PySide6' || { echo "host Qt environment unavailable" >&2; exit 1; }
-  bash "$SCRIPT_DIR/task043_navigation_gate.sh" "--$TASK043_GATE_MODE"
+  # The supervisor keeps retrying in the background, so the console does not
+  # need the gate's full retry budget: a blocked gate must reach the operator
+  # quickly instead of leaving a dead-looking desktop icon for 90 seconds.
+  export TASK043_GATE_ATTEMPTS="${TASK043_GATE_ATTEMPTS:-1}"
+  export TASK043_SERVICE_WAIT_SEC="${TASK043_SERVICE_WAIT_SEC:-10}"
+  if ! bash "$SCRIPT_DIR/task043_navigation_gate.sh" "--$TASK043_GATE_MODE"; then
+    # ``--check`` is an explicit diagnostic request and must fail loudly.
+    if [[ "$TASK043_GATE_MODE" == check ]]; then
+      echo "task043 gate check failed" >&2
+      exit 1
+    fi
+    # The desktop shortcut runs with Terminal=false, so aborting here made the
+    # icon look dead whenever the hardware gate was blocked.  Open the operator
+    # console anyway so the hardware fault is visible and actionable; the UI
+    # itself cannot command motion while the local service is unavailable.
+    echo "[task043-ui] startup gate blocked (mode=$TASK043_GATE_MODE); opening the UI in fault-display mode" >&2
+  fi
   # Use the existing desktop session; do not install packages or alter X access.
   if [[ -z "${QT_QPA_PLATFORM:-}" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
     wayland_socket="${WAYLAND_DISPLAY:-wayland-0}"

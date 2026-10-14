@@ -1115,8 +1115,10 @@ class MainWindow(QMainWindow):
             from grain_sampling_workflow.robot_bridge import RobotClient
             try:
                 RobotClient().request("estop")
-            except (OSError, RuntimeError, ValueError):
-                logger.exception("Local UI shutdown stop unconfirmed")
+            except (OSError, RuntimeError, ValueError) as exc:
+                # A stopped/absent hardware daemon is a normal shutdown case and
+                # must not print a traceback the operator cannot act on.
+                logger.warning("Local UI shutdown stop unavailable: %s", exc)
         self.stop_ros()
         super().closeEvent(event)
 

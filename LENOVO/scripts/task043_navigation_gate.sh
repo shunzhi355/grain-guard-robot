@@ -111,8 +111,21 @@ ensure_local_service() {
   log "starting task-owned local hardware service"
   setsid nohup bash -lc "cd '$STAGING_ROOT' && exec .venv/bin/python LENOVO/scripts/local_robot.py serve --config LENOVO/config/local_robot.local-live.json --runtime-dir '$SOCKET_DIR' --live --attended --external-suction-confirmed" \
     >>"$LOG_DIR/local_robot.log" 2>&1 < /dev/null &
-  for _ in $(seq 1 30); do
+  # A healthy start needs a couple of seconds.  Waiting the full window is only
+  # useful while the service is actually alive: when the hardware daemon cannot
+  # reach the STM32 it exits immediately and the supervisor respawns it, so
+  # detect that loop and stop wasting the operator's time.
+  local wait_s="${TASK043_SERVICE_WAIT_SEC:-30}" first_pid
+  [[ "$wait_s" =~ ^[1-9][0-9]*$ ]] || wait_s=30
+  first_pid="$(pgrep -f "[l]ocal_robot.py serve" | head -1 || true)"
+  for _ in $(seq 1 "$wait_s"); do
     [[ -S "$SOCKET_DIR/control.sock" ]] && { log "local hardware service socket is ready"; return 0; }
+    local now_pid
+    now_pid="$(pgrep -f "[l]ocal_robot.py serve" | head -1 || true)"
+    if [[ -n "$first_pid" && -n "$now_pid" && "$now_pid" != "$first_pid" ]]; then
+      log "local hardware service keeps restarting (no STM32 status); not waiting further"
+      return 1
+    fi
     sleep 1
   done
   log "local hardware service did not create control.sock"
